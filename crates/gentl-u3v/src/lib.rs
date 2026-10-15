@@ -2086,9 +2086,11 @@ mod tests {
         assert_eq!(size, 6);
     }
 
-    /// TL lifecycle, interface enumeration (this machine always has root
-    /// hubs), and every invalid-handle/index/id path. One test on
-    /// purpose: the TL module is process-wide.
+    /// TL lifecycle, interface enumeration, and every invalid-handle/index/id
+    /// path. One test on purpose: the TL module is process-wide. Machines
+    /// without a USB host controller (a VM/CI runner) legitimately
+    /// enumerate zero interfaces — only the hardware-independent checks
+    /// run there.
     #[test]
     fn tl_lifecycle_and_error_paths() {
         GCCloseLib();
@@ -2123,10 +2125,32 @@ mod tests {
         );
         assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("U3V"));
 
-        // At least one USB root hub => at least one interface.
+        // At least one USB root hub => at least one interface. A machine
+        // without a USB host controller (e.g. a CI runner VM) enumerates
+        // zero interfaces — that is spec-correct; only the checks that
+        // hold with no interface at all run in that case.
         let mut n = 0u32;
         assert_eq!(TLGetNumInterfaces(tl, &mut n), GC_ERR_SUCCESS);
-        assert!(n >= 1, "this machine enumerates USB root hubs");
+        if n == 0 {
+            eprintln!("no USB root hubs on this machine; skipping interface-dependent checks");
+            let mut idbuf = [0u8; 256];
+            let mut size = idbuf.len();
+            assert_eq!(
+                TLGetInterfaceID(tl, 0, idbuf.as_mut_ptr() as *mut c_char, &mut size),
+                GC_ERR_INVALID_INDEX
+            );
+            let bad_id = b"USB\\ROOT_HUB99\\bogus\0".as_ptr() as *const c_char;
+            let mut size = 0usize;
+            assert_eq!(
+                TLGetInterfaceInfo(tl, bad_id, INTERFACE_INFO_TLTYPE, &mut dtype, ptr::null_mut(), &mut size),
+                GC_ERR_INVALID_ID
+            );
+            let mut tl2: TLHandle = ptr::null_mut();
+            assert_eq!(TLOpen(&mut tl2), GC_ERR_RESOURCE_IN_USE);
+            assert_eq!(IFClose(tl), GC_ERR_INVALID_HANDLE);
+            assert_eq!(TLClose(tl), GC_ERR_SUCCESS);
+            return;
+        }
 
         // Interface ID round-trip and info.
         let mut idbuf = [0u8; 256];
