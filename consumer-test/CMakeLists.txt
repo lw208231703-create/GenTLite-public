@@ -4,8 +4,18 @@ project(gentlite_consumer_test LANGUAGES CXX)
 # GenICam SDK (GenApi reference implementation). Headers under
 # library/CPP/include, GenTL.h/PFNC.h at the root, VC141 MD import libs under
 # library/CPP/lib/Win64_x64, runtime DLLs under bin/Win64_x64.
-set(GENAPI_ROOT "D:/code-lib/camer_UI/GenICam" CACHE PATH
-    "GenICam SDK root (override with -DGENAPI_ROOT=...)")
+# No default location: point cmake at your SDK, e.g.
+#   cmake -B build -DGENAPI_ROOT="C:/Program Files/GenICam"
+set(GENAPI_ROOT "" CACHE PATH
+    "Root of the EMVA GenICam SDK (contains library/CPP/include)")
+
+if(NOT GENAPI_ROOT)
+    message(FATAL_ERROR
+        "GENAPI_ROOT is not set. This project needs the EMVA GenICam SDK\n"
+        "(the GenApi reference implementation, e.g. GenICam_Package). "
+        "Configure with:\n"
+        "  cmake -B build -DGENAPI_ROOT=<path to the GenICam SDK>")
+endif()
 
 find_path(GENAPI_INCLUDE_DIR
     NAMES GenApi/GenApi.h

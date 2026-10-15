@@ -6,7 +6,7 @@
 # test_genapi.exe against the DLL.
 #
 # Environment overrides:
-#   GENAPI_ROOT  GenICam SDK root        (default D:/code-lib/camer_UI/GenICam)
+#   GENAPI_ROOT  GenICam SDK root        (REQUIRED: no default — pass yours)
 #   GENERATOR    CMake generator         (default "Visual Studio 18 2026")
 #   BUILD_DIR    CMake build directory   (default <repo>/consumer-test/build)
 #
@@ -15,7 +15,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GENAPI_ROOT="${GENAPI_ROOT:-D:/code-lib/camer_UI/GenICam}"
+if [ -z "$GENAPI_ROOT" ]; then
+    echo "GENAPI_ROOT is not set. Pass the path to your EMVA GenICam SDK," >&2
+    echo "e.g.  GENAPI_ROOT='C:/Program Files/GenICam' bash $0" >&2
+    exit 2
+fi
 GENERATOR="${GENERATOR:-Visual Studio 18 2026}"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/consumer-test/build}"
 CONFIG="${CONFIG:-Debug}"
