@@ -1,6 +1,6 @@
 # GenTLite
 
-[![CI](https://github.com/YOUR_ORG/GenTLite/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_ORG/GenTLite/actions/workflows/ci.yml)
+[![CI](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml/badge.svg)](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
 通用 GenTL producer（`.cti`），面向 GigE Vision 与 USB3 Vision 工业相机。
