@@ -3,6 +3,8 @@
 [![CI](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml/badge.svg)](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
+[English](README.md) | **简体中文**
+
 通用 GenTL producer（`.cti`），面向 GigE Vision 与 USB3 Vision 工业相机。
 一个库驱动所有合规相机——海康机器人、Basler等完成参数调节与图像采集，主机端无需任何厂商 SDK。
 

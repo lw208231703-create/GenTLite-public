@@ -3,6 +3,8 @@
 [![CI](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml/badge.svg)](https://github.com/lw208231703-create/GenTLite-public/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow.svg)](LICENSE)
 
+**English** | [简体中文](README.zh-CN.md)
+
 A universal GenTL producer (`.cti`) for GigE Vision and USB3 Vision
 machine-vision cameras. One library drives every compliant camera —
 Hikvision, Basler, etc. — for parameter control and image acquisition,
