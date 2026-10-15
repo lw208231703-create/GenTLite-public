@@ -4,7 +4,7 @@ project(gentlite_consumer_test LANGUAGES CXX)
 # GenICam SDK (GenApi reference implementation). Headers under
 # library/CPP/include, GenTL.h/PFNC.h at the root, VC141 MD import libs under
 # library/CPP/lib/Win64_x64, runtime DLLs under bin/Win64_x64.
-set(GENAPI_ROOT "C:/GenICam" CACHE PATH
+set(GENAPI_ROOT "D:/code-lib/camer_UI/GenICam" CACHE PATH
     "GenICam SDK root (override with -DGENAPI_ROOT=...)")
 
 find_path(GENAPI_INCLUDE_DIR
