@@ -6,7 +6,7 @@
 # test_genapi.exe against the DLL.
 #
 # Environment overrides:
-#   GENAPI_ROOT  GenICam SDK root        (default C:/GenICam)
+#   GENAPI_ROOT  GenICam SDK root        (default D:/code-lib/camer_UI/GenICam)
 #   GENERATOR    CMake generator         (default "Visual Studio 18 2026")
 #   BUILD_DIR    CMake build directory   (default <repo>/consumer-test/build)
 #
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-GENAPI_ROOT="${GENAPI_ROOT:-C:/GenICam}"
+GENAPI_ROOT="${GENAPI_ROOT:-D:/code-lib/camer_UI/GenICam}"
 GENERATOR="${GENERATOR:-Visual Studio 18 2026}"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/consumer-test/build}"
 CONFIG="${CONFIG:-Debug}"
