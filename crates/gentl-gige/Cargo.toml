@@ -1,0 +1,30 @@
+[package]
+name = "gentl-gige"
+description = "GigE Vision GenTL producer (.cti): GVCP control channel + GVSP streaming"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[lib]
+# rlib alongside cdylib so `cargo test` can link integration tests against
+# the crate; the loadable .cti artifact is still the cdylib.
+crate-type = ["cdylib", "rlib"]
+name = "gentl_gige"
+
+[dependencies]
+gentl-core = { path = "../gentl-core" }
+gentl-gvcp = { path = "../gentl-gvcp" }
+windows-sys = { version = "0.59", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+gentl-simulator = { path = "../gentl-simulator" }
+# Real-consumer test: loads the built `gentl_gige.dll` by path and resolves
+# every GenTL 1.6 export at runtime (tests/consumer_dll.rs).
+libloading = "0.8"
+# ZIPped camera XML (spec §14.1), example tools only
+zip = { version = "2", default-features = false, features = ["deflate"] }

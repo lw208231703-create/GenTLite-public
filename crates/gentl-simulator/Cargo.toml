@@ -1,0 +1,10 @@
+[package]
+name = "gentl-simulator"
+description = "Software-simulated GigE Vision camera (GVCP responder + fixed register map + fake stream)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+gentl-core = { path = "../gentl-core" }
+gentl-gvcp = { path = "../gentl-gvcp" }

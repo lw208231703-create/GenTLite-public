@@ -1,0 +1,9 @@
+[package]
+name = "gentl-gvcp"
+description = "GVCP wire format + client/server transactions + GigE bootstrap register map (shared by gentl-gige and gentl-simulator)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+gentl-core = { path = "../gentl-core" }

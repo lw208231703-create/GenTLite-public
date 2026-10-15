@@ -1,0 +1,17 @@
+# Rust
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Reference docs (third-party copyrighted: AIA/A3, EMVA) — local only
+/docs/
+
+# Build output (packaged artifacts)
+*.cti
+
+# IDE / OS
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
