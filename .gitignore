@@ -1,13 +1,21 @@
 # Rust
 /target/
-**/*.rs.bk
 Cargo.lock
+**/*.rs.bk
 
-# Reference docs (third-party copyrighted: AIA/A3, EMVA) — local only
-/docs/
-
-# Build output (packaged artifacts)
+# Packaged artifacts
 *.cti
+
+# Third-party reference documents (AIA/A3, EMVA copyrights) — local only
+/docs/*.pdf
+/docs/GenICam_Package_2025.10/
+
+# Camera bring-up captures (test artifacts)
+/camera_dump.xml
+/u3v_camera_dump.xml
+
+# consumer-test build output
+consumer-test/build/
 
 # IDE / OS
 .vs/
@@ -15,3 +23,8 @@ Cargo.lock
 .idea/
 Thumbs.db
 .DS_Store
+
+# Engineering records (internal decision log, spec fact tables) — local only
+/notes/
+# Internal compliance/audit reports — local only
+/compliance/
