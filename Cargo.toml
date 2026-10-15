@@ -6,6 +6,7 @@ members = [
     "crates/gentl-gige",
     "crates/gentl-simulator",
     "crates/gentl-u3v",
+    "crates/gentl-packager",
 ]
 
 [workspace.package]

@@ -1,0 +1,4 @@
+[alias]
+# Build the workspace and produce .cti twins of the producer DLLs.
+cti = "run -p gentl-packager --release --"
+ctid = "run -p gentl-packager --"

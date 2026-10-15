@@ -23,11 +23,14 @@ Written in Rust, C ABI, MIT licensed.
 ## Quick start
 
 ```bash
-cargo build --release    # → gentl_gige.dll / gentl_u3v.dll, two GenTL producers
+cargo cti    # build the workspace, then place gentl_gige.cti /
+             # gentl_u3v.cti next to the DLLs in target/release/
+             # (cargo ctid for a debug build; plain cargo build --release
+             # still works, it just skips the .cti copies)
 ```
 
-Point any GenTL consumer at the DLL (add its directory to
-`GENICAM_GENTL64_PATH`, or load it explicitly) — pylon, HALCON, or your
+Point any GenTL consumer at the build directory (add it to
+`GENICAM_GENTL64_PATH`, or load a `.cti` explicitly) — pylon, HALCON, or your
 own GenApi code. `consumer-test/` is a C++ reference; run
 `cargo run --example grab_u3v -- <id> 100` to grab frames, or
 `cargo test --workspace` for a hardware-free regression.

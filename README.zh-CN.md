@@ -20,11 +20,14 @@ Rust 实现，C ABI，MIT 许可。
 ## 快速开始
 
 ```bash
-cargo build --release    # 产出 gentl_gige.dll / gentl_u3v.dll，即两个 GenTL producer
+cargo cti    # 编译整个 workspace，并在 target/release/ 的 DLL 旁
+             # 生成 gentl_gige.cti / gentl_u3v.cti
+             # （cargo ctid 出 debug 版；直接 cargo build --release
+             #  也可以，只是不会生成 .cti 副本）
 ```
 
-把 DLL 指给任意 GenTL consumer（加入 `GENICAM_GENTL64_PATH` 或显式
-加载），pylon / HALCON / 自研 GenApi 代码皆可。`consumer-test/` 提供
+把构建目录指给任意 GenTL consumer（加入 `GENICAM_GENTL64_PATH` 或显式
+加载 `.cti`），pylon / HALCON / 自研 GenApi 代码皆可。`consumer-test/` 提供
 C++ 参考实现；`cargo run --example grab_u3v -- <id> 100` 可直接收图，
 `cargo test --workspace` 无硬件回归。
 
