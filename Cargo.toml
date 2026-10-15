@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
     "crates/gentl-core",
+    "crates/gentl-gvcp",
+    "crates/gentl-gige",
+    "crates/gentl-simulator",
 ]
 
 [workspace.package]
