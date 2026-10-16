@@ -57,6 +57,26 @@ pub struct ReceiverStats {
     pub payload_bytes: u64,
 }
 
+impl ReceiverStats {
+    /// Add another receiver's counters into `self` (M3-4a multi-channel
+    /// fan-out reporting: one stats set per channel, one sum per stream).
+    pub fn merge(&mut self, other: &ReceiverStats) {
+        self.datagrams += other.datagrams;
+        self.malformed += other.malformed;
+        self.resend_packets += other.resend_packets;
+        self.prev_block_dropped_marks += other.prev_block_dropped_marks;
+        self.orphan_packets += other.orphan_packets;
+        self.frames_completed += other.frames_completed;
+        self.frames_delivered += other.frames_delivered;
+        self.frames_dropped_incomplete += other.frames_dropped_incomplete;
+        self.frames_dropped_no_buffer += other.frames_dropped_no_buffer;
+        self.frames_dropped_too_small += other.frames_dropped_too_small;
+        self.frames_dropped_not_acquiring += other.frames_dropped_not_acquiring;
+        self.frames_dropped_unsupported += other.frames_dropped_unsupported;
+        self.payload_bytes += other.payload_bytes;
+    }
+}
+
 /// One open block being reassembled.
 struct Block {
     block_id: u64,

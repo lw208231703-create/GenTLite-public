@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::net::Ipv4Addr;
 
-use gentl_simulator::{SimCamera, SimConfig};
+use gentl_simulator::{SimCamera, SimConfig, StreamingProtocol};
 
 fn main() {
     let cam = SimCamera::new(SimConfig {
@@ -16,6 +16,7 @@ fn main() {
         model_name: "SimCam".into(),
         device_version: "1.0.0".into(),
         serial_number: "SIM-0001".into(),
+        streaming: StreamingProtocol::GvspOnly,
     });
     let xml = cam.xml();
     match std::env::args().nth(1) {

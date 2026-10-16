@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::ptr;
 
 use gentl_core::types::*;
-use gentl_simulator::{SimCamera, SimConfig, REG_EXPOSURE_TIME};
+use gentl_simulator::{SimCamera, SimConfig, StreamingProtocol, REG_EXPOSURE_TIME};
 use libloading::Library;
 
 const DLL_NAME: &str = "gentl_gige.dll";
@@ -458,6 +458,7 @@ fn consumer_dll_end_to_end() {
         model_name: "SimCam".into(),
         device_version: "1.0.0".into(),
         serial_number: "SIM-0001".into(),
+        streaming: StreamingProtocol::GvspOnly,
     });
     let server = cam.start(0).expect("start sim camera");
     let port = server.local_port().expect("server port");

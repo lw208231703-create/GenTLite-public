@@ -12,7 +12,7 @@ use std::ptr;
 
 use gentl_core::types::*;
 use gentl_gige::*;
-use gentl_simulator::{SimCamera, SimConfig, REG_EXPOSURE_TIME};
+use gentl_simulator::{SimCamera, SimConfig, StreamingProtocol, REG_EXPOSURE_TIME};
 
 const MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 const DEVICE_ID: &str = "00:11:22:33:44:55";
@@ -50,6 +50,7 @@ fn control_plane_end_to_end() {
         model_name: "SimCam".into(),
         device_version: "1.0.0".into(),
         serial_number: "SIM-0001".into(),
+        streaming: StreamingProtocol::GvspOnly,
     });
     let server = cam.start(0).expect("start sim camera");
     let port = server.local_port().expect("server port");

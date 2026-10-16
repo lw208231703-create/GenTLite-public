@@ -100,6 +100,10 @@ pub struct GevDevice {
     pub id: String,
     pub discovery: DiscoveryInfo,
     pub access: DeviceAccess,
+    /// Streaming transport selected at open time from the device's
+    /// Streaming Capability register (spec §36.27/§36.38). Only GVSP is
+    /// implemented; a GVRSP-only device is rejected at open.
+    pub transport: StreamTransport,
     /// Shared with the heartbeat thread; `GvcpClient` documents that
     /// sharing needs external synchronization.
     pub client: Arc<Mutex<GvcpClient>>,
@@ -110,6 +114,14 @@ pub struct GevDevice {
     /// GC_ERR_RESOURCE_IN_USE).
     pub opened_streams: Mutex<HashSet<String>>,
     pub parent: Weak<GevInterface>,
+}
+
+/// Streaming transport negotiated with the device (spec §36.27 capability,
+/// §36.38 selection). GVSP is the only implemented backend; the variant
+/// list is where a future GVRSP (RoCEv2, spec Part 4) backend plugs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamTransport {
+    Gvsp,
 }
 
 /// The remote device port handed out by `DevGetPort`. Wraps the device

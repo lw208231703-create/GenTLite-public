@@ -33,6 +33,25 @@ pub struct SimConfig {
     pub device_version: String,
     /// Bootstrap Serial Number slot, ≤ 16 bytes.
     pub serial_number: String,
+    /// Which streaming protocol(s) the device advertises via the Streaming
+    /// Capability register (spec §36.27) and accepts via the Streaming
+    /// Configuration register (spec §36.38, Table 36-2).
+    pub streaming: StreamingProtocol,
+}
+
+/// Streaming protocol mode of a simulated device (spec §36.27/§36.38).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamingProtocol {
+    /// GVSP only: Streaming Capability (0x092C) reads 0 (the default).
+    GvspOnly,
+    /// GVSP and GVRSP: capability bit 5 (gvrsp_mode_supported) plus bit 3
+    /// (SCEBAx_supported, mandatory when GVRSP is supported — CR-665cd);
+    /// the active mode still factory-defaults to GVSP.
+    Both,
+    /// GVRSP only: capability bits 4|5; GVSP stream channel registers
+    /// answer GEV_STATUS_ACCESS_DENIED (CR-671cd) and mode 0 writes are
+    /// rejected per Table 36-2.
+    GvrspOnly,
 }
 
 impl SimConfig {
@@ -64,6 +83,13 @@ pub struct StreamConfig {
     pub height: u32,
     /// PFNC pixel format (Mono8/Mono16 supported).
     pub pixel_format: u32,
+    /// Number of GVSP stream channels (SCPx blocks, spec §36.57). Each
+    /// channel is an independent block sequence to its own (SCDAx,
+    /// host_port) target; channels 1..511 are optional in the spec, so a
+    /// device may answer GEV_STATUS_INVALID_ADDRESS past its count — the
+    /// sim answers it past `channels`. Must be >= 1; smaller values are
+    /// clamped (a transmitter device always has channel 0).
+    pub channels: u16,
 }
 
 impl Default for StreamConfig {
@@ -72,6 +98,7 @@ impl Default for StreamConfig {
             width: 1024,
             height: 768,
             pixel_format: 0x0108_0001, // Mono8 (include/PFNC.h)
+            channels: 1,
         }
     }
 }

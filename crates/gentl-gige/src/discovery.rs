@@ -6,7 +6,9 @@
 //! (notes/gvcp-wirefacts.md §16.1). Test hook: `GENTLITE_DISCOVERY_TARGETS`
 //! (comma-separated `ip:port`) adds unicast targets whose replies are
 //! attached without subnet filtering (loopback devices are not reachable
-//! via broadcast and 127.0.0.0/8 has no GenTL interface).
+//! via broadcast and 127.0.0.0/8 has no GenTL interface). Stream hook:
+//! `GENTLITE_GEV_STREAM_CHANNELS` (see [`desired_stream_channels`]) caps
+//! how many GVSP stream channels one DataStream fans out to.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
@@ -150,6 +152,24 @@ fn extra_targets() -> Vec<(Ipv4Addr, u16)> {
         .collect()
 }
 
+/// Desired GVSP stream channel count from `GENTLITE_GEV_STREAM_CHANNELS`.
+/// Unset or unparseable: 8. `0`: open every channel the device implements
+/// (probe all 512 slots — channels 1..511 are optional, spec §36.57).
+/// Anything else is clamped to 1..=512. The opened count is always
+/// min(desired, device channels); channel open failures degrade to the
+/// channels already opened (see `GevDataStream::start`).
+pub(crate) fn desired_stream_channels() -> u32 {
+    const DEFAULT: u32 = 8;
+    match std::env::var("GENTLITE_GEV_STREAM_CHANNELS") {
+        Ok(v) => match v.trim().parse::<u32>() {
+            Ok(0) => 512,
+            Ok(n) => n.clamp(1, 512),
+            Err(_) => DEFAULT,
+        },
+        Err(_) => DEFAULT,
+    }
+}
+
 /// Run GVCP discovery across ALL NICs for the MVS-style aggregate
 /// interface: every NIC's directed broadcast plus the global discovery
 /// address, plus explicit extra targets. Replies are de-duplicated by
@@ -214,5 +234,33 @@ mod tests {
         assert_eq!(prefix_len_to_mask(24), 0xFFFFFF00);
         assert_eq!(prefix_len_to_mask(0), 0);
         assert_eq!(prefix_len_to_mask(32), u32::MAX);
+    }
+
+    /// The only reader of `GENTLITE_GEV_STREAM_CHANNELS` in this test
+    /// binary; safe to set the variable despite test-thread parallelism.
+    #[test]
+    fn stream_channels_env_parsing() {
+        use std::sync::{Mutex, OnceLock};
+        // Serialize against ourselves (env is process-global).
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _g = LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let var = "GENTLITE_GEV_STREAM_CHANNELS";
+        let old = std::env::var(var).ok();
+
+        std::env::remove_var(var);
+        assert_eq!(desired_stream_channels(), 8, "unset defaults to 8");
+        std::env::set_var(var, "0");
+        assert_eq!(desired_stream_channels(), 512, "0 = probe all channels");
+        std::env::set_var(var, "3");
+        assert_eq!(desired_stream_channels(), 3);
+        std::env::set_var(var, "99999");
+        assert_eq!(desired_stream_channels(), 512, "clamped to the 512-slot map");
+        std::env::set_var(var, "garbage");
+        assert_eq!(desired_stream_channels(), 8, "unparseable defaults");
+
+        match old {
+            Some(v) => std::env::set_var(var, v),
+            None => std::env::remove_var(var),
+        }
     }
 }

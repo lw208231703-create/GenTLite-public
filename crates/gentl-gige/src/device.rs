@@ -14,7 +14,7 @@ use gentl_gvcp::registers;
 use gentl_gvcp::wire::GEV_STATUS_ACCESS_DENIED;
 use gentl_gvcp::GvcpClient;
 
-use crate::cti::{DeviceAccess, DeviceEntry, GevDevice, GevInterface};
+use crate::cti::{DeviceAccess, DeviceEntry, GevDevice, GevInterface, StreamTransport};
 
 /// Max payload per READMEM: the count field is a u16 and must be a
 /// multiple of 4; 512 bytes per transaction keeps datagrams small.
@@ -42,6 +42,33 @@ impl GevDevice {
             return Err(e);
         }
 
+        // Transport selection (spec §36.27/§36.38): use the fastest
+        // transport both sides support. The GVRSP (RoCEv2, Part 4) host
+        // backend is not implemented yet, so a GVRSP-only device is
+        // rejected here with a precise error instead of failing
+        // mysteriously at stream time; a dual-mode device keeps running
+        // on GVSP (its factory-default mode). A read failure falls back
+        // to assuming GVSP (R-607s guarantees at least one transport;
+        // pre-3.0 devices report neither capability bit).
+        let capability = client.read_reg(registers::STREAMING_CAPABILITY).unwrap_or(0);
+        let gvsp_supported = capability & registers::SCAP_GVSP_MODE_NOT_SUPPORTED == 0;
+        let gvrsp_supported = capability & registers::SCAP_GVRSP_MODE_SUPPORTED != 0;
+        let transport = match (gvsp_supported, gvrsp_supported) {
+            (false, true) => {
+                return Err(GentlError::NotImplemented(
+                    "device requires GVRSP (RoCEv2) streaming, which this producer does not implement",
+                ));
+            }
+            (false, false) => {
+                // Neither transport advertised: violates R-607s; treat as
+                // a non-conformant device rather than guessing.
+                return Err(GentlError::Io(
+                    "device reports no supported streaming protocol (R-607s violation)".into(),
+                ));
+            }
+            (true, _) => StreamTransport::Gvsp,
+        };
+
         // Heartbeat period = timeout/3 (spec §10.5). Read failures fall
         // back to the spec default of 3000 ms.
         let timeout_ms = client.read_reg(registers::HEARTBEAT_TIMEOUT).unwrap_or(3000);
@@ -67,6 +94,7 @@ impl GevDevice {
             id: entry.id.clone(),
             discovery: entry.discovery.clone(),
             access,
+            transport,
             client,
             stop_heartbeat: stop,
             heartbeat_thread: Mutex::new(Some(thread)),

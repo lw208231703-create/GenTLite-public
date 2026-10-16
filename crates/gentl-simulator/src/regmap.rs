@@ -17,9 +17,19 @@
 //!   monitor restrictions of spec §10.1 are not enforced).
 //!
 //! M2: writing a non-zero host port to SCP0 opens the fake-image GVSP
-//! stream channel (a [`crate::emitter::StreamEmitter`] thread targeting
-//! SCDA0); writing 0 closes it. The transmitter owns no register-map locks,
+//! stream channel (a [`crate::emitter::StreamScheduler`] stripe targets
+//! SCDA0); writing 0 closes it. The scheduler owns no register-map locks,
 //! so stopping it can never deadlock against reads or writes here.
+//!
+//! M3-4a: the same open/close hook serves every stream channel: channel x's
+//! registers live at 0x0D00 + 0x40*x (SCPx/SCPSx/SCPDx/SCDAx, spec
+//! §36.57–§36.60) and all open channels are served by the camera's single
+//! frame-striped scheduler thread (whole frames round-robined, so
+//! cross-channel blocks never overlap — the multi-stream area-scan model).
+//! The register map models `StreamConfig::channels` channels; accesses
+//! past that count answer GEV_STATUS_INVALID_ADDRESS (§36.57: channels
+//! 1..511 are optional, so that answer is how an application probes the
+//! count).
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
@@ -29,8 +39,8 @@ use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 use gentl_gvcp::DeviceHandler;
 
-use crate::emitter::{StreamEmitter, StreamParams, DEFAULT_PAYLOAD};
-use crate::{SimConfig, StreamConfig};
+use crate::emitter::{ChannelSink, StreamParams, StreamScheduler, DEFAULT_PAYLOAD};
+use crate::{SimConfig, StreamConfig, StreamingProtocol};
 
 // Generic error (spec Appendix B.21); gentl-gvcp's wire module does not
 // export it. Returned when the stream channel's UDP socket cannot be
@@ -56,17 +66,25 @@ pub const XML_BASE: u32 = 0x0010_0000;
 // common 3.0-era cameras. Spec §36.1 assigns 0x00030000 to spec-3.0 devices.
 const VERSION_VALUE: u32 = 0x0002_0002;
 
-// Device Mode (spec §36.2): bit0 deprecated-always-1, device_class =
-// Transmitter(0), single link configuration, character_set_index = 2 (ASCII).
-const DEVICE_MODE_VALUE: u32 = 0x0200_0001;
+// Device Mode (1.2 §27.2 / 3.0 §36.2, MSB-first print): print bit 0 is the
+// endianness bit — deprecated since 2.0 and MUST be set to 1 for backward
+// compatibility (3.0 §36.2: "must be set to 1"); device_class = 0
+// (Transmitter), single link, character set index = 1 (UTF-8) in the low
+// byte. Aravis sets the same top bit (DEVICE_MODE_BIG_ENDIAN = 1<<31).
+const DEVICE_MODE_VALUE: u32 = 0x8000_0001;
 
-// Net If Configuration writable bits: only the supported P/L bits plus
-// PAUSE (spec §36.6); the sim does not offer DHCP.
-const NET_IF_CFG_WRITABLE: u32 = reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA | 0x3;
+// Net If Configuration writable bits (spec §36.6): all three configuration
+// flags (persistent / DHCP / LLA) are writable; the sim stores them, but
+// the DHCP bit has no behavioral effect (the sim runs no DHCP client).
+const NET_IF_CFG_WRITABLE: u32 =
+    reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA;
 
-// GVCP Capability (spec §36.29): user-defined-name(0), serial-number(1),
-// the three deprecated always-1 bits (9, 16, 26), concatenation(31).
-const GVCP_CAPABILITY_VALUE: u32 = 0x8401_0203;
+// GVCP Capability (1.2 §27.28, MSB-first print): user-defined-name and
+// serial-number registers are implemented. Everything else the table
+// offers (heartbeat disable, manifest table, test data, packet resend,
+// write memory, concatenation, events, ...) is genuinely unsupported in
+// the sim and stays clear.
+const GVCP_CAPABILITY_VALUE: u32 = 0x8000_0000 | 0x4000_0000;
 
 // Timestamp tick frequency (spec §36.31): device-specific rate chosen as
 // 1 MHz (sim is not an IEEE 1588 device); the value registers count
@@ -97,7 +115,9 @@ struct BootReg {
 
 /// Implemented bootstrap registers of interface #0. Only these slots are
 /// mapped; every other address in 0x0000..0x0FFF is reserved and answers
-/// GEV_STATUS_INVALID_ADDRESS.
+/// GEV_STATUS_INVALID_ADDRESS. The stream channel registers SCP0/SCPS0/
+/// SCPD0/SCDA0 are intentionally absent: they (and their channel 1..
+/// counterparts) are served by the per-channel map, see [`Inner::channels`].
 const BOOT_REGS: &[BootReg] = &[
     br(reg::VERSION, 4, Ro),
     br(reg::DEVICE_MODE, 4, Ro),
@@ -119,6 +139,8 @@ const BOOT_REGS: &[BootReg] = &[
     br(reg::NUM_NETWORK_INTERFACES, 4, Ro),
     br(reg::NUM_MESSAGE_CHANNELS, 4, Ro),
     br(reg::NUM_STREAM_CHANNELS, 4, Ro),
+    br(reg::STREAMING_CAPABILITY, 4, Ro),
+    br(reg::MESSAGE_CHANNEL_CAPABILITY, 4, Ro),
     br(reg::GVCP_CAPABILITY, 4, Ro),
     br(reg::HEARTBEAT_TIMEOUT, 4, Rw),
     br(reg::TIMESTAMP_TICK_FREQ_HIGH, 4, Ro),
@@ -126,13 +148,31 @@ const BOOT_REGS: &[BootReg] = &[
     br(reg::TIMESTAMP_VALUE_HIGH, 4, Ro),
     br(reg::TIMESTAMP_VALUE_LOW, 4, Ro),
     br(reg::CCP, 4, Rw),
-    br(reg::SCP0, 4, Rw),
-    br(reg::SCPS0, 4, Rw),
-    br(reg::SCPD0, 4, Rw),
-    br(reg::SCDA0, 4, Rw),
+    br(reg::STREAMING_CONFIGURATION, 4, Rw),
 ];
 
 const BOOT_LEN: u32 = 0x1000;
+
+/// Word index of the SCPx value inside a channel's register block.
+const W_SCP: usize = 0;
+/// Word index of the SCPSx value inside a channel's register block.
+const W_SCPS: usize = 1;
+/// Word index of the SCPDx value inside a channel's register block.
+const W_SCPD: usize = 2;
+/// Word index of the SCDAx value inside a channel's register block.
+const W_SCDA: usize = 3;
+
+/// Map a stream channel register offset (spec §36.57–§36.60) to its word
+/// index inside the channel's register block. Only called with offsets
+/// validated by [`reg::stream_channel_addr`].
+fn channel_word_index(off: u32) -> usize {
+    match off {
+        reg::SCP_OFFSET => W_SCP,
+        reg::SCPS_OFFSET => W_SCPS,
+        reg::SCPD_OFFSET => W_SCPD,
+        _ => W_SCDA,
+    }
+}
 
 /// CCP (0x0A00) state per spec §10.1/§36.46. The switchover key field reads
 /// as 0 and CSE is not granted (GVCP Capability bit 10 = 0).
@@ -155,6 +195,11 @@ struct Inner {
     ccp: CcpState,
     heartbeat_ms: u32,
     ts_epoch: Instant,
+    /// Stream channel registers per channel (spec §36.57–§36.60), indexed
+    /// by channel number: [SCPx, SCPSx, SCPDx, SCDAx]. The vec holds
+    /// `StreamConfig::channels` entries; channels past that count are
+    /// optional in the spec and answer GEV_STATUS_INVALID_ADDRESS.
+    channels: Vec<[u32; 4]>,
 }
 
 /// Register/memory model of one simulated camera.
@@ -163,12 +208,14 @@ pub struct SimRegMap {
     stream: StreamConfig,
     xml: Vec<u8>,
     inner: Mutex<Inner>,
-    /// Transmitter of the open stream channel; `None` = channel closed.
-    emitter: Mutex<Option<StreamEmitter>>,
+    /// Whole-frame striped transmitter over the open stream channels; the
+    /// channel set mirrors the open (non-zero host_port) SCPx registers.
+    scheduler: StreamScheduler,
 }
 
 impl SimRegMap {
     pub fn new(config: SimConfig, xml: &[u8], stream: StreamConfig) -> Self {
+        let n_channels = usize::from(stream.channels.max(1));
         let mut m = SimRegMap {
             config,
             stream,
@@ -179,8 +226,9 @@ impl SimRegMap {
                 ccp: CcpState::default(),
                 heartbeat_ms: HEARTBEAT_DEFAULT_MS,
                 ts_epoch: Instant::now(),
+                channels: vec![[0; 4]; n_channels],
             }),
-            emitter: Mutex::new(None),
+            scheduler: StreamScheduler::new(),
         };
         m.init_bootstrap();
         m
@@ -228,20 +276,51 @@ impl SimRegMap {
         // SECOND_URL stays empty (R-445cd: register present, may be unused).
         Self::w32(boot, reg::NUM_NETWORK_INTERFACES, 1);
         Self::w32(boot, reg::NUM_MESSAGE_CHANNELS, 0);
-        Self::w32(boot, reg::NUM_STREAM_CHANNELS, 1);
+        // Streaming Configuration factory default follows the supported
+        // modes (§36.38: GVSP if supported, GVRSP-only otherwise). Bit 1 is
+        // the deprecated always-1 bit. A GVRSP-only device has no GVSP
+        // stream channels (its SCPx registers answer ACCESS_DENIED per
+        // CR-671cd).
+        let (capability, mode_default, n_sc) = match cfg.streaming {
+            StreamingProtocol::GvspOnly => (
+                0,
+                reg::SCONF_PROTOCOL_GVSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT,
+                self.stream.channels.max(1),
+            ),
+            StreamingProtocol::Both => (
+                reg::SCAP_GVRSP_MODE_SUPPORTED | reg::SCAP_SCEBA_SUPPORTED,
+                reg::SCONF_PROTOCOL_GVSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT,
+                self.stream.channels.max(1),
+            ),
+            StreamingProtocol::GvrspOnly => (
+                reg::SCAP_GVSP_MODE_NOT_SUPPORTED
+                    | reg::SCAP_GVRSP_MODE_SUPPORTED
+                    | reg::SCAP_SCEBA_SUPPORTED,
+                reg::SCONF_PROTOCOL_GVRSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT,
+                0,
+            ),
+        };
+        Self::w32(boot, reg::NUM_STREAM_CHANNELS, u32::from(n_sc));
+        Self::w32(boot, reg::STREAMING_CAPABILITY, capability);
+        Self::w32(
+            boot,
+            reg::STREAMING_CONFIGURATION,
+            reg::SCONF_DEPRECATED_BIT | mode_default,
+        );
         Self::w32(boot, reg::GVCP_CAPABILITY, GVCP_CAPABILITY_VALUE);
         Self::w32(boot, reg::TIMESTAMP_TICK_FREQ_HIGH, (TIMESTAMP_TICK_FREQ >> 32) as u32);
         Self::w32(boot, reg::TIMESTAMP_TICK_FREQ_LOW, TIMESTAMP_TICK_FREQ as u32);
-        // SCPS0 factory default is device-specific (spec §36.58). Sim
+
+        // SCPSx factory defaults (spec §36.58: device-specific). Sim
         // convention: the register holds the *total* packet size (bits
         // 16-31) including the IP/UDP/GVSP headers (spec layout, see
         // notes/gvcp-wirefacts.md); 1400 payload + 48 headers keeps the
-        // IPv4 total at 1448 bytes, under the 1500-byte MTU.
-        Self::w32(
-            boot,
-            reg::SCPS0,
-            reg::scps_make(DEFAULT_PAYLOAD as u32 + reg::GVSP_HEADERS_OVERHEAD),
-        );
+        // IPv4 total at 1448 bytes, under the 1500-byte MTU. Every stream
+        // channel starts with the same default.
+        let default_scps = reg::scps_make(DEFAULT_PAYLOAD as u32 + reg::GVSP_HEADERS_OVERHEAD);
+        for ch in i.channels.iter_mut() {
+            ch[W_SCPS] = default_scps;
+        }
 
         i.user[0..4].copy_from_slice(&self.stream.width.to_be_bytes());
         i.user[4..8].copy_from_slice(&self.stream.height.to_be_bytes());
@@ -257,14 +336,29 @@ impl SimRegMap {
     }
 
     /// Copy `len` bytes starting at `addr` if the whole range is covered by
-    /// mapped memory (bootstrap slots, user area, or the XML blob).
+    /// mapped memory (bootstrap slots, stream channel registers, user
+    /// area, or the XML blob).
     fn read_mapped(&self, addr: u32, len: u32) -> Result<Vec<u8>, u16> {
         let end = addr.checked_add(len).ok_or(GEV_STATUS_INVALID_ADDRESS)?;
         let mut out = Vec::with_capacity(len as usize);
         let mut pos = addr;
         while pos < end {
             let take_end;
-            if pos < BOOT_LEN {
+            if let Some((x, off)) = reg::stream_channel_addr(pos) {
+                take_end = pos + 4;
+                let i = self.inner.lock().expect("sim regmap poisoned");
+                if Self::streaming_mode(&i) == reg::SCONF_PROTOCOL_GVRSP {
+                    // CR-671cd: GVSP channel registers are inaccessible in
+                    // GVRSP mode (READMEM answers like READREG).
+                    return Err(GEV_STATUS_ACCESS_DENIED);
+                }
+                let Some(words) = i.channels.get(x as usize) else {
+                    // §36.57: channels past the device count are optional
+                    // and answer GEV_STATUS_INVALID_ADDRESS.
+                    return Err(GEV_STATUS_INVALID_ADDRESS);
+                };
+                out.extend_from_slice(&words[channel_word_index(off)].to_be_bytes());
+            } else if pos < BOOT_LEN {
                 let Some(r) = Self::boot_reg_at(pos) else {
                     return Err(GEV_STATUS_INVALID_ADDRESS);
                 };
@@ -296,6 +390,14 @@ impl SimRegMap {
             .iter()
             .find(|r| addr >= r.addr && addr < r.addr + r.len)
     }
+
+    /// Current `streaming_protocol` field (§36.38, print bits 4-5) decoded
+    /// from the live Streaming Configuration register value.
+    fn streaming_mode(i: &Inner) -> u32 {
+        let b = &i.boot[reg::STREAMING_CONFIGURATION as usize..reg::STREAMING_CONFIGURATION as usize + 4];
+        (u32::from_be_bytes(b.try_into().unwrap()) & reg::SCONF_STREAMING_PROTOCOL_MASK)
+            >> 26
+    }
 }
 
 impl DeviceHandler for SimRegMap {
@@ -325,9 +427,24 @@ impl DeviceHandler for SimRegMap {
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
+        if let Some((x, off)) = reg::stream_channel_addr(addr) {
+            let i = self.inner.lock().expect("sim regmap poisoned");
+            if Self::streaming_mode(&i) == reg::SCONF_PROTOCOL_GVRSP {
+                // CR-671cd: a device operating in GVRSP mode must prevent
+                // access to the SCPx register (ACCESS_DENIED).
+                return Err(GEV_STATUS_ACCESS_DENIED);
+            }
+            let Some(words) = i.channels.get(x as usize) else {
+                // §36.57: stream channels 1..511 are optional; a device
+                // without channel x answers GEV_STATUS_INVALID_ADDRESS —
+                // the application probe for the channel count.
+                return Err(GEV_STATUS_INVALID_ADDRESS);
+            };
+            return Ok(words[channel_word_index(off)]);
+        }
         if addr == reg::CCP {
             let i = self.inner.lock().expect("sim regmap poisoned");
-            return Ok(i.ccp.flags | ((i.ccp.connection_count & 0xF) << 16));
+            return Ok(i.ccp.flags | ((i.ccp.connection_count & 0xF) << reg::CCP_CONNECTION_COUNT_SHIFT));
         }
         if addr == reg::HEARTBEAT_TIMEOUT {
             return Ok(self.inner.lock().expect("sim regmap poisoned").heartbeat_ms);
@@ -350,8 +467,8 @@ impl DeviceHandler for SimRegMap {
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
-        if addr == reg::SCP0 {
-            return self.write_scp0(value);
+        if let Some((x, off)) = reg::stream_channel_addr(addr) {
+            return self.write_stream_channel(x, off, value);
         }
         let mut i = self.inner.lock().expect("sim regmap poisoned");
         if addr == reg::CCP {
@@ -390,6 +507,37 @@ impl DeviceHandler for SimRegMap {
             i.heartbeat_ms = value.max(HEARTBEAT_MIN_MS);
             return Ok(());
         }
+        if addr == reg::STREAMING_CONFIGURATION {
+            // §36.38 / R-667cd / Table 36-2. Write access is disabled while
+            // any GVSP stream channel is open; selecting a protocol the
+            // device does not support (or a reserved value 2-3, see
+            // notes/OPEN-QUESTIONS.md Q29) returns GEV_STATUS_INVALID_PARAMETER.
+            if i.channels.iter().any(|c| reg::scp_host_port(c[W_SCP]) != 0) {
+                return Err(GEV_STATUS_BUSY);
+            }
+            let mode = (value & reg::SCONF_STREAMING_PROTOCOL_MASK) >> reg::SCONF_STREAMING_PROTOCOL_SHIFT;
+            let (gvsp_ok, gvrsp_ok) = match self.config.streaming {
+                StreamingProtocol::GvspOnly => (true, false),
+                StreamingProtocol::Both => (true, true),
+                StreamingProtocol::GvrspOnly => (false, true),
+            };
+            let supported = match mode {
+                reg::SCONF_PROTOCOL_GVSP => gvsp_ok,
+                reg::SCONF_PROTOCOL_GVRSP => gvrsp_ok,
+                // Reserved values 2-3: rejected (notes/OPEN-QUESTIONS.md Q29).
+                _ => false,
+            };
+            if !supported {
+                return Err(GEV_STATUS_INVALID_PARAMETER);
+            }
+            // Store only the protocol field; bit 1 is the deprecated
+            // always-1 bit and stays set (§36.38).
+            i.boot[addr as usize..addr as usize + 4].copy_from_slice(
+                &((value & reg::SCONF_STREAMING_PROTOCOL_MASK) | reg::SCONF_DEPRECATED_BIT)
+                    .to_be_bytes(),
+            );
+            return Ok(());
+        }
         if let Some(r) = Self::boot_reg(addr) {
             if r.access != Rw {
                 return Err(GEV_STATUS_WRITE_PROTECT);
@@ -416,89 +564,103 @@ impl DeviceHandler for SimRegMap {
 }
 
 impl SimRegMap {
-    /// SCP0 (0x0D00, spec §36.57): a non-zero host_port field (bits 16-31)
-    /// opens the stream channel (spec §11.5, R-087ca), zero closes it. The
-    /// register value follows the spec layout; SCPx must be the last
-    /// register written when opening and the first when closing.
+    /// Write one stream channel register (spec §36.57–§36.60). `x` is the
+    /// channel number and `off` the register's offset inside the channel's
+    /// 0x40 block, both decoded from the address by
+    /// [`reg::stream_channel_addr`].
+    fn write_stream_channel(&self, x: u32, off: u32, value: u32) -> Result<(), u16> {
+        if Self::streaming_mode(&self.inner.lock().expect("sim regmap poisoned"))
+            == reg::SCONF_PROTOCOL_GVRSP
+        {
+            // CR-671cd: no GVSP stream channel register is accessible in
+            // GVRSP mode (the SCPx case is named by the requirement; the
+            // whole channel block follows the device's mode).
+            return Err(GEV_STATUS_ACCESS_DENIED);
+        }
+        if x >= u32::from(self.stream.channels.max(1)) {
+            // §36.57: stream channels 1..511 are optional; accesses past
+            // the device count answer GEV_STATUS_INVALID_ADDRESS.
+            return Err(GEV_STATUS_INVALID_ADDRESS);
+        }
+        if off == reg::SCP_OFFSET {
+            return self.write_scp(x, value);
+        }
+        // §36.58/§36.59: SCPSx/SCPDx are not writable while the channel is
+        // streaming — the values are frozen at open (R-586cd rejects
+        // in-stream SCPx writes; the size/delay registers follow the same
+        // rule). The scheduler lock is taken alone here so the lock order
+        // never inverts `write_scp`'s inner->scheduler order.
+        if self.scheduler.is_streaming(x as u16) {
+            return Err(GEV_STATUS_BUSY);
+        }
+        let mut i = self.inner.lock().expect("sim regmap poisoned");
+        i.channels[x as usize][channel_word_index(off)] = value;
+        Ok(())
+    }
+
+    /// SCPx (0x0D00 + 0x40*x, spec §36.57): a non-zero host_port field
+    /// (bits 16-31) opens stream channel x (spec §11.5, R-087ca), zero
+    /// closes it. The register value follows the spec layout; SCPx must be
+    /// the last register written when opening and the first when closing.
     ///
-    /// The transmitter is created before the register value is published
-    /// and stopped after it is withdrawn, and the thread join in
-    /// [`StreamEmitter`]'s drop never runs while a register-map lock is
-    /// held (the emitter itself takes no register-map locks), so opening
-    /// and closing cannot deadlock against reads or writes.
-    fn write_scp0(&self, value: u32) -> Result<(), u16> {
+    /// The channel's sink is created before the register value is
+    /// published and removed after it is withdrawn, and the scheduler
+    /// thread join never runs while a register-map lock is held (the
+    /// scheduler itself takes no register-map locks), so opening and
+    /// closing cannot deadlock against reads or writes.
+    fn write_scp(&self, x: u32, value: u32) -> Result<(), u16> {
         let host_port = reg::scp_host_port(value);
         if value != 0 && host_port == 0 {
-            // A non-zero write with the host_port field left at 0 is not a
-            // valid spec-layout SCPx write (it is what a raw "write the
-            // bare port" produces, e.g. 50000); reject it loudly so the
-            // wrong layout fails at the device instead of silently
-            // closing the channel (notes/OPEN-QUESTIONS.md Q14 resolved).
+            // A non-zero write with the host_port field left at 0 carries no
+            // port — e.g. the pre-Q31 "<<16" layout mistake (a bare port
+            // shifted out of the low 16 bits). Reject it loudly so a wrong
+            // layout fails at the device instead of silently closing the
+            // channel (notes/OPEN-QUESTIONS.md Q14/Q31).
             return Err(GEV_STATUS_INVALID_PARAMETER);
         }
+        let key = x as u16;
         if host_port != 0 {
             let port = host_port;
-            // Snapshot the channel configuration: a real device forbids
-            // SCPSx/SCPDx writes while streaming (spec §36.58/§36.59), so
-            // freezing the values at open matches the observable contract.
+            // Snapshot the channel configuration: SCPSx/SCPDx writes are
+            // rejected while streaming (spec §36.58/§36.59), so freezing
+            // the values at open matches the observable contract.
             let (target, params) = {
                 let i = self.inner.lock().expect("sim regmap poisoned");
-                if reg::scp_host_port(u32::from_be_bytes(
-                    i.boot[reg::SCP0 as usize..reg::SCP0 as usize + 4]
-                        .try_into()
-                        .unwrap(),
-                )) != 0
-                {
+                if reg::scp_host_port(i.channels[x as usize][W_SCP]) != 0 {
                     // R-586cd: only a zero write (close) is accepted while
                     // the channel is streaming.
                     return Err(GEV_STATUS_BUSY);
                 }
-                let word = |addr: u32| {
-                    u32::from_be_bytes(
-                        i.boot[addr as usize..addr as usize + 4]
-                            .try_into()
-                            .unwrap(),
-                    )
-                };
+                let words = i.channels[x as usize];
                 (
-                    SocketAddr::from((Ipv4Addr::from(word(reg::SCDA0)), port)),
-                    StreamParams::new(&self.stream, word(reg::SCPS0), word(reg::SCPD0)),
+                    SocketAddr::from((Ipv4Addr::from(words[W_SCDA]), port)),
+                    StreamParams::new(&self.stream, words[W_SCPS], words[W_SCPD]),
                 )
             };
-            let emitter =
-                StreamEmitter::open(target, params).map_err(|_| GEV_STATUS_ERROR)?;
+            let sink = ChannelSink::open(target, params).map_err(|_| GEV_STATUS_ERROR)?;
             let old = {
                 let mut i = self.inner.lock().expect("sim regmap poisoned");
-                i.boot[reg::SCP0 as usize..reg::SCP0 as usize + 4]
-                    .copy_from_slice(&value.to_be_bytes());
-                self.emitter
-                    .lock()
-                    .expect("sim emitter poisoned")
-                    .replace(emitter)
+                i.channels[x as usize][W_SCP] = value;
+                self.scheduler.insert(key, sink)
             };
-            // Join outside the locks (defensive; the slot was known empty).
+            // Drop outside the locks (defensive; the slot was known empty).
             drop(old);
             return Ok(());
         }
 
         let old = {
             let mut i = self.inner.lock().expect("sim regmap poisoned");
-            i.boot[reg::SCP0 as usize..reg::SCP0 as usize + 4]
-                .copy_from_slice(&0u32.to_be_bytes());
-            self.emitter.lock().expect("sim emitter poisoned").take()
+            i.channels[x as usize][W_SCP] = 0;
+            self.scheduler.remove(key)
         };
         drop(old);
         Ok(())
     }
 }
 
-impl Drop for SimRegMap {
-    fn drop(&mut self) {
-        // The transmitter's lifetime follows the register map (and thereby
-        // the GVCP server holding it); its Drop joins the emitter thread.
-        drop(self.emitter.lock().expect("sim emitter poisoned").take());
-    }
-}
+// The scheduler's lifetime follows the register map (and thereby the GVCP
+// server holding it): `StreamScheduler::drop` stops and joins the stripe
+// thread, which touches only its own channel map — no register-map locks.
 
 /// Cloneable handle wrapping the shared register map; handed to
 /// [`gentl_gvcp::GvcpServer`].
@@ -545,6 +707,7 @@ mod tests {
                 model_name: "SimCam".into(),
                 device_version: "1.0.0".into(),
                 serial_number: "SIM-0001".into(),
+                streaming: StreamingProtocol::GvspOnly,
             },
             b"<?xml version=\"1.0\"?><fake/>",
             crate::StreamConfig::default(),
@@ -584,13 +747,13 @@ mod tests {
         m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
         assert_eq!(
             m.read_reg(reg::CCP).unwrap(),
-            reg::CCP_EXCLUSIVE_ACCESS | (1 << 16)
+            reg::CCP_EXCLUSIVE_ACCESS | (1 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
         // R-069cd: repeated identical request is accepted, no new connection.
         m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
         assert_eq!(
             m.read_reg(reg::CCP).unwrap(),
-            reg::CCP_EXCLUSIVE_ACCESS | (1 << 16)
+            reg::CCP_EXCLUSIVE_ACCESS | (1 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
         // Different privilege while occupied: denied.
         assert_eq!(
@@ -600,17 +763,20 @@ mod tests {
         // Release, then control access grants and bumps the counter. The
         // connection count never returns to zero (spec §36.46).
         m.write_reg(reg::CCP, 0).unwrap();
-        assert_eq!(m.read_reg(reg::CCP).unwrap(), 1 << 16);
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap(),
+            1 << reg::CCP_CONNECTION_COUNT_SHIFT
+        );
         m.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap();
         assert_eq!(
             m.read_reg(reg::CCP).unwrap(),
-            reg::CCP_CONTROL_ACCESS | (2 << 16)
+            reg::CCP_CONTROL_ACCESS | (2 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
         m.write_reg(reg::CCP, 0).unwrap();
         m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
         assert_eq!(
             m.read_reg(reg::CCP).unwrap(),
-            reg::CCP_EXCLUSIVE_ACCESS | (3 << 16)
+            reg::CCP_EXCLUSIVE_ACCESS | (3 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
     }
 
@@ -648,12 +814,14 @@ mod tests {
                 model_name: "SimCam".into(),
                 device_version: "1.0.0".into(),
                 serial_number: "SIM-0001".into(),
+                streaming: StreamingProtocol::GvspOnly,
             },
             b"<fake/>",
             crate::StreamConfig {
                 width: 640,
                 height: 480,
                 pixel_format: 0x0110_0007, // Mono16
+                channels: 1,
             },
         );
         assert_eq!(m.read_reg(REG_WIDTH).unwrap(), 640);
@@ -679,21 +847,26 @@ mod tests {
         m.write_reg(reg::SCPD0, 5).unwrap();
         assert_eq!(m.read_reg(reg::SCPD0).unwrap(), 5);
 
-        // Writes must use the spec layout (host_port in bits 16-31): a bare
-        // port value (host_port field 0, value non-zero) is rejected, even
-        // though the same number in the right layout opens the channel.
+        // The spec layout keeps host_port in the LOW 16 bits (§36.57,
+        // MSB-first print "bits 16-31"): a bare port value opens the
+        // channel, while the pre-Q31 "<<16" style leaves the host_port
+        // field at zero and is rejected as an invalid no-op write.
+        m.write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+            .unwrap();
+        m.write_reg(reg::SCP0, 3956).unwrap();
+        assert_eq!(reg::scp_host_port(m.read_reg(reg::SCP0).unwrap()), 3956);
         assert_eq!(
-            m.write_reg(reg::SCP0, 3956).unwrap_err(),
-            GEV_STATUS_INVALID_PARAMETER
+            m.write_reg(reg::SCP0, 3957).unwrap_err(),
+            GEV_STATUS_BUSY,
+            "R-586cd: a non-zero write is rejected while streaming"
         );
+        m.write_reg(reg::SCP0, 0).unwrap();
         assert_eq!(
-            m.write_reg(reg::SCP0, 50000).unwrap_err(),
+            m.write_reg(reg::SCP0, 3956 << 16).unwrap_err(),
             GEV_STATUS_INVALID_PARAMETER
         );
         // Open towards loopback (no receiver bound: the emitter's sends
         // fail silently, like on a real camera whose receiver vanished).
-        m.write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
-            .unwrap();
         m.write_reg(reg::SCP0, reg::scp_make(3956)).unwrap();
         assert_eq!(reg::scp_host_port(m.read_reg(reg::SCP0).unwrap()), 3956);
         // R-586cd: only a zero write (close) is accepted while streaming.
@@ -783,11 +956,12 @@ mod tests {
             m.read_mem(reg::USER_DEFINED_NAME, 4).unwrap(),
             b"cam0"
         );
-        // Net If Configuration masks off unsupported (DHCP) bits.
+        // Net If Configuration stores every writable configuration flag
+        // (persistent / DHCP / LLA); the DHCP bit has no behavior.
         m.write_reg(reg::NET_IF_CONFIGURATION, 0xFFFFFFFF).unwrap();
         assert_eq!(
             m.read_reg(reg::NET_IF_CONFIGURATION).unwrap(),
-            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA | 0x3
+            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA
         );
         // Timestamp registers tick at the advertised 1 MHz.
         let lo1 = m.read_reg(reg::TIMESTAMP_VALUE_LOW).unwrap();
@@ -810,5 +984,101 @@ mod tests {
         assert_eq!(d.current_ip, 0xC0A8_010A);
         assert_eq!(d.manufacturer_name, "GenTLite");
         assert_eq!(d.serial_number, "SIM-0001");
+    }
+
+    fn map_with_streaming(mode: StreamingProtocol) -> SimRegMap {
+        SimRegMap::new(
+            crate::SimConfig {
+                mac: [0x02, 0x00, 0x11, 0x22, 0x33, 0x44],
+                ip: Ipv4Addr::new(192, 168, 1, 10),
+                subnet_mask: Ipv4Addr::new(255, 255, 255, 0),
+                gateway: Ipv4Addr::new(192, 168, 1, 1),
+                manufacturer_name: "GenTLite".into(),
+                model_name: "SimCam".into(),
+                device_version: "1.0.0".into(),
+                serial_number: "SIM-0001".into(),
+                streaming: mode,
+            },
+            b"<?xml version=\"1.0\"?><fake/>",
+            crate::StreamConfig::default(),
+        )
+    }
+
+    /// Streaming Configuration write semantics: Table 36-2 mode/capability
+    /// validation, R-667cd BUSY while a channel is open, and CR-671cd
+    /// ACCESS_DENIED on GVSP channel registers in GVRSP mode.
+    #[test]
+    fn streaming_configuration_semantics() {
+        use gentl_gvcp::wire::{
+            GEV_STATUS_ACCESS_DENIED, GEV_STATUS_BUSY, GEV_STATUS_INVALID_PARAMETER,
+        };
+
+        // GVSP-only device (factory default, as today).
+        let m = map_with_streaming(StreamingProtocol::GvspOnly);
+        assert_eq!(m.read_reg(reg::STREAMING_CAPABILITY).unwrap(), 0);
+        assert_eq!(
+            m.write_reg(
+                reg::STREAMING_CONFIGURATION,
+                reg::SCONF_DEPRECATED_BIT
+                    | (reg::SCONF_PROTOCOL_GVRSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT)
+            ),
+            Err(GEV_STATUS_INVALID_PARAMETER),
+            "Table 36-2: GVRSP mode on a GVSP-only device"
+        );
+        // Open channel 0, then the configuration locks (R-667cd).
+        m.write_reg(reg::SCP0, reg::scp_make(40001)).unwrap();
+        assert_eq!(
+            m.write_reg(reg::STREAMING_CONFIGURATION, reg::SCONF_DEPRECATED_BIT),
+            Err(GEV_STATUS_BUSY)
+        );
+        m.write_reg(reg::SCP0, 0).unwrap();
+        // Reserved protocol values 2-3 are rejected (notes/OPEN-QUESTIONS.md Q29).
+        assert_eq!(
+            m.write_reg(
+                reg::STREAMING_CONFIGURATION,
+                reg::SCONF_DEPRECATED_BIT | (2 << 26)
+            ),
+            Err(GEV_STATUS_INVALID_PARAMETER)
+        );
+        // Re-selecting the active mode is legal.
+        m.write_reg(reg::STREAMING_CONFIGURATION, reg::SCONF_DEPRECATED_BIT).unwrap();
+        assert_eq!(
+            m.read_reg(reg::STREAMING_CONFIGURATION).unwrap(),
+            reg::SCONF_DEPRECATED_BIT
+        );
+
+        // Dual-mode device: switching to GVRSP locks out the GVSP channel
+        // registers (CR-671cd), switching back restores them.
+        let m = map_with_streaming(StreamingProtocol::Both);
+        assert_eq!(
+            m.read_reg(reg::STREAMING_CAPABILITY).unwrap(),
+            reg::SCAP_SCEBA_SUPPORTED | reg::SCAP_GVRSP_MODE_SUPPORTED,
+            "CR-665cd: SCEBAx mandatory with GVRSP"
+        );
+        m.write_reg(
+            reg::STREAMING_CONFIGURATION,
+            reg::SCONF_DEPRECATED_BIT
+                | (reg::SCONF_PROTOCOL_GVRSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT),
+        )
+        .unwrap();
+        assert_eq!(m.read_reg(reg::SCP0), Err(GEV_STATUS_ACCESS_DENIED));
+        assert_eq!(m.write_reg(reg::SCP0, reg::scp_make(40001)), Err(GEV_STATUS_ACCESS_DENIED));
+        m.write_reg(reg::STREAMING_CONFIGURATION, reg::SCONF_DEPRECATED_BIT).unwrap();
+        assert_eq!(m.read_reg(reg::SCP0).unwrap(), 0, "GVSP mode restores channel access");
+
+        // GVRSP-only device: mode 0 writes rejected, channels denied.
+        let m = map_with_streaming(StreamingProtocol::GvrspOnly);
+        assert_eq!(
+            m.read_reg(reg::STREAMING_CAPABILITY).unwrap(),
+            reg::SCAP_GVSP_MODE_NOT_SUPPORTED
+                | reg::SCAP_GVRSP_MODE_SUPPORTED
+                | reg::SCAP_SCEBA_SUPPORTED
+        );
+        assert_eq!(m.read_reg(reg::SCP0), Err(GEV_STATUS_ACCESS_DENIED));
+        assert_eq!(
+            m.write_reg(reg::STREAMING_CONFIGURATION, reg::SCONF_DEPRECATED_BIT),
+            Err(GEV_STATUS_INVALID_PARAMETER),
+            "Table 36-2: GVSP mode on a GVRSP-only device"
+        );
     }
 }

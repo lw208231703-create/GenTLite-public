@@ -1,15 +1,39 @@
-//! Data stream module object: stream channel 0 setup/teardown over the
-//! GVCP control channel (SCDA0/SCP0), the local GVSP receiver thread, and
-//! the registered-event bookkeeping behind EVENT_HANDLE.
+//! Data stream module object: GVSP stream channel setup/teardown over the
+//! GVCP control channel (SCDAx/SCPx), one local receiver thread per
+//! channel, and the registered-event bookkeeping behind EVENT_HANDLE.
 //!
 //! Channel rules (notes/gvcp-wirefacts.md, spec §11.5/§36.57): the primary
-//! application opens the channel by writing SCDA0 (destination IP) and then
-//! SCP0 = host_port << 16 (spec §36.57 — identical in GigE 1.2 §27.45;
-//! the layout never changed). host_port != 0 activates, 0 closes, and SCP0
+//! application opens a channel by writing SCDAx (destination IP) and then
+//! SCPx = host_port << 16 (spec §36.57 — identical in GigE 1.2 §27.45;
+//! the layout never changed). host_port != 0 activates, 0 closes, and SCPx
 //! must be the last stream channel register written when opening. Pure
 //! spec-only behavior: a device that ignores the spec encoding fails the
 //! readback check with a clear error (project decision 2026-10-12,
 //! notes/OPEN-QUESTIONS Q25).
+//!
+//! M3-4a multi-stream fan-out: the single GenTL DataStream ("Stream0",
+//! GenTL surface unchanged) drives K GVSP channels, each with its own UDP
+//! socket, receiver thread, and reassembler, all feeding the same DsCore.
+//! K = min(device channels, `GENTLITE_GEV_STREAM_CHANNELS` default 8) —
+//! see [`crate::discovery::desired_stream_channels`]. Channels 1..511 are
+//! optional (spec §36.57): the count is probed by reading SCPx
+//! sequentially until the device answers GEV_STATUS_INVALID_ADDRESS. A
+//! secondary channel that fails to open degrades the stream to the
+//! channels already opened; only total failure (channel 0) fails
+//! DSStartAcquisition, matching the historical single-channel behavior.
+//! Cross-channel frame delivery order is completion order — the spec is
+//! silent on multi-channel ordering; every delivered frame keeps the
+//! timestamp of its own leader.
+//!
+//! Shared-engine limitation (kept deliberately, M3-4a): the DsCore admits
+//! exactly one in-flight frame. A frame-striped camera (whole frames
+//! round-robined across channels, so cross-channel blocks never overlap —
+//! the model the sim implements and the target of this fan-out) cannot
+//! collide with itself. Only multi-tap parallel cameras (concurrent
+//! cross-channel block streams) hit `FrameError::Busy`, dropping the
+//! overlapped whole block (counted as `malformed` by the reassembler);
+//! per-channel in-flight slots are the M3 DsCore work (gentl-core is
+//! frozen this milestone).
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -22,33 +46,114 @@ use gentl_core::error::{GentlError, GentlResult};
 use gentl_core::event_queue::EventQueue;
 use gentl_core::types::EventType;
 use gentl_gvcp::registers;
+use gentl_gvcp::wire::GEV_STATUS_INVALID_ADDRESS;
 use gentl_gvcp::GvcpClient;
 
 use crate::cti::{DeviceAccess, GevDevice};
+use crate::discovery::desired_stream_channels;
 use crate::gvsp_receiver::{receiver_loop, ReceiverStats};
 
 /// The single stream channel's ID (fixed across sessions, GenTL 1.6 §3;
 /// format not mandated by the spec — OPEN-QUESTION Q16).
 pub const STREAM_ID: &str = "Stream0";
 
+/// Transport context of one GVSP stream channel (spec §36.57 SCPx): one
+/// local UDP socket, one receiver thread with its own reassembler, one
+/// stop/kill flag pair, and the channel's own SCPSx-derived payload
+/// stride. The socket stays bound across stop/start; only DSClose drops
+/// the stream and its channels.
+struct ChannelCtx {
+    /// Channel number x of the SCPx/SCPSx/SCPDx/SCDAx address map.
+    index: u16,
+    /// Local GVSP socket, bound at open to 0.0.0.0:0; its port is written
+    /// into SCPx at start.
+    socket: UdpSocket,
+    receiver: Mutex<Option<JoinHandle<()>>>,
+    stop: Arc<AtomicBool>,
+    kill: Arc<AtomicBool>,
+    /// This channel's receiver counters, published when its thread exits.
+    stats: Arc<Mutex<ReceiverStats>>,
+    /// Set once the channel open sequence verified (SCPx readback); stop
+    /// closes only opened channels.
+    opened: Mutex<bool>,
+    /// Payload bytes per full GVSP generic payload packet for this
+    /// channel: the SCPSx packet_size field (spec §36.58, total size
+    /// including IP/UDP/GVSP headers) minus
+    /// [`registers::GVSP_HEADERS_OVERHEAD`]. The camera default is kept
+    /// (no SCPSx renegotiation — OPEN-QUESTION Q16). 0 until the channel
+    /// opened.
+    payload_size: usize,
+}
+
+impl ChannelCtx {
+    fn new(index: u16, socket: UdpSocket) -> Self {
+        ChannelCtx {
+            index,
+            socket,
+            receiver: Mutex::new(None),
+            stop: Arc::new(AtomicBool::new(false)),
+            kill: Arc::new(AtomicBool::new(false)),
+            stats: Arc::new(Mutex::new(ReceiverStats::default())),
+            opened: Mutex::new(false),
+            payload_size: 0,
+        }
+    }
+}
+
+/// Open GVSP stream channel #x towards `local_ip:port` and return the
+/// channel's payload stride derived from SCPSx.
+///
+/// R-561ca (spec §36.57): host_port must be 0 before writing SCDAx. A
+/// fresh channel satisfies this; a stale non-zero value means a previous
+/// session died without closing — close it first (writing 0 is always
+/// allowed, R-586cd). SCPx is the last stream channel register written
+/// when opening; the only writes allowed after it are SCPSx packet-size
+/// negotiation, which is the M3 hook (spec §11.7, R-567s — OPEN-QUESTION
+/// Q16). The open is verified by reading SCPx back: a device may refuse
+/// or silently adjust the register, and a host_port of 0 means the
+/// channel did not open. Spec-only: no non-compliant-device fallback
+/// (project decision 2026-10-12, notes/OPEN-QUESTIONS Q25).
+fn open_channel(c: &GvcpClient, x: u32, local_ip: Ipv4Addr, port: u16) -> GentlResult<usize> {
+    if registers::scp_host_port(c.read_reg(registers::scp(x))?) != 0 {
+        c.write_reg(registers::scp(x), registers::scp_make(0))?;
+    }
+    c.write_reg(registers::scda(x), u32::from(local_ip))?;
+    c.write_reg(registers::scp(x), registers::scp_make(port))?;
+    if registers::scp_host_port(c.read_reg(registers::scp(x))?) == 0 {
+        return Err(GentlError::Io(format!(
+            "stream channel {x} did not open (SCPx host_port reads back 0)"
+        )));
+    }
+    // §36.58 (same in 1.2 §27.46): bits 16-31 hold the total packet size
+    // including the IP/UDP/GVSP headers; the payload data length is what
+    // the receiver needs for packet placement. Spec-only decoding: no
+    // non-compliant-device reinterpretation (project decision 2026-10-12,
+    // notes/OPEN-QUESTIONS Q25). An unwritten (0) or absurdly small
+    // packet_size falls back to a 1500-byte MTU assumption; the value is
+    // per channel, read here at channel open. See notes/OPEN-QUESTIONS.md
+    // Q21.
+    let scps = c.read_reg(registers::scps(x))?;
+    Ok(
+        match registers::scps_packet_size(scps).checked_sub(registers::GVSP_HEADERS_OVERHEAD) {
+            Some(p) if p > 0 => p as usize,
+            _ => (1500 - registers::GVSP_HEADERS_OVERHEAD) as usize,
+        },
+    )
+}
+
 /// Data Stream module behind DS_HANDLE.
 pub struct GevDataStream {
     pub parent: Weak<GevDevice>,
     /// Protocol-independent engine state (buffer pools, acquisition
-    /// counting, event data push).
+    /// counting, event data push); shared by every GVSP channel.
     pub core: Arc<DsCore>,
     /// Control channel shared with the device (externally synchronized).
     pub control: Arc<Mutex<GvcpClient>>,
-    /// Local GVSP socket, bound at open to 0.0.0.0:0.
-    socket: Mutex<Option<UdpSocket>>,
-    receiver: Mutex<Option<JoinHandle<()>>>,
-    stop_receiver: Arc<AtomicBool>,
-    kill_receiver: Arc<AtomicBool>,
-    /// Payload bytes per full GVSP generic payload packet: the SCPS0
-    /// packet_size field (spec §36.58, total size including IP/UDP/GVSP
-    /// headers) minus [`registers::GVSP_HEADERS_OVERHEAD`]. The camera
-    /// default is kept (M2 does not renegotiate — OPEN-QUESTION Q16).
-    pub payload_size: usize,
+    /// One transport context per GVSP stream channel. Channel 0 is always
+    /// present; further channels were probed at open (spec §36.57 — they
+    /// are optional and answer GEV_STATUS_INVALID_ADDRESS past the device
+    /// count).
+    channels: Mutex<Vec<ChannelCtx>>,
     /// Device timestamp tick frequency, for BUFFER_INFO_TIMESTAMP_NS.
     pub tick_freq: Option<u64>,
     /// Registered events by type.
@@ -56,8 +161,6 @@ pub struct GevDataStream {
     /// Core buffer id -> boxed BUFFER_HANDLE; the value handed out at
     /// announcement is returned by DSGetBufferID and EVENT_NEW_BUFFER_DATA.
     buffer_handles: Mutex<HashMap<u64, usize>>,
-    /// Latest receiver counters.
-    pub receiver_stats: Arc<Mutex<ReceiverStats>>,
 }
 /// Buffer module behind BUFFER_HANDLE.
 pub struct GevBuffer {
@@ -73,7 +176,7 @@ pub struct EventModule {
     pub queue: Arc<EventQueue>,
 }
 
-/// Local source IP that would reach `device_ip` (for SCDA0). A connected
+/// Local source IP that would reach `device_ip` (for SCDAx). A connected
 /// UDP socket performs no handshake; the kernel only resolves the route.
 fn local_ip_for(device_ip: Ipv4Addr) -> GentlResult<Ipv4Addr> {
     let s = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(GentlError::from)?;
@@ -86,30 +189,31 @@ fn local_ip_for(device_ip: Ipv4Addr) -> GentlResult<Ipv4Addr> {
 }
 
 impl GevDataStream {
-    /// `DevOpenDataStream`: read the channel configuration (SCPS0, tick
-    /// frequency) and bind the local socket. Does not touch the device.
+    /// `DevOpenDataStream`: probe the stream channel count (spec §36.57)
+    /// and read the tick frequency, then bind one local socket per
+    /// channel. Does not touch the device's channel state.
     pub fn open(device: &Arc<GevDevice>) -> GentlResult<Arc<Self>> {
         let control = device.client.clone();
-        let (payload_size, tick_freq) = {
+        let (n_channels, tick_freq) = {
             let c = control
                 .lock()
                 .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-            let scps = c.read_reg(registers::SCPS0)?;
-            // §36.58 (same in 1.2 §27.46): bits 16-31 hold the total
-            // packet size including the IP/UDP/GVSP headers; the payload
-            // data length is what the receiver needs for packet placement.
-            // Spec-only decoding: no non-compliant-device reinterpretation
-            // (project decision 2026-10-12, notes/OPEN-QUESTIONS Q25).
-            let payload_size = match registers::scps_packet_size(scps)
-                .checked_sub(registers::GVSP_HEADERS_OVERHEAD)
-            {
-                Some(p) if p > 0 => p as usize,
-                // Unwritten (0) or absurdly small packet_size: fall back to
-                // a 1500-byte MTU assumption. A real device ships a factory
-                // default; the value is verified again after any future M3
-                // negotiation. See notes/OPEN-QUESTIONS.md Q21.
-                _ => (1500 - registers::GVSP_HEADERS_OVERHEAD) as usize,
-            };
+            // §36.57: channels 1..511 are optional; a device without
+            // channel x answers GEV_STATUS_INVALID_ADDRESS — the probe
+            // terminator. The probe stops at `desired` channels: a device
+            // implementing more cannot be used anyway. Any other failure
+            // stops the probe too: the count is best-effort and degrades,
+            // never errors (a device that drops probe reads still gets
+            // its channel 0).
+            let desired = desired_stream_channels();
+            let mut have = 1u32; // channel 0 always exists
+            for x in 1..desired {
+                match c.read_reg(registers::scp(x)) {
+                    Ok(_) => have += 1,
+                    Err(GentlError::GevStatus(GEV_STATUS_INVALID_ADDRESS)) => break,
+                    Err(_) => break,
+                }
+            }
             // Tick frequency read is best-effort (defaults below).
             let hi = c.read_reg(registers::TIMESTAMP_TICK_FREQ_HIGH);
             let lo = c.read_reg(registers::TIMESTAMP_TICK_FREQ_LOW);
@@ -117,36 +221,56 @@ impl GevDataStream {
                 (Ok(h), Ok(l)) => Some((u64::from(h) << 32) | u64::from(l)),
                 _ => None,
             };
-            (payload_size, freq)
+            (have, freq)
         };
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(GentlError::from)?;
+        let mut channels = Vec::new();
+        for x in 0..n_channels {
+            // A bind failure of a secondary channel degrades to the
+            // channels already bound; channel 0 must bind or the stream
+            // is unusable (historical single-channel behavior).
+            match UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                Ok(socket) => channels.push(ChannelCtx::new(x as u16, socket)),
+                Err(e) if x == 0 => return Err(GentlError::from(e)),
+                Err(_) => break,
+            }
+        }
         Ok(Arc::new(Self {
             parent: Arc::downgrade(device),
             core: Arc::new(DsCore::new()),
             control,
-            socket: Mutex::new(Some(socket)),
-            receiver: Mutex::new(None),
-            stop_receiver: Arc::new(AtomicBool::new(false)),
-            kill_receiver: Arc::new(AtomicBool::new(false)),
-            payload_size,
+            channels: Mutex::new(channels),
             tick_freq,
             events: Mutex::new(HashMap::new()),
             buffer_handles: Mutex::new(HashMap::new()),
-            receiver_stats: Arc::new(Mutex::new(ReceiverStats::default())),
         }))
     }
 
-    /// Receiver thread running?
+    /// Receiver thread running on any channel?
     pub fn is_running(&self) -> bool {
-        self.receiver.lock().unwrap().is_some()
+        self.channels
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|ch| ch.receiver.lock().unwrap().is_some())
     }
 
-    /// `DSStartAcquisition` transport half: write SCDA0 + SCP0 (channel
-    /// activation) and start the receiver thread.
+    /// `DSStartAcquisition` transport half: open every stream channel
+    /// (SCDAx + SCPx sequence per channel) and start one receiver thread
+    /// per channel, all feeding the shared engine.
+    ///
+    /// Degradation rule (spec §36.57 optional channels): a secondary
+    /// channel whose open fails leaves the stream running on the channels
+    /// already opened; only failure of channel 0 (or no channel at all)
+    /// fails the start, matching the historical single-channel behavior.
     pub fn start(self: &Arc<Self>) -> GentlResult<()> {
         let device = self.parent.upgrade().ok_or(GentlError::InvalidHandle)?;
+        // GVRSP-only devices were rejected at device open; the match stays
+        // as the dispatch point for a future GVRSP (RoCEv2) backend.
+        match device.transport {
+            crate::cti::StreamTransport::Gvsp => {}
+        }
         if device.access == DeviceAccess::Monitor {
-            // SCDA0/SCP0 are writes; a monitor control channel must not
+            // SCDAx/SCPx are writes; a monitor control channel must not
             // stream (spec §10).
             return Err(GentlError::AccessDenied);
         }
@@ -154,63 +278,59 @@ impl GevDataStream {
             return Err(GentlError::ResourceInUse);
         }
         let local_ip = local_ip_for(Ipv4Addr::from(device.discovery.current_ip))?;
-        let port = {
-            let mut guard = self.socket.lock().unwrap();
-            let sock = guard.as_mut().ok_or(GentlError::InvalidHandle)?;
-            sock.local_addr().map_err(GentlError::from)?.port()
-        };
-        {
-            let c = self
-                .control
-                .lock()
-                .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-            // R-561ca (spec §36.57): host_port must be 0 before writing
-            // SCDA0. A fresh channel satisfies this; a stale non-zero value
-            // means a previous session died without closing — close it
-            // first (writing 0 is always allowed, R-586cd).
-            if registers::scp_host_port(c.read_reg(registers::SCP0)?) != 0 {
-                c.write_reg(registers::SCP0, registers::scp_make(0))?;
-            }
-            c.write_reg(registers::SCDA0, u32::from(local_ip))?;
-            // SCP0 is the last stream channel register written when opening
-            // the channel (spec §36.57); the only writes allowed after it
-            // are SCPS0 packet-size negotiation, which is the M3 hook
-            // (spec §11.7, R-567s — OPEN-QUESTION Q16).
-            c.write_reg(registers::SCP0, registers::scp_make(port))?;
-            // Verify the open took: the device may refuse or silently
-            // adjust the register, so a host_port of 0 here means no
-            // channel and no receiver may be started. Spec-only: no
-            // non-compliant-device fallback (project decision 2026-10-12,
-            // notes/OPEN-QUESTIONS Q25) — a device that ignores the spec
-            // encoding fails here with a clear error.
-            if registers::scp_host_port(c.read_reg(registers::SCP0)?) == 0 {
-                return Err(GentlError::Io(
-                    "stream channel did not open (SCP0 host_port reads back 0)".into(),
-                ));
+        let mut channels = self.channels.lock().unwrap();
+        let mut opened = 0usize;
+        let mut first_err: Option<GentlError> = None;
+        for idx in 0..channels.len() {
+            let x = u32::from(channels[idx].index);
+            let port = channels[idx]
+                .socket
+                .local_addr()
+                .map_err(GentlError::from)?
+                .port();
+            let res = {
+                let c = self
+                    .control
+                    .lock()
+                    .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
+                open_channel(&c, x, local_ip, port)
+            };
+            match res {
+                Ok(payload_size) => {
+                    channels[idx].payload_size = payload_size;
+                    *channels[idx].opened.lock().unwrap() = true;
+                    channels[idx].stop.store(false, Ordering::SeqCst);
+                    channels[idx].kill.store(false, Ordering::SeqCst);
+                    let sock = channels[idx].socket.try_clone().map_err(GentlError::from)?;
+                    let sink = self.core.clone();
+                    let stop = channels[idx].stop.clone();
+                    let kill = channels[idx].kill.clone();
+                    let stats = channels[idx].stats.clone();
+                    let payload_size = channels[idx].payload_size;
+                    let name = format!("gvsp-recv-{}-ch{x}", device.id);
+                    let me = self.clone();
+                    let handle = std::thread::Builder::new()
+                        .name(name)
+                        .spawn(move || {
+                            receiver_loop(sock, sink, stop, kill, payload_size, stats, me)
+                        })
+                        .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
+                    *channels[idx].receiver.lock().unwrap() = Some(handle);
+                    opened += 1;
+                }
+                Err(e) => {
+                    first_err = Some(e);
+                    break;
+                }
             }
         }
-        self.stop_receiver.store(false, Ordering::SeqCst);
-        self.kill_receiver.store(false, Ordering::SeqCst);
-        let sock = {
-            let guard = self.socket.lock().unwrap();
-            guard
-                .as_ref()
-                .ok_or(GentlError::InvalidHandle)?
-                .try_clone()
-                .map_err(GentlError::from)?
-        };
-        let sink = self.core.clone();
-        let stop = self.stop_receiver.clone();
-        let kill = self.kill_receiver.clone();
-        let stats = self.receiver_stats.clone();
-        let payload_size = self.payload_size;
-        let name = format!("gvsp-recv-{}", device.id);
-        let me = self.clone();
-        let handle = std::thread::Builder::new()
-            .name(name)
-            .spawn(move || receiver_loop(sock, sink, stop, kill, payload_size, stats, me))
-            .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
-        *self.receiver.lock().unwrap() = Some(handle);
+        if opened == 0 {
+            // Total failure: the caller (DSStartAcquisition) rolls the
+            // engine state back and the start fails, as before M3-4a.
+            return Err(first_err.unwrap_or_else(|| {
+                GentlError::Io("no stream channel available".into())
+            }));
+        }
         Ok(())
     }
 
@@ -228,17 +348,28 @@ impl GevDataStream {
         }
     }
 
-    /// `DSStopAcquisition` transport half: stop the receiver (graceful or
-    /// kill) and close the channel (SCP0 host_port = 0).
+    /// `DSStopAcquisition` transport half: stop every receiver (graceful
+    /// or kill) and close every opened channel (SCPx host_port = 0).
     pub fn stop(&self, kill: bool) {
-        self.kill_receiver.store(kill, Ordering::SeqCst);
-        self.stop_receiver.store(true, Ordering::SeqCst);
-        if let Some(h) = self.receiver.lock().unwrap().take() {
-            let _ = h.join();
+        let channels = self.channels.lock().unwrap();
+        for ch in channels.iter() {
+            ch.kill.store(kill, Ordering::SeqCst);
+            ch.stop.store(true, Ordering::SeqCst);
+        }
+        for ch in channels.iter() {
+            if let Some(h) = ch.receiver.lock().unwrap().take() {
+                let _ = h.join();
+            }
         }
         if let Ok(c) = self.control.lock() {
-            // 0 closes the channel (spec §36.57).
-            let _ = c.write_reg(registers::SCP0, registers::scp_make(0));
+            for ch in channels.iter() {
+                let mut opened = ch.opened.lock().unwrap();
+                if *opened {
+                    // 0 closes the channel (spec §36.57).
+                    let _ = c.write_reg(registers::scp(u32::from(ch.index)), registers::scp_make(0));
+                    *opened = false;
+                }
+            }
         }
     }
 

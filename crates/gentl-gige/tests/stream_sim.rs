@@ -17,7 +17,7 @@ use std::ptr;
 use gentl_core::types::*;
 use gentl_gige::*;
 use gentl_gvcp::registers;
-use gentl_simulator::{SimCamera, SimConfig, StreamConfig, REG_HEIGHT, REG_PIXEL_FORMAT, REG_WIDTH};
+use gentl_simulator::{SimCamera, SimConfig, StreamConfig, StreamingProtocol, REG_HEIGHT, REG_PIXEL_FORMAT, REG_WIDTH};
 
 const MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 const DEVICE_ID: &str = "00:11:22:33:44:55";
@@ -71,11 +71,13 @@ fn data_stream_end_to_end() {
             model_name: "SimCam".into(),
             device_version: "1.0.0".into(),
             serial_number: "SIM-0001".into(),
+            streaming: StreamingProtocol::GvspOnly,
         },
         StreamConfig {
             width: W,
             height: H,
             pixel_format: PF,
+            channels: 1,
         },
     );
     let server = cam.start(0).expect("start sim camera");

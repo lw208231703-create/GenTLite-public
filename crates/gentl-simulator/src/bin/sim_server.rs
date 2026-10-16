@@ -13,7 +13,7 @@
 use std::io::Write as _;
 use std::net::Ipv4Addr;
 
-use gentl_simulator::{SimCamera, SimConfig};
+use gentl_simulator::{SimCamera, SimConfig, StreamingProtocol};
 
 /// Fixed identity; the C++ consumer locates the sim by its device ID
 /// (the MAC string, notes/OPEN-QUESTIONS Q4).
@@ -58,6 +58,7 @@ fn main() {
         model_name: "SimCam".into(),
         device_version: "1.0.0".into(),
         serial_number: "SIM-0001".into(),
+        streaming: StreamingProtocol::GvspOnly,
     });
     let server = cam.start(port).expect("start sim camera");
     let bound = server.local_port().expect("query server port");

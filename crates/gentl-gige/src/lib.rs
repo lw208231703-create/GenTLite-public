@@ -37,6 +37,10 @@ mod stream;
 use cti::{DeviceAccess, DeviceEntry, DevicePort, GevDevice, GevInterface, TlSystem};
 use stream::{EventModule, GevBuffer, GevDataStream, STREAM_ID};
 
+// Re-exported for the `gvsp_perf_rx` benchmarking example and other
+// wire-level tooling; not part of the GenTL surface.
+pub use gvsp_receiver::{GvspReassembler, ReceiverStats};
+
 // GenTL 1.6 enum values (include/GenTL.h is authoritative).
 const INFO_DATATYPE_STRING: InfoDataType = 1;
 const INFO_DATATYPE_INT32: InfoDataType = 5;
@@ -997,12 +1001,17 @@ pub extern "C" fn DevGetNumDataStreams(h_device: DevHandle, pi_num_data_streams:
         Ok(d) => d,
         Err(e) => return e,
     };
-    // Number of Stream Channels from the device bootstrap (0x0904).
-    let n = match device.read_reg(u64::from(registers::NUM_STREAM_CHANNELS)) {
-        Ok(v) => v,
-        Err(e) => return fail(e),
-    };
-    unsafe { *pi_num_data_streams = n };
+    // The stream channel count lives in the device bootstrap (0x0904);
+    // the read doubles as a liveness check — a device that cannot answer
+    // it would fail on the first real transaction anyway.
+    if let Err(e) = device.read_reg(u64::from(registers::NUM_STREAM_CHANNELS)) {
+        return fail(e);
+    }
+    // The M3-4a design exposes a single GenTL DataStream ("Stream0") that
+    // fans out to the device's GVSP channels internally, so the module
+    // count stays 1 regardless of how many stream channels the device
+    // implements.
+    unsafe { *pi_num_data_streams = 1 };
     GC_ERR_SUCCESS
 }
 

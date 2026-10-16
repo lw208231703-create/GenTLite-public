@@ -8,7 +8,7 @@ use gentl_gvcp::gvsp;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::{GEV_STATUS_ACCESS_DENIED, GEV_STATUS_INVALID_ADDRESS};
 use gentl_gvcp::GvcpClient;
-use gentl_simulator::{SimCamera, SimConfig, StreamConfig, REG_EXPOSURE_TIME, XML_BASE};
+use gentl_simulator::{SimCamera, SimConfig, StreamConfig, StreamingProtocol, REG_EXPOSURE_TIME, XML_BASE};
 
 fn test_config() -> SimConfig {
     SimConfig {
@@ -20,6 +20,7 @@ fn test_config() -> SimConfig {
         model_name: "SimCam".into(),
         device_version: "1.0.0".into(),
         serial_number: "SIM-0001".into(),
+        streaming: StreamingProtocol::GvspOnly,
     }
 }
 
@@ -105,15 +106,21 @@ fn error_statuses_over_the_wire() {
     // exercised with a different privilege.
     let other = GvcpClient::connect(Ipv4Addr::LOCALHOST, port).unwrap();
 
-    client.write_reg(reg::CCP, 0x8000_0000).unwrap(); // EA
-    assert_eq!(client.read_reg(reg::CCP).unwrap() >> 16 & 0xF, 1);
+    client.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap(); // EA
     assert_eq!(
-        gev_status(other.write_reg(reg::CCP, 0x4000_0000).unwrap_err()), // CA while EA held
+        client.read_reg(reg::CCP).unwrap() >> reg::CCP_CONNECTION_COUNT_SHIFT & 0xF,
+        1
+    );
+    assert_eq!(
+        gev_status(other.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap_err()), // CA while EA held
         GEV_STATUS_ACCESS_DENIED
     );
     client.write_reg(reg::CCP, 0).unwrap();
     // Released: privilege bits clear, connection count stays non-zero.
-    assert_eq!(client.read_reg(reg::CCP).unwrap(), 1 << 16);
+    assert_eq!(
+        client.read_reg(reg::CCP).unwrap(),
+        1 << reg::CCP_CONNECTION_COUNT_SHIFT
+    );
 
     // Discovery ack carries the configured identity.
     let found = gentl_gvcp::client::discover(
@@ -138,6 +145,7 @@ fn gvsp_stream_over_the_wire() {
             width: 32,
             height: 16,
             pixel_format: MONO8,
+            channels: 1,
         },
     );
     let server = cam.start(0).unwrap();
