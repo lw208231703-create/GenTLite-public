@@ -192,6 +192,10 @@ fn main() {
     }
     assert_eq!(DSClose(ds), GC_ERR_SUCCESS);
     assert_eq!(DevClose(dev), GC_ERR_SUCCESS);
+    // Normal path: DevClose already released the control channel, so the
+    // guard stands down instead of writing CCP=0 through a closed port.
+    // (On panic above, Drop still fires and releases it.)
+    guard.disarm();
     assert_eq!(IFClose(iface), GC_ERR_SUCCESS);
     assert_eq!(TLClose(tl), GC_ERR_SUCCESS);
 
