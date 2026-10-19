@@ -146,6 +146,7 @@ fn gvsp_stream_over_the_wire() {
             height: 16,
             pixel_format: MONO8,
             channels: 1,
+            legacy_headers: false,
         },
     );
     let server = cam.start(0).unwrap();

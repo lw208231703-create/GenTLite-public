@@ -31,6 +31,7 @@
 //! 1..511 are optional, so that answer is how an application probes the
 //! count).
 
+use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -80,11 +81,13 @@ const NET_IF_CFG_WRITABLE: u32 =
     reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA;
 
 // GVCP Capability (1.2 §27.28, MSB-first print): user-defined-name and
-// serial-number registers are implemented. Everything else the table
-// offers (heartbeat disable, manifest table, test data, packet resend,
-// write memory, concatenation, events, ...) is genuinely unsupported in
-// the sim and stays clear.
-const GVCP_CAPABILITY_VALUE: u32 = 0x8000_0000 | 0x4000_0000;
+// serial-number registers are implemented, and PACKETRESEND (§16.7) is
+// served from the per-channel last-block cache. Everything else the
+// table offers (heartbeat disable, manifest table, test data, write
+// memory, concatenation, events, ...) is genuinely unsupported in the
+// sim and stays clear.
+const GVCP_CAPABILITY_VALUE: u32 =
+    0x8000_0000 | 0x4000_0000 | reg::GVCP_CAPABILITY_PACKET_RESEND;
 
 // Timestamp tick frequency (spec §36.31): device-specific rate chosen as
 // 1 MHz (sim is not an IEEE 1588 device); the value registers count
@@ -313,11 +316,13 @@ impl SimRegMap {
 
         // SCPSx factory defaults (spec §36.58: device-specific). Sim
         // convention: the register holds the *total* packet size (bits
-        // 16-31) including the IP/UDP/GVSP headers (spec layout, see
-        // notes/gvcp-wirefacts.md); 1400 payload + 48 headers keeps the
-        // IPv4 total at 1448 bytes, under the 1500-byte MTU. Every stream
-        // channel starts with the same default.
-        let default_scps = reg::scps_make(DEFAULT_PAYLOAD as u32 + reg::GVSP_HEADERS_OVERHEAD);
+        // 16-31) including the IP/UDP/GVSP headers of the configured
+        // header form (48-byte budget at 3.0, 36-byte at 1.2 legacy —
+        // 1.2 §27.46; see notes/gvcp-wirefacts.md and Q28); 1400 payload +
+        // headers keeps the IPv4 total under the 1500-byte MTU. Every
+        // stream channel starts with the same default.
+        let default_scps =
+            reg::scps_make(DEFAULT_PAYLOAD as u32 + crate::emitter::headers_overhead(&self.stream));
         for ch in i.channels.iter_mut() {
             ch[W_SCPS] = default_scps;
         }
@@ -564,6 +569,21 @@ impl DeviceHandler for SimRegMap {
 }
 
 impl SimRegMap {
+    /// PACKETRESEND (§16.7.2): serve the request from the channel's
+    /// last-block cache (or answer GEV_STATUS_PACKET_UNAVAILABLE when the
+    /// block is gone — CR-205st).
+    pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        self.scheduler.packet_resend(channel, block_id, first, last);
+    }
+
+    /// Test hook (§16.7 regression): start dropping the given payload
+    /// packets on send (leader/trailer are never dropped). The set is
+    /// shared with the test, which typically inserts (block_id,
+    /// packet_id) pairs before starting acquisition.
+    pub fn set_packet_drop(&self, drops: Arc<Mutex<BTreeSet<(u64, u32)>>>) {
+        self.scheduler.set_packet_drop(Some(drops));
+    }
+
     /// Write one stream channel register (spec §36.57–§36.60). `x` is the
     /// channel number and `off` the register's offset inside the channel's
     /// 0x40 block, both decoded from the address by
@@ -585,16 +605,64 @@ impl SimRegMap {
         if off == reg::SCP_OFFSET {
             return self.write_scp(x, value);
         }
-        // §36.58/§36.59: SCPSx/SCPDx are not writable while the channel is
-        // streaming — the values are frozen at open (R-586cd rejects
-        // in-stream SCPx writes; the size/delay registers follow the same
-        // rule). The scheduler lock is taken alone here so the lock order
-        // never inverts `write_scp`'s inner->scheduler order.
+        if off == reg::SCPS_OFFSET {
+            return self.write_scps(x, value);
+        }
+        // §36.59: SCPDx is not writable while the channel is streaming —
+        // the value is frozen at open (R-586cd rejects in-stream SCPx
+        // writes; the delay register follows the same rule). The
+        // scheduler lock is taken alone here so the lock order never
+        // inverts `write_scp`'s inner->scheduler order.
         if self.scheduler.is_streaming(x as u16) {
             return Err(GEV_STATUS_BUSY);
         }
         let mut i = self.inner.lock().expect("sim regmap poisoned");
         i.channels[x as usize][channel_word_index(off)] = value;
+        Ok(())
+    }
+
+    /// SCPSx (spec §36.58) write; `value` is the raw register value (fire
+    /// = 0x80000000, do_not_fragment = 0x40000000, packet_size = low 16
+    /// bits, MSB-first print numbering — Q31).
+    ///
+    /// Rounding (R-562st): the stored value is what the transmitter will
+    /// actually send — clamp to the sim's continuous size domain and floor
+    /// the payload to a pixel multiple ([`crate::emitter::round_packet_size`]).
+    ///
+    /// fire_test_packet (§11.7/§24.5, notes/OPEN-QUESTIONS.md Q33): a
+    /// write carrying the fire bit is accepted at any time and fires
+    /// exactly one test packet of the rounded size towards (SCDAx, SCPx
+    /// host_port); the stored value has the fire bit self-cleared
+    /// (§36.58). R-567s places negotiation right after the channel open,
+    /// before regular streaming; the sim's auto-stream has no acquisition
+    /// gating (Q15) and cannot model "not streaming", so instead of
+    /// rejecting test packets during the stream it tolerates them
+    /// interleaved. A plain (no-fire) write keeps the §36.58 block while
+    /// the channel streams.
+    fn write_scps(&self, x: u32, value: u32) -> Result<(), u16> {
+        let fire = value & reg::SCPS_FIRE_TEST_PACKET != 0;
+        let rounded = crate::emitter::round_packet_size(&self.stream, value);
+        if !fire && self.scheduler.is_streaming(x as u16) {
+            return Err(GEV_STATUS_BUSY);
+        }
+        // Stored = the written value without the self-clearing fire bit
+        // and with the size field replaced by the rounded size.
+        let stored =
+            (value & !reg::SCPS_FIRE_TEST_PACKET & !reg::SCPS_SIZE_MASK) | reg::scps_make(rounded);
+        {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            i.channels[x as usize][W_SCPS] = stored;
+        }
+        self.scheduler.update_packet_size(x as u16, stored);
+        if fire {
+            // R-093st: an unsupported requested size must not produce a
+            // test packet. Post-clamp the size is always transmittable
+            // (the sim accepts the whole [49, 65535] domain — its clamp IS
+            // the support test), so the fire always emits one packet. A
+            // fire on a closed channel is ignored by the scheduler (§11.7:
+            // the device can ignore or reject it).
+            self.scheduler.send_test_packet(x as u16, rounded);
+        }
         Ok(())
     }
 
@@ -673,6 +741,11 @@ impl SimDevice {
     pub fn new(map: Arc<SimRegMap>) -> Self {
         Self { map }
     }
+
+    /// Test hook (§16.7 regression): payload packets to drop on send.
+    pub fn set_packet_drop(&self, drops: Arc<Mutex<BTreeSet<(u64, u32)>>>) {
+        self.map.set_packet_drop(drops);
+    }
 }
 
 impl DeviceHandler for SimDevice {
@@ -687,6 +760,9 @@ impl DeviceHandler for SimDevice {
     }
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
         self.map.read_mem(addr, count)
+    }
+    fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        self.map.packet_resend(channel, block_id, first, last);
     }
 }
 
@@ -822,6 +898,7 @@ mod tests {
                 height: 480,
                 pixel_format: 0x0110_0007, // Mono16
                 channels: 1,
+                legacy_headers: false,
             },
         );
         assert_eq!(m.read_reg(REG_WIDTH).unwrap(), 640);

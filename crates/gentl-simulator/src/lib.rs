@@ -7,7 +7,7 @@ mod regmap;
 mod xml;
 
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gentl_core::GentlResult;
 use gentl_gvcp::GvcpServer;
@@ -90,6 +90,12 @@ pub struct StreamConfig {
     /// sim answers it past `channels`. Must be >= 1; smaller values are
     /// clamped (a transmitter device always has channel 0).
     pub channels: u16,
+    /// Transmit with the 1.2 legacy GVSP header form (1.2 §24 Fig 24-1:
+    /// 8-byte headers, EI=0, 16-bit block_id) and the 1.2 leader body
+    /// (36 bytes, u16 paddings). false (default) = the 3.0 form (20-byte
+    /// headers, EI=1, §24.2/§25.2.1). SCPSx packet_size counts the mode's
+    /// header budget (36 vs 48 bytes, 1.2 §27.46 / 3.0 §36.58).
+    pub legacy_headers: bool,
 }
 
 impl Default for StreamConfig {
@@ -99,6 +105,7 @@ impl Default for StreamConfig {
             height: 768,
             pixel_format: 0x0108_0001, // Mono8 (include/PFNC.h)
             channels: 1,
+            legacy_headers: false,
         }
     }
 }
@@ -139,6 +146,14 @@ impl SimCamera {
     /// keeps serving until dropped or stopped.
     pub fn start(&self, port: u16) -> GentlResult<GvcpServer> {
         GvcpServer::start(port, self.device.clone())
+    }
+
+    /// Test hook (§16.7 regression): start dropping the given payload
+    /// packets on send (leader/trailer are never dropped). Share a set
+    /// with the test and insert (block_id, packet_id) pairs before
+    /// starting acquisition.
+    pub fn set_packet_drop(&self, drops: Arc<Mutex<std::collections::BTreeSet<(u64, u32)>>>) {
+        self.device.set_packet_drop(drops);
     }
 
     /// The embedded GenICam XML (tests, consumer-side validation).

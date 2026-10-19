@@ -19,8 +19,6 @@
 //!     --seconds F      run time                (default 10)
 //!     --buf-size N     bytes per buffer        (default 16 MiB)
 //!     --buf-count N    announced buffers       (default 16)
-//!     --payload N      SCPS stride hint        (default 0 = infer from
-//!                      each block's first payload packet)
 //!     --recycle-ms N   buffer recycle period   (default 50)
 //!
 //! Example (start the receiver first, then the sender):
@@ -41,7 +39,6 @@ struct Opts {
     seconds: f64,
     buf_size: usize,
     buf_count: usize,
-    payload: usize,
     recycle: Duration,
 }
 
@@ -56,7 +53,6 @@ fn parse_args() -> Opts {
         seconds: 10.0,
         buf_size: 16 * 1024 * 1024,
         buf_count: 16,
-        payload: 0,
         recycle: Duration::from_millis(50),
     };
     let mut args = std::env::args().skip(1);
@@ -67,7 +63,6 @@ fn parse_args() -> Opts {
             "--seconds" => o.seconds = next_val(&mut args, &a).parse().unwrap(),
             "--buf-size" => o.buf_size = next_val(&mut args, &a).parse().unwrap(),
             "--buf-count" => o.buf_count = next_val(&mut args, &a).parse().unwrap(),
-            "--payload" => o.payload = next_val(&mut args, &a).parse().unwrap(),
             "--recycle-ms" => o.recycle = Duration::from_millis(next_val(&mut args, &a).parse().unwrap()),
             other => panic!("unknown flag {other}"),
         }
@@ -118,10 +113,9 @@ fn main() {
     for s in 0..opts.streams {
         let core = core.clone();
         let stop = stop.clone();
-        let payload = opts.payload;
         let port = opts.port + s;
         handles.push(std::thread::spawn(move || {
-            recv_thread(port, core, payload, deadline, stop)
+            recv_thread(port, core, deadline, stop)
         }));
     }
     let mut all = ReceiverStats::default();
@@ -165,13 +159,12 @@ fn main() {
 fn recv_thread(
     port: u16,
     core: Arc<DsCore>,
-    payload: usize,
     deadline: Instant,
     stop: Arc<AtomicBool>,
 ) -> ReceiverStats {
     let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port)).expect("bind");
     let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
-    let mut reasm = GvspReassembler::new(payload);
+    let mut reasm = GvspReassembler::new();
     let mut buf = [0u8; 65536];
     while !stop.load(Ordering::Relaxed) && Instant::now() < deadline {
         match socket.recv_from(&mut buf) {

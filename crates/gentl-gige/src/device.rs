@@ -90,11 +90,30 @@ impl GevDevice {
             })
             .map_err(|e| GentlError::Io(format!("spawn heartbeat: {e}")))?;
 
+        // GVCP Capability (0x0934): the test_data bit (print bit 6, mask
+        // 0x02000000 — 1.2 §27.28 / 3.0 §36.29, MSB-first print numbering,
+        // Q31) gates whether test packet payloads carry the §24.5.1 LFSR
+        // stream (CR-280st), and the packet_resend bit (print bit 29,
+        // mask 0x00000004) gates PACKETRESEND_CMD (§16.7, R-197ca: no
+        // requests to a device without it). Best effort: unreadable
+        // defaults to "no test data, no resend", both of which the spec
+        // tolerates (payload don't care / requests simply never sent).
+        let gvcp_capability = client
+            .lock()
+            .map_err(|_| GentlError::Io("client lock poisoned".into()))?
+            .read_reg(registers::GVCP_CAPABILITY)
+            .unwrap_or(0);
+        let test_data_supported = gvcp_capability & registers::GVCP_CAPABILITY_TEST_DATA != 0;
+        let packet_resend_supported =
+            gvcp_capability & registers::GVCP_CAPABILITY_PACKET_RESEND != 0;
+
         Ok(Arc::new(GevDevice {
             id: entry.id.clone(),
             discovery: entry.discovery.clone(),
             access,
             transport,
+            test_data_supported,
+            packet_resend_supported,
             client,
             stop_heartbeat: stop,
             heartbeat_thread: Mutex::new(Some(thread)),

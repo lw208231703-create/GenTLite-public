@@ -104,6 +104,17 @@ pub struct GevDevice {
     /// Streaming Capability register (spec §36.27/§36.38). Only GVSP is
     /// implemented; a GVRSP-only device is rejected at open.
     pub transport: StreamTransport,
+    /// GVCP Capability test_data bit (print bit 6, 1.2 §27.28 / 3.0 §36.29;
+    /// mask [`registers::GVCP_CAPABILITY_TEST_DATA`]): the device fills
+    /// test packet payloads with the §24.5.1 LFSR stream. Read once at
+    /// open; a read failure degrades to false (payload content then stays
+    /// unvalidated, which §24.5 permits for non-declaring devices).
+    pub test_data_supported: bool,
+    /// GVCP Capability packet_resend bit (print bit 29, mask
+    /// [`registers::GVCP_CAPABILITY_PACKET_RESEND`]): the device answers
+    /// PACKETRESEND_CMD (§16.7). R-197ca: the producer must not send
+    /// resend requests without this bit.
+    pub packet_resend_supported: bool,
     /// Shared with the heartbeat thread; `GvcpClient` documents that
     /// sharing needs external synchronization.
     pub client: Arc<Mutex<GvcpClient>>,

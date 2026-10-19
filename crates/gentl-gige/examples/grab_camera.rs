@@ -15,7 +15,33 @@ use gentl_core::types::*;
 use gentl_gige::*;
 
 const REG_ACQ: u64 = 0x1000_0024; // AcquisitionStart(1)/Stop(0), BE
+const REG_ACQ_MODE: u64 = 0x1000_0020; // AcquisitionMode: 2 = Continuous
 const REG_PAYLOAD_SIZE: u64 = 0x1000_0050; // RO, little-endian
+
+/// Releases the control channel (CCP=0) on panic/early return — a panicked
+/// grab must not leave the camera occupied (real-machine lesson 2026-10-19:
+/// an unreleased CCP + a camera-side hang made the device vanish until
+/// power-cycle).
+struct CcpGuard {
+    port: PortHandle,
+    active: bool,
+}
+
+impl CcpGuard {
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for CcpGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let zero = 0u32.to_be_bytes();
+            let mut size = zero.len();
+            let _ = GCWritePort(self.port, 0x0A00, zero.as_ptr() as *mut core::ffi::c_void, &mut size);
+        }
+    }
+}
 
 fn get_string(mut f: impl FnMut(*mut c_char, *mut usize) -> GCError) -> String {
     let mut buf = vec![0u8; 65536];
@@ -69,12 +95,17 @@ fn main() {
     let mut port: PortHandle = ptr::null_mut();
     assert_eq!(DevGetPort(dev, &mut port), GC_ERR_SUCCESS);
 
-    // Payload size (LE per this camera's XML).
+    // Payload size (LE per this camera's XML). The register reflects the
+    // camera's *current* ROI, which external tools (MVS) may change between
+    // runs — announce generously so a reconfigured ROI cannot overflow the
+    // buffers (real-machine finding 2026-10-19: full-frame 1280x1024 vs a
+    // stale 5120-byte PayloadSize read).
     let mut ps = [0u8; 4];
     assert_eq!(read_port(port, REG_PAYLOAD_SIZE, &mut ps), GC_ERR_SUCCESS);
     let payload_size = u32::from_le_bytes(ps) as usize;
     println!("payload size: {payload_size}");
     assert!(payload_size > 0);
+    let buf_size = payload_size.max(4 * 1024 * 1024);
 
     let mut ds: DSHandle = ptr::null_mut();
     let c_sid = std::ffi::CString::new("Stream0").unwrap();
@@ -83,7 +114,7 @@ fn main() {
     assert_eq!(GCRegisterEvent(ds, 1, &mut ev), GC_ERR_SUCCESS);
 
     const NUM_BUFFERS: usize = 4;
-    let mut buffers: Vec<Vec<u8>> = (0..NUM_BUFFERS).map(|_| vec![0u8; payload_size]).collect();
+    let mut buffers: Vec<Vec<u8>> = (0..NUM_BUFFERS).map(|_| vec![0u8; buf_size]).collect();
     let mut handles: Vec<BufferHandle> = Vec::new();
     for buf in buffers.iter_mut() {
         let mut bh: BufferHandle = ptr::null_mut();
@@ -98,6 +129,10 @@ fn main() {
     }
 
     // Open the stream channel, then arm the camera (SFNC AcquisitionStart).
+    // AcquisitionMode=Continuous(2) first: this camera's default is not
+    // free-running (real-machine finding 2026-10-19; mode reg per its XML).
+    assert_eq!(write_port(port, REG_ACQ_MODE, &2u32.to_be_bytes()), GC_ERR_SUCCESS);
+    let guard = CcpGuard { port, active: true };
     assert_eq!(
         DSStartAcquisition(ds, 0, u64::MAX),
         GC_ERR_SUCCESS,

@@ -25,6 +25,12 @@ pub trait DeviceHandler: Send + 'static {
     /// Read `count` bytes at `addr` from device memory. Err(status) is a
     /// GEV status code. Must succeed atomically (all bytes or error).
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16>;
+
+    /// PACKETRESEND_CMD (§16.7): retransmit the given packet-id range of
+    /// the cached block. Fire-and-forget — no ack exists (CR-201cd), so
+    /// the default ignores the request (devices without resend support
+    /// simply never answer; the requester times out, §16.7.3).
+    fn packet_resend(&self, _channel: u16, _block_id: u64, _first: u32, _last: u32) {}
 }
 
 pub struct GvcpServer {
@@ -180,7 +186,20 @@ fn serve_loop<H: DeviceHandler>(
                 out.extend_from_slice(&ack);
                 out.extend_from_slice(&data);
             }
-            // FORCEIP / PACKETRESEND / EVENT* / ACTION: not part of M1 scope.
+            // PACKETRESEND (§16.7): fire-and-forget — CR-198ca forbids the
+            // ACKNOWLEDGE flag and CR-201cd defines no PACKETRESEND_ACK,
+            // so nothing is sent back. CR-199cd: any application may send
+            // it; malformed payloads are ignored like any other
+            // undeliverable request.
+            PACKETRESEND_CMD => {
+                if let Some((channel, block_id, first, last)) =
+                    decode_packet_resend_payload(cmd.flag, payload_in)
+                {
+                    handler.packet_resend(channel, block_id, first, last);
+                }
+                continue;
+            }
+            // FORCEIP / EVENT* / ACTION: not part of M1 scope.
             _ => {
                 AckHeader::new(
                     GEV_STATUS_NOT_IMPLEMENTED,

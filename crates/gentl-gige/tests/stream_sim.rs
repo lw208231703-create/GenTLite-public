@@ -78,6 +78,7 @@ fn data_stream_end_to_end() {
             height: H,
             pixel_format: PF,
             channels: 1,
+            legacy_headers: false,
         },
     );
     let server = cam.start(0).expect("start sim camera");

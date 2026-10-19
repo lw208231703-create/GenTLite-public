@@ -178,6 +178,29 @@ impl GvcpClient {
             .map_err(|_| GentlError::Io("XML URL is not ASCII/UTF-8".into()))
     }
 
+    /// PACKETRESEND_CMD (0x0040) for one packet-id range of a block.
+    ///
+    /// Fire-and-forget by spec: CR-198ca forbids the ACKNOWLEDGE flag and
+    /// CR-201cd defines no PACKETRESEND_ACK — the command is sent without
+    /// waiting for anything, and §16.7 explicitly allows it to go out
+    /// asynchronously, even while another command's ack is pending. The
+    /// request id still advances (it must never be 0 or reused, spec
+    /// §15.1). Retransmission of the REQUEST itself (on no response) is
+    /// the receiver's job (§16.7.3, M3-1); this method only sends.
+    pub fn packet_resend(&self, stream_channel: u16, block_id: u64, first: u32, last: u32) {
+        let payload = encode_packet_resend_payload(stream_channel, block_id, first, last);
+        let mut buf = Vec::with_capacity(HEADER_LEN + payload.len());
+        let mut hdr = [0u8; HEADER_LEN];
+        let mut cmd = CmdHeader::new(PACKETRESEND_CMD, payload.len() as u16, self.alloc_req_id());
+        cmd.flag = FLAG_EXTENDED_ID; // CR-200c: EI set, payload carries block_id64.
+        cmd.encode(&mut hdr);
+        buf.extend_from_slice(&hdr);
+        buf.extend_from_slice(&payload);
+        // Best effort: a failed send surfaces as the block never
+        // recovering, i.e. the frame-retention timeout (§16.7.3 QoI).
+        let _ = self.socket.send_to(&buf, self.device_addr);
+    }
+
     /// Reset the device heartbeat timer by reading the CCP register
     /// (recommended method, spec §10.5). Errors are swallowed by design:
     /// heartbeat loss is surfaced as IO on the next real transaction.

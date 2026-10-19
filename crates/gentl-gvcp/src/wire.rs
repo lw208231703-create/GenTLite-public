@@ -39,6 +39,25 @@ pub const GEV_STATUS_ACCESS_DENIED: u16 = 0x8006;
 pub const GEV_STATUS_BUSY: u16 = 0x8007;
 pub const GEV_STATUS_PACKET_UNAVAILABLE: u16 = 0x800C;
 pub const GEV_STATUS_DATA_OVERRUN: u16 = 0x800D;
+/// Resent GVSP packet marker status (Table 19-1): SUCCESS and
+/// GEV_STATUS_PACKET_RESEND must both be accepted as a normal packet.
+pub const GEV_STATUS_PACKET_RESEND: u16 = 0x0100;
+/// "Packet not yet available" — a resend could not be served YET; the
+/// receiver may retry later (CR-205st, Table 16-2 status codes).
+pub const GEV_STATUS_NOT_YET_AVAILABLE: u16 = 0x8010;
+/// "Packet and previous packets removed from memory" (CR-205st).
+pub const GEV_STATUS_PACKET_AND_PREV_REMOVED_FROM_MEMORY: u16 = 0x8011;
+/// "Packet removed from memory" (CR-205st).
+pub const GEV_STATUS_PACKET_REMOVED_FROM_MEMORY: u16 = 0x8012;
+/// "Temporarily unavailable; a hold-off time extension may follow"
+/// (CR-205st; the hold-off extension is not parsed — QoI, v1).
+pub const GEV_STATUS_TEMPORARILY_UNAVAILABLE: u16 = 0x8014;
+
+/// GVCP flag byte: extended IDs. PACKETRESEND_CMD must set this (CR-200c,
+/// Fig 16-13): the request payload then carries the 64-bit block_id.
+/// Print bit 3 per the MSB-first convention (Q31) -> 0x10; Aravis
+/// ARV_GVCP_COMMAND_EXTENDED_ID_FLAG matches.
+pub const FLAG_EXTENDED_ID: u8 = 0x10;
 
 pub const HEADER_LEN: usize = 8;
 
@@ -258,6 +277,48 @@ pub fn encode_readmem_cmd_payload(addr: u32, count: u16) -> [u8; 8] {
     // p[4..6] reserved = 0
     p[6..8].copy_from_slice(&count.to_be_bytes());
     p
+}
+
+/// PACKETRESEND_CMD payload with extended IDs (CR-200c, Fig 16-13):
+/// stream_channel_id u16 + reserved u16 + first_packet_id u32 +
+/// last_packet_id u32 + block_id u64 (the 64-bit block_id is present
+/// because the command header sets FLAG_EXTENDED_ID). last_packet_id
+/// 0xFFFFFFFF means "up to the data trailer".
+pub fn encode_packet_resend_payload(channel: u16, block_id: u64, first: u32, last: u32) -> [u8; 20] {
+    let mut p = [0u8; 20];
+    p[0..2].copy_from_slice(&channel.to_be_bytes());
+    // p[2..4] reserved = 0
+    p[4..8].copy_from_slice(&first.to_be_bytes());
+    p[8..12].copy_from_slice(&last.to_be_bytes());
+    p[12..20].copy_from_slice(&block_id.to_be_bytes());
+    p
+}
+
+/// PACKETRESEND_CMD payload -> (stream_channel_id, block_id,
+/// first_packet_id, last_packet_id). Accepts both the extended form
+/// (FLAG_EXTENDED_ID set, 20-byte payload, 64-bit block_id) and the
+/// legacy form (12-byte payload + 16-bit block_id).
+pub fn decode_packet_resend_payload(flag: u8, p: &[u8]) -> Option<(u16, u64, u32, u32)> {
+    let (min_len, block_id) = if flag & FLAG_EXTENDED_ID != 0 {
+        if p.len() < 20 {
+            return None;
+        }
+        (20, u64::from_be_bytes(p[12..20].try_into().ok()?))
+    } else {
+        if p.len() < 14 {
+            return None;
+        }
+        (14, u64::from(u16::from_be_bytes([p[12], p[13]])))
+    };
+    if p.len() < min_len {
+        return None;
+    }
+    Some((
+        u16::from_be_bytes([p[0], p[1]]),
+        block_id,
+        u32::from_be_bytes(p[4..8].try_into().ok()?),
+        u32::from_be_bytes(p[8..12].try_into().ok()?),
+    ))
 }
 
 /// READMEM_ACK payload -> (address, data).

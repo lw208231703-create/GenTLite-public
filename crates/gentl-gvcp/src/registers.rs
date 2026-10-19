@@ -156,6 +156,20 @@ pub const CCP_SWITCHOVER_KEY_MASK: u32 = 0x0000_FFFF;
 pub const CCP_CONNECTION_COUNT_MASK: u32 = 0x0000_F000;
 pub const CCP_CONNECTION_COUNT_SHIFT: u32 = 12;
 
+// --- GVCP Capability (0x0934) bit fields (1.2 §27.28 / 3.0 §36.29) --------
+//
+// MSB-first print numbering (Q31): print bit N occupies 1 << (31 - N).
+pub const GVCP_CAPABILITY_USER_DEFINED_NAME: u32 = 1 << 31; // print bit 0 (UN)
+pub const GVCP_CAPABILITY_SERIAL_NUMBER: u32 = 1 << 30; // print bit 1 (SN)
+/// test_data (TD), print bit 6: the device fills GVSP test packet payloads
+/// with the §24.5.1 LFSR stream (CR-280st). The sim does not declare it.
+pub const GVCP_CAPABILITY_TEST_DATA: u32 = 0x0200_0000; // print bit 6 (TD)
+/// packet_resend, print bit 29 (1.2 §27.28; 3.0 §36.29 same position;
+/// Aravis GVCP_CAPABILITY_PACKET_RESEND = 1 << 2): the device answers
+/// PACKETRESEND_CMD (§16.7). R-197ca: a requester MUST NOT send resend
+/// requests to a device without this bit.
+pub const GVCP_CAPABILITY_PACKET_RESEND: u32 = 0x0000_0004; // print bit 29
+
 
 
 // --- Stream channel register field layouts (spec §36.57 / §36.58) ---------
