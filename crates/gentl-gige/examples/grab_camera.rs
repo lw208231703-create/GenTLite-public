@@ -95,17 +95,18 @@ fn main() {
     let mut port: PortHandle = ptr::null_mut();
     assert_eq!(DevGetPort(dev, &mut port), GC_ERR_SUCCESS);
 
-    // Payload size (LE per this camera's XML). The register reflects the
-    // camera's *current* ROI, which external tools (MVS) may change between
-    // runs — announce generously so a reconfigured ROI cannot overflow the
-    // buffers (real-machine finding 2026-10-19: full-frame 1280x1024 vs a
-    // stale 5120-byte PayloadSize read).
+    // PayloadSize (RO). BIG-endian on this camera's current firmware
+    // (camera_dump.xml declares BigEndian; verified by the parameter test
+    // 2026-10-19: register holds 1310720 for 1280x1024 Mono8 — reading it
+    // little-endian yields 5120, the exact value that misled the first
+    // acceptance run). The old firmware's XML declared LE while the wire
+    // was BE (Q28 #5); the improved firmware is consistent BE.
     let mut ps = [0u8; 4];
     assert_eq!(read_port(port, REG_PAYLOAD_SIZE, &mut ps), GC_ERR_SUCCESS);
-    let payload_size = u32::from_le_bytes(ps) as usize;
+    let payload_size = u32::from_be_bytes(ps) as usize;
     println!("payload size: {payload_size}");
     assert!(payload_size > 0);
-    let buf_size = payload_size.max(4 * 1024 * 1024);
+    let buf_size = payload_size;
 
     let mut ds: DSHandle = ptr::null_mut();
     let c_sid = std::ffi::CString::new("Stream0").unwrap();

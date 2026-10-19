@@ -290,6 +290,54 @@ fn main() {
         req += 1;
     }
     println!("{}", probe(&sock, tgt, "CCP=0 fin4 ", 0x80, WRITEREG_CMD, &rel, req));
+    req += 1;
+
+    // Phase 6: soft-reset the camera's network stack with FORCEIP
+    // (static_IP=0 -> device closes channels and restarts IP configuration,
+    // no ACK, R-151cd). Recovery attempt for the camera-side hang observed
+    // after killed MVS sessions.
+    println!("-- FORCEIP soft reset --");
+    let mut fi = [0u8; 56];
+    fi[2..8].copy_from_slice(&[0x00, 0x30, 0x53, 0x9b, 0xdb, 0x6f]);
+    // static IP / mask / gateway left zero -> restart IP config cycle.
+    // R-148ca: FORCEIP MUST be broadcast, so a dedicated unconnected
+    // socket with SO_BROADCAST (the control socket is connected).
+    {
+        let bcast = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+        bcast.set_broadcast(true).unwrap();
+        send_cmd(&bcast, (Ipv4Addr::new(255, 255, 255, 255), GVCP_PORT), 0x11, FORCEIP_CMD, &fi, req);
+    }
+    req += 1;
+    std::thread::sleep(Duration::from_millis(3000));
+
+    println!("{}", probe(&sock, tgt, "reacquire5 ", 0x80, WRITEREG_CMD, &ccp, req));
+    req += 1;
+    println!("{}", probe(&sock, tgt, "SCDA0 #5   ", 0x01, WRITEREG_CMD, &scda, req));
+    req += 1;
+    println!("{}", probe(&sock, tgt, "SCP0 open5 ", 0x01, WRITEREG_CMD, &scp, req));
+    req += 1;
+    println!("{}", probe(&sock, tgt, "AcqMode=2b ", 0x01, WRITEREG_CMD, &amw, req));
+    req += 1;
+
+    let drain = UdpSocket::bind((local, 40012u16)).unwrap();
+    drain.set_nonblocking(true).unwrap();
+    println!("{}", probe(&sock, tgt, "AcqStart=1b", 0x01, WRITEREG_CMD, &acq1, req));
+    req += 1;
+    let mut drain_buf = [0u8; 65536];
+    let mut received = 0usize;
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(1500) {
+        while let Ok((_, _)) = drain.recv_from(&mut drain_buf) {
+            received += 1;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    println!("stream after FORCEIP: {received} datagrams in 1.5s");
+    println!("{}", probe(&sock, tgt, "AcqStop=0b ", 0x01, WRITEREG_CMD, &acq0, req));
+    req += 1;
+    println!("{}", probe(&sock, tgt, "SCP0 close5", 0x01, WRITEREG_CMD, &scp0, req));
+    req += 1;
+    println!("{}", probe(&sock, tgt, "CCP=0 fin5 ", 0x80, WRITEREG_CMD, &rel, req));
 }
 
 const CCP: u32 = 0x0A00;
