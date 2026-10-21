@@ -1,6 +1,7 @@
 //! Local adapter enumeration (GenTL Interfaces) and GVCP device discovery.
 //!
-//! Adapter enumeration uses `GetAdaptersAddresses` (iphlpapi). Discovery
+//! Adapter enumeration lives in [`crate::sys`] (GetAdaptersAddresses on
+//! Windows, getifaddrs on Unix). Discovery
 //! sends DISCOVERY_CMD to each interface's directed broadcast address
 //! (`ip | !subnet_mask`) plus the limited broadcast `255.255.255.255:3956`
 //! (notes/gvcp-wirefacts.md §16.1). Test hook: `GENTLITE_DISCOVERY_TARGETS`
@@ -15,13 +16,6 @@ use std::time::Duration;
 
 use gentl_core::GentlResult;
 use gentl_gvcp::wire::DiscoveryInfo;
-use windows_sys::Win32::NetworkManagement::IpHelper::{
-    GetAdaptersAddresses, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
-    GAA_FLAG_SKIP_MULTICAST, IF_TYPE_SOFTWARE_LOOPBACK, IP_ADAPTER_ADDRESSES_LH,
-    IP_ADAPTER_UNICAST_ADDRESS_LH,
-};
-use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
-use windows_sys::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 
 /// GenTL GVCP port (spec §16.1); the device-side port for every target.
 pub const GVCP_PORT: u16 = 3956;
@@ -57,74 +51,18 @@ pub fn device_id(mac: &[u8; 6]) -> String {
     )
 }
 
-fn prefix_len_to_mask(prefix: u8) -> u32 {
-    if prefix >= 32 {
-        u32::MAX
-    } else if prefix == 0 {
-        0
-    } else {
-        u32::MAX << (32 - prefix)
-    }
-}
-
-/// Enumerate this host's IPv4-capable network adapters. Failures of the
-/// OS call surface as an empty list: a producer without interfaces is
-/// useless but must not crash the consumer.
+/// Enumerate this host's IPv4-capable network adapters (the discovery
+/// inputs for the aggregate interface). Failures of the OS call surface as
+/// an empty list: a producer without interfaces is useless but must not
+/// crash the consumer.
 pub fn list_nics() -> Vec<NicInfo> {
-    let mut out = Vec::new();
-    unsafe {
-        let flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        let mut size: u32 = 0;
-        // First call: required size.
-        let r = GetAdaptersAddresses(AF_INET as u32, flags, std::ptr::null(), std::ptr::null_mut(), &mut size);
-        if r != 0 && r != windows_sys::Win32::Foundation::ERROR_BUFFER_OVERFLOW {
-            return out;
-        }
-        let mut buf = vec![0u8; size as usize];
-        let r = GetAdaptersAddresses(
-            AF_INET as u32,
-            flags,
-            std::ptr::null(),
-            buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
-            &mut size,
-        );
-        if r != 0 {
-            return out;
-        }
-
-        let mut cur = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-        while !cur.is_null() {
-            let a = &*cur;
-            cur = a.Next;
-
-            if a.IfType == IF_TYPE_SOFTWARE_LOOPBACK || a.OperStatus != IfOperStatusUp {
-                continue; // loopback (no GVCP) or down
-            }
-            if a.PhysicalAddressLength < 6 {
-                continue; // no hardware MAC: not a real NIC for our purposes
-            }
-
-            // First IPv4 unicast address of this adapter (we asked for
-            // AF_INET only, so anything listed here is IPv4).
-            let mut ua = a.FirstUnicastAddress;
-            while !ua.is_null() {
-                let u: &IP_ADAPTER_UNICAST_ADDRESS_LH = &*ua;
-                ua = u.Next;
-                let sa = u.Address.lpSockaddr as *const SOCKADDR_IN;
-                if sa.is_null() || (*sa).sin_family != AF_INET {
-                    continue;
-                }
-                let ip = Ipv4Addr::from(u32::from_be((*sa).sin_addr.S_un.S_addr));
-                let mask = Ipv4Addr::from(u32::from_be(prefix_len_to_mask(u.OnLinkPrefixLength)));
-                out.push(NicInfo {
-                    ipv4: ip,
-                    subnet_mask: mask,
-                });
-                break; // one address per NIC is enough
-            }
-        }
-    }
-    out
+    crate::sys::nic_enums()
+        .into_iter()
+        .map(|(_name, ipv4, subnet_mask)| NicInfo {
+            ipv4,
+            subnet_mask,
+        })
+        .collect()
 }
 
 /// Broadcast targets for one interface: directed broadcast plus the global
@@ -227,13 +165,6 @@ mod tests {
         let t = broadcast_targets(&info);
         assert_eq!(t[0], (Ipv4Addr::new(192, 168, 1, 255), GVCP_PORT));
         assert_eq!(t[1], (GLOBAL_DISCOVERY_IP, GVCP_PORT));
-    }
-
-    #[test]
-    fn mask_from_prefix() {
-        assert_eq!(prefix_len_to_mask(24), 0xFFFFFF00);
-        assert_eq!(prefix_len_to_mask(0), 0);
-        assert_eq!(prefix_len_to_mask(32), u32::MAX);
     }
 
     /// The only reader of `GENTLITE_GEV_STREAM_CHANNELS` in this test

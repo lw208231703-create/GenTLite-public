@@ -4,6 +4,7 @@
 
 mod emitter;
 mod regmap;
+mod sys;
 mod xml;
 
 use std::net::Ipv4Addr;

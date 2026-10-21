@@ -8,5 +8,12 @@ edition.workspace = true
 [dependencies]
 gentl-core = { path = "../gentl-core" }
 gentl-gvcp = { path = "../gentl-gvcp" }
+
+[target.'cfg(windows)'.dependencies]
 # IP_DONTFRAGMENT for the §24.5 test packet (setsockopt on the stream sink).
 windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }
+
+[target.'cfg(unix)'.dependencies]
+# Phase A Linux port: IP_MTU_DISCOVER for the same §24.5 test packet (see
+# src/sys.rs).
+libc = "0.2"

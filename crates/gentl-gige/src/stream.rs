@@ -54,7 +54,6 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
-use std::os::windows::io::AsRawSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -68,8 +67,6 @@ use gentl_gvcp::gvsp;
 use gentl_gvcp::registers;
 use gentl_gvcp::wire::GEV_STATUS_INVALID_ADDRESS;
 use gentl_gvcp::GvcpClient;
-use windows_sys::Win32::Networking::WinSock::{getsockopt, setsockopt, SO_RCVBUF, SOL_SOCKET};
-use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadAffinityMask};
 
 use crate::cti::{DeviceAccess, GevDevice};
 use crate::discovery::desired_stream_channels;
@@ -152,42 +149,17 @@ fn desired_frame_retention() -> Duration {
     Duration::from_millis(ms.clamp(10, 60_000))
 }
 
-/// Set SO_RCVBUF on a stream socket and return the granted buffer size in
-/// bytes (0 when the call failed). Windows clamps the request to a kernel
-/// maximum, so the getsockopt readback is the only truthful value — the
-/// requested number is never reported anywhere. Failure is harmless by
-/// design: the socket keeps its OS default and streaming still works.
+/// Set SO_RCVBUF on a stream socket and store the granted buffer size in
+/// bytes (0 when the call failed); OS details live in [`crate::sys`].
 fn apply_so_rcvbuf(socket: &UdpSocket, kb: u32) -> usize {
-    const SIZE_OF_I32: i32 = std::mem::size_of::<i32>() as i32;
-    let s = socket.as_raw_socket() as usize;
-    let requested: i32 = (kb as usize)
-        .saturating_mul(1024)
-        .min(i32::MAX as usize) as i32;
-    let r = unsafe {
-        setsockopt(
-            s,
-            SOL_SOCKET,
-            SO_RCVBUF,
-            (&requested as *const i32).cast(),
-            SIZE_OF_I32,
-        )
-    };
-    if r != 0 {
-        return 0;
-    }
-    let mut actual: i32 = 0;
-    let mut len = SIZE_OF_I32;
-    let r = unsafe { getsockopt(s, SOL_SOCKET, SO_RCVBUF, (&mut actual as *mut i32).cast(), &mut len) };
-    if r != 0 { 0 } else { actual.max(0) as usize }
+    crate::sys::set_recv_buffer(socket, kb as usize)
 }
 
 /// Bind the calling thread to the `GENTLITE_GEV_RX_CORES` mask. Best
 /// effort: an out-of-range mask fails silently and the thread keeps its
 /// default placement (QoI — see [`desired_rx_affinity`]).
 fn set_rx_affinity(mask: usize) {
-    unsafe {
-        SetThreadAffinityMask(GetCurrentThread(), mask);
-    }
+    crate::sys::set_thread_affinity(mask as u64);
 }
 
 /// Transport context of one GVSP stream channel (spec §36.57 SCPx): one
@@ -211,7 +183,7 @@ struct ChannelCtx {
     opened: Mutex<bool>,
     /// Granted SO_RCVBUF in bytes (getsockopt readback; 0 = the
     /// setsockopt failed and the OS default is in effect). QoI diagnostic
-    /// (see [`desired_rcvbuf_kb`]): Windows clamps the request to a kernel
+    /// (see [`desired_rcvbuf_kb`]): the OS clamps the request to a kernel
     /// maximum, so only the readback is truthful. Kept for inspection —
     /// nothing reads it outside the unit test yet.
     #[allow(dead_code)]
@@ -881,7 +853,7 @@ mod tests {
     }
 
     /// SO_RCVBUF request + readback wiring: the granted size lands in the
-    /// channel context. (Windows clamps the request; the readback is
+    /// channel context. (The OS clamps the request; the readback is
     /// always > 0 for a valid socket.)
     #[test]
     fn so_rcvbuf_granted_value_is_stored() {

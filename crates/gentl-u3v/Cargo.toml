@@ -13,6 +13,10 @@ name = "gentl_u3v"
 gentl-core = { path = "../gentl-core" }
 # ZIPped camera XML (manifest file format 1, GenCP §5.5.1.2)
 zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+# WinUSB backend (Phase B adds the rusb/libusb backend for Unix,
+# notes/PENDING.md "Linux 可移植").
 windows-sys = { version = "0.59", features = [
     "Win32_Devices_Usb",
     "Win32_Devices_DeviceAndDriverInstallation",

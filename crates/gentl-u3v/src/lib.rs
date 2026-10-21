@@ -8,8 +8,12 @@
 //! workarounds (project decision 2026-10-12); panics must never cross
 //! this boundary.
 //!
-//! The built artifact is `gentl_u3v.dll`; the `.cti` rename happens at
-//! packaging time (M5 release flow).
+//! The built artifact is the cdylib (`gentl_u3v.dll` on Windows,
+//! `libgentl_u3v.so` on Linux); the `.cti` rename happens at packaging
+//! time (M5 release flow). The USB backend is Windows-only until Phase B
+//! (rusb/libusb, notes/PENDING.md "Linux 可移植"): other platforms build
+//! with stub modules — enumeration reads empty and device open reports
+//! GC_ERR_NOT_IMPLEMENTED.
 
 #![allow(non_snake_case)]
 
@@ -25,12 +29,45 @@ use gentl_core::{
     last_error, set_error, set_last_error, to_handle, GentlError, GentlResult,
 };
 
+// The WinUSB-backed modules are Windows-only (Phase A Linux port,
+// notes/PENDING.md "Linux 可移植"). On other platforms the stub modules
+// keep the crate — and its full GenTL surface — building: enumeration
+// reads empty, device open returns GC_ERR_NOT_IMPLEMENTED. Phase B adds
+// the rusb/libusb backend behind the same module names.
+#[cfg(windows)]
+#[path = "control.rs"]
 mod control;
+#[cfg(not(windows))]
+#[path = "stub/control.rs"]
+mod control;
+
+#[cfg(windows)]
+#[path = "cti.rs"]
 mod cti;
+#[cfg(not(windows))]
+#[path = "stub/cti.rs"]
+mod cti;
+
+#[cfg(windows)]
+#[path = "discovery.rs"]
+mod discovery;
+#[cfg(not(windows))]
+#[path = "stub/discovery.rs"]
 mod discovery;
 
+// The GenCP/U3V wire codec is platform-independent; on non-Windows
+// platforms its only users (control/stream) are compiled out, hence the
+// dead_code allow there.
 mod packets;
+
+#[cfg(windows)]
+#[path = "stream.rs"]
 mod stream;
+#[cfg(not(windows))]
+#[path = "stub/stream.rs"]
+mod stream;
+
+#[cfg(windows)]
 mod usbio;
 
 use cti::{DeviceAccess, DevicePort, TlSystem, U3vDevice, U3vInterface};
@@ -874,7 +911,13 @@ pub extern "C" fn IFOpenDevice(
 }
 
 /// Open the USB device, collect interfaces, bring up the GenCP control
-/// channel and read the bootstrap registers.
+/// channel and read the bootstrap registers. Windows-only: the WinUSB
+/// plumbing lives behind `cfg(windows)` (Phase A Linux port); other
+/// platforms report NOT_IMPLEMENTED (Phase B: rusb backend,
+/// notes/PENDING.md "Linux 可移植"). Unreachable there anyway — stub
+/// discovery enumerates nothing, so `IFOpenDevice` never reaches this
+/// path.
+#[cfg(windows)]
 fn open_u3v_device(
     iface: &Arc<U3vInterface>,
     entry: &discovery::FoundDevice,
@@ -907,6 +950,17 @@ fn open_u3v_device(
         opened_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         parent: Arc::downgrade(iface),
     }))
+}
+
+#[cfg(not(windows))]
+fn open_u3v_device(
+    _iface: &Arc<U3vInterface>,
+    _entry: &discovery::FoundDevice,
+    _access: DeviceAccess,
+) -> GentlResult<Arc<U3vDevice>> {
+    Err(GentlError::NotImplemented(
+        "U3V USB backend on this platform (Phase B: rusb, notes/PENDING.md)",
+    ))
 }
 
 // Device functions ------------------------------------------------------------

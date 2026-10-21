@@ -14,6 +14,8 @@ name = "gentl_gige"
 [dependencies]
 gentl-core = { path = "../gentl-core" }
 gentl-gvcp = { path = "../gentl-gvcp" }
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -21,6 +23,11 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# Phase A Linux port (notes/PENDING.md "Linux 可移植"): getifaddrs NIC
+# enumeration, SO_RCVBUF, sched_setaffinity (see src/sys.rs).
+libc = "0.2"
 
 [dev-dependencies]
 gentl-simulator = { path = "../gentl-simulator" }

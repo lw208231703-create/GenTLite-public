@@ -24,7 +24,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
-use std::os::windows::io::AsRawSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -33,7 +32,6 @@ use std::time::{Duration, Instant};
 use gentl_gvcp::gvsp::*;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::{GEV_STATUS_PACKET_RESEND, GEV_STATUS_PACKET_UNAVAILABLE};
-use windows_sys::Win32::Networking::WinSock::{setsockopt, IPPROTO_IP, IP_DONTFRAGMENT};
 
 use crate::StreamConfig;
 
@@ -654,20 +652,11 @@ fn send_test_datagram(socket: &UdpSocket, target: SocketAddr, buf: &[u8]) {
     }
 }
 
-/// Set/clear IP_DONTFRAGMENT on the sink socket for a §24.5 test packet
-/// ("The don't fragment bit must also be set in the IP Header"). Best
-/// effort: a failed setsockopt must not block the test packet.
+/// Set/clear IP don't-fragment on the sink socket for a §24.5 test packet
+/// (OS details in [`crate::sys`]). Best effort: a failed setsockopt must
+/// not block the test packet.
 fn set_ip_do_not_fragment(socket: &UdpSocket, on: bool) {
-    let flag: i32 = i32::from(on);
-    unsafe {
-        setsockopt(
-            socket.as_raw_socket() as usize,
-            IPPROTO_IP,
-            IP_DONTFRAGMENT,
-            (&flag as *const i32).cast(),
-            std::mem::size_of::<i32>() as i32,
-        );
-    }
+    crate::sys::set_ip_do_not_fragment(socket, on);
 }
 
 /// Send one datagram, waiting out send-buffer backpressure. Returns false

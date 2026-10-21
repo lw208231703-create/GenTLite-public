@@ -32,6 +32,7 @@ mod device;
 mod discovery;
 mod gvsp_receiver;
 mod stream;
+mod sys;
 
 
 use cti::{DeviceAccess, DeviceEntry, DevicePort, GevDevice, GevInterface, TlSystem};

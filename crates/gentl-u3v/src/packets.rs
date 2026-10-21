@@ -5,6 +5,9 @@
 //!
 //! Byte order: all bootstrap registers and protocol fields are
 //! little-endian (U3V 1.2 R-30cd, §4.1.2); data blocks too (R-75st, §5.5.1).
+// On non-Windows platforms the codec's only users (control/stream) are
+// compiled out (Phase A Linux port), so unused-item lints are expected.
+#![cfg_attr(not(windows), allow(dead_code))]
 
 // ---------------------------------------------------------------------------
 // GenCP command layer (GenCP 1.3.1 §4)
