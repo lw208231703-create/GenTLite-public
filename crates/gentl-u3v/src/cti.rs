@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, Weak};
 use gentl_core::{Module, ModuleType};
 
 use crate::control::{Bootstrap, GenCpClient};
-use crate::discovery::{DeviceIdentity, FoundDevice};
 use crate::stream::{EventModule, U3vBuffer, U3vDataStream};
+use crate::types::{DeviceIdentity, FoundDevice};
 use crate::usbio::InterfaceSet;
 
 /// System (TL) module: one per process, created by `TLOpen`.
@@ -76,11 +76,14 @@ pub enum DeviceAccess {
     Exclusive,
 }
 
-/// An opened remote device: WinUSB interface set, GenCP control channel
-/// (owning the file/WinUSB handles), bootstrap register snapshot.
+/// An opened remote device: USB interface set (owning every backend
+/// resource — file/WinUSB handles on Windows, the libusb handle plus
+/// interface claims on Linux), GenCP control channel (holding the
+/// control endpoint pipes), bootstrap register snapshot.
 ///
-/// Field drop order is load-bearing: `ifaces` (associated interfaces)
-/// must go before `client` (default interface + file handle).
+/// Field drop order is load-bearing: `ifaces` must go before `client` so
+/// the endpoint pipes are dropped (and receiver threads joined, via the
+/// stream modules) before the handles they reference are freed.
 pub struct U3vDevice {
     pub id: String,
     pub identity: DeviceIdentity,

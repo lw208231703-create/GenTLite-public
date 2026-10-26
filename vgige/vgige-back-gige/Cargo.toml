@@ -1,0 +1,15 @@
+[package]
+name = "vgige-back-gige"
+description = "vgige CameraBack/FrameSource adapter for GigE Vision cameras (GVCP client control + GVSP reassembly)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+vgige-core = { path = "../vgige-core" }
+gentl-core = { path = "../../crates/gentl-core" }
+gentl-gige = { path = "../../crates/gentl-gige" }
+gentl-gvcp = { path = "../../crates/gentl-gvcp" }
+# Zipped camera XML (spec §14.1.1 manifest format 1): transparently unzipped
+# at startup (same crate/features as gentl-gige's example tooling).
+zip = { version = "2", default-features = false, features = ["deflate"] }

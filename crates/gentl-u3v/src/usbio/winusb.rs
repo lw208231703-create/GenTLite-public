@@ -1,28 +1,31 @@
-//! Shared WinUSB plumbing: overlapped pipe I/O with timeouts, interface
-//! collection walking, and error text. Used by the control channel
-//! (control.rs) and the streaming receiver (stream.rs).
+//! WinUSB backend (Windows): overlapped pipe I/O with timeouts,
+//! interface collection walking associated interfaces, and RAW_IO pipe
+//! policy. This is the pre-port usbio.rs code with the endpoint surface
+//! expressed as [`UsbPipe`] impls — the I/O semantics (overlapped
+//! completion, timeout cancel via AbortPipe+ResetPipe, RAW_IO contract)
+//! are unchanged.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
 use windows_sys::Win32::Devices::Usb::{
-    WinUsb_AbortPipe, WinUsb_GetAssociatedInterface, WinUsb_GetOverlappedResult,
-    WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_Free, WinUsb_ReadPipe, WinUsb_WritePipe,
-    WinUsb_ResetPipe,
+    WinUsb_AbortPipe, WinUsb_Free, WinUsb_FlushPipe, WinUsb_GetAssociatedInterface,
+    WinUsb_GetOverlappedResult, WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_ReadPipe,
+    WinUsb_WritePipe, WinUsb_ResetPipe, WinUsb_SetPipePolicy,
     WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION, USB_INTERFACE_DESCRIPTOR,
-    UsbdPipeTypeBulk,
+    UsbdPipeTypeBulk, RAW_IO,
 };
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE, WAIT_OBJECT_0, WIN32_ERROR};
 use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
-use crate::discovery::{
+use crate::descriptors::{
     USB_CLASS_MISC, USB_INTERFACE_SUBCLASS_U3V, USB_PROTOCOL_CONTROL, USB_PROTOCOL_EVENT,
     USB_PROTOCOL_STREAMING,
 };
-
-/// USB pipe type for bulk endpoints.
-
+use crate::discovery::OpenedDevice;
+use crate::usbio::UsbPipe;
 
 pub fn last_error_text() -> String {
     let code = unsafe { GetLastError() };
@@ -93,7 +96,7 @@ impl Drop for Overlapped {
 /// Synchronous-style overlapped write of the whole buffer. WinUSB
 /// returns ERROR_IO_PENDING for the overlapped path; we wait up to
 /// `timeout`.
-pub fn write_pipe(
+fn write_pipe(
     winusb: WINUSB_INTERFACE_HANDLE,
     pipe: u8,
     buf: &[u8],
@@ -133,7 +136,7 @@ pub fn write_pipe(
 
 /// Overlapped read into `buf`; returns the number of bytes transferred.
 /// A timeout cancels the transfer before returning GentlError::Timeout.
-pub fn read_pipe(
+fn read_pipe(
     winusb: WINUSB_INTERFACE_HANDLE,
     pipe: u8,
     buf: &mut [u8],
@@ -183,7 +186,6 @@ fn cancel_pending(winusb: WINUSB_INTERFACE_HANDLE, pipe: u8, event: HANDLE) {
     }
 }
 
-
 /// Enable RAW_IO on a streaming (bulk IN) pipe.
 ///
 /// RAW_IO bypasses WinUSB's normal request-queuing layer and submits reads
@@ -198,8 +200,7 @@ fn cancel_pending(winusb: WINUSB_INTERFACE_HANDLE, pipe: u8, event: HANDLE) {
 /// still completes on buffer-full or short packet, so U3V piece
 /// boundaries (each block piece is its own transfer, §5.2.1.2/§5.2.1.4)
 /// keep their meaning via `actual_length`.
-pub fn set_raw_io(handle: WINUSB_INTERFACE_HANDLE, pipe: u8) -> GentlResult<()> {
-    use windows_sys::Win32::Devices::Usb::{RAW_IO, WinUsb_SetPipePolicy};
+fn set_raw_io(handle: WINUSB_INTERFACE_HANDLE, pipe: u8) -> GentlResult<()> {
     let value: u8 = 1; // TRUE
     let ok = unsafe { WinUsb_SetPipePolicy(handle, pipe, RAW_IO, 1, &value as *const u8 as *const _) };
     if ok == 0 {
@@ -209,22 +210,6 @@ pub fn set_raw_io(handle: WINUSB_INTERFACE_HANDLE, pipe: u8) -> GentlResult<()> 
         )));
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::align_request;
-
-    #[test]
-    fn align_request_rounds_to_mps() {
-        assert_eq!(align_request(52, 1024), 1024); // leader
-        assert_eq!(align_request(32, 1024), 1024); // trailer
-        assert_eq!(align_request(1024, 1024), 1024);
-        assert_eq!(align_request(1025, 1024), 2048); // odd final piece
-        assert_eq!(align_request(1_048_576, 1024), 1_048_576); // full TS piece
-        assert_eq!(align_request(100, 512), 512);
-        assert_eq!(align_request(100, 1), 100); // degenerate mps
-    }
 }
 
 /// One endpoint of a U3V interface.
@@ -239,20 +224,22 @@ pub struct PipeInfo {
 
 /// All interfaces of an opened U3V device with their bulk pipes.
 ///
-/// The raw handles are owned here; every use goes through WinUSB calls
-/// taking the pointer by value, and `Drop` frees them. The device
-/// module holding this set must be `Send + Sync` (GenTL handles cross
-/// threads; gige's `GevDevice` wraps the same kind of resource).
+/// The raw handles are owned here (`_owner` keeps the file + default
+/// interface handle; `associated` the WinUsb_GetAssociatedInterface
+/// results, freed with WinUsb_Free on drop); every endpoint is handed out
+/// as a [`WinUsbPipe`] wrapper. The device module holding this set must
+/// be `Send + Sync` (GenTL handles cross threads; gige's `GevDevice`
+/// wraps the same kind of resource).
 pub struct InterfaceSet {
-    /// Default interface handle (owned by the caller's OpenedDevice).
-    default: WINUSB_INTERFACE_HANDLE,
-    /// Associated interfaces obtained via WinUsb_GetAssociatedInterface
-    /// (must be freed with WinUsb_Free).
+    /// Default interface + file handle ownership (lives exactly as long
+    /// as any pipe referencing its handle).
+    _owner: OpenedDevice,
+    /// Associated interfaces obtained via WinUsb_GetAssociatedInterface.
     associated: Vec<WINUSB_INTERFACE_HANDLE>,
-    pub control_out: Option<(usize, u8, u16)>,
-    pub control_in: Option<(usize, u8, u16)>,
-    pub event_in: Option<(usize, u8, u16)>,
-    pub stream_in: Vec<(usize, u8, u16)>,
+    pub control_out: Option<Arc<dyn UsbPipe>>,
+    pub control_in: Option<Arc<dyn UsbPipe>>,
+    pub event_in: Option<Arc<dyn UsbPipe>>,
+    pub stream_in: Vec<Arc<dyn UsbPipe>>,
 }
 
 impl InterfaceSet {
@@ -260,15 +247,16 @@ impl InterfaceSet {
     /// pipes by U3V interface protocol (§3.2.4/3.2.6/3.2.7). Stream
     /// interfaces keep descriptor order (CR-123st: stream index = SIRM
     /// order).
-    pub fn collect(default: WINUSB_INTERFACE_HANDLE) -> GentlResult<Self> {
+    pub fn collect(owner: OpenedDevice) -> GentlResult<Self> {
         let mut set = Self {
-            default,
+            _owner: owner,
             associated: Vec::new(),
             control_out: None,
             control_in: None,
             event_in: None,
             stream_in: Vec::new(),
         };
+        let default = set._owner.winusb;
         let mut handles = vec![default];
         for i in 0..16u8 {
             let mut h: WINUSB_INTERFACE_HANDLE = std::ptr::null_mut();
@@ -279,8 +267,8 @@ impl InterfaceSet {
             set.associated.push(h);
             handles.push(h);
         }
-        for (idx, h) in handles.iter().enumerate() {
-            let Some((iface_desc, pipes)) = interface_pipes(*h) else {
+        for h in handles.iter().copied() {
+            let Some((iface_desc, pipes)) = interface_pipes(h) else {
                 continue;
             };
             if iface_desc.bInterfaceClass != USB_CLASS_MISC
@@ -291,24 +279,37 @@ impl InterfaceSet {
             match iface_desc.bInterfaceProtocol {
                 USB_PROTOCOL_CONTROL => {
                     for p in pipes {
+                        let pipe: Arc<dyn UsbPipe> = Arc::new(WinUsbPipe {
+                            handle: h,
+                            pipe: p.pipe_id,
+                            mps: p.max_packet,
+                        });
                         if p.is_in {
-                            set.control_in.get_or_insert((idx, p.pipe_id, p.max_packet));
+                            set.control_in.get_or_insert(pipe);
                         } else {
-                            set.control_out.get_or_insert((idx, p.pipe_id, p.max_packet));
+                            set.control_out.get_or_insert(pipe);
                         }
                     }
                 }
                 USB_PROTOCOL_EVENT => {
                     for p in pipes {
                         if p.is_in {
-                            set.event_in.get_or_insert((idx, p.pipe_id, p.max_packet));
+                            set.event_in.get_or_insert(Arc::new(WinUsbPipe {
+                                handle: h,
+                                pipe: p.pipe_id,
+                                mps: p.max_packet,
+                            }));
                         }
                     }
                 }
                 USB_PROTOCOL_STREAMING => {
                     for p in pipes {
                         if p.is_in {
-                            set.stream_in.push((idx, p.pipe_id, p.max_packet));
+                            set.stream_in.push(Arc::new(WinUsbPipe {
+                                handle: h,
+                                pipe: p.pipe_id,
+                                mps: p.max_packet,
+                            }));
                         }
                     }
                 }
@@ -322,15 +323,6 @@ impl InterfaceSet {
             ));
         }
         Ok(set)
-    }
-
-    /// WinUSB handle for an interface index from this set.
-    pub fn handle(&self, idx: usize) -> Option<WINUSB_INTERFACE_HANDLE> {
-        if idx == 0 {
-            Some(self.default)
-        } else {
-            self.associated.get(idx - 1).copied()
-        }
     }
 }
 
@@ -347,19 +339,43 @@ impl Drop for InterfaceSet {
 unsafe impl Send for InterfaceSet {}
 unsafe impl Sync for InterfaceSet {}
 
-/// WinUSB interface handle + pipe id, moved into the receiver thread.
-/// The stream joins the thread before the device module (which owns the
-/// handle set) can be dropped.
-#[derive(Clone, Copy)]
-pub struct PipeHandle(pub WINUSB_INTERFACE_HANDLE, pub u8, pub u16);
-
-/// Round a piece size up to the endpoint's maximum packet size, as RAW_IO
-/// requires every request length to be a multiple of it.
-pub fn align_request(size: u32, mps: u16) -> u32 {
-    let mps = u32::from(mps.max(1));
-    size.div_ceil(mps) * mps
+/// WinUSB interface handle + endpoint implementing [`UsbPipe`], moved
+/// into the receiver thread. The stream joins the thread before the
+/// device module (which owns the handle set) can be dropped.
+struct WinUsbPipe {
+    handle: WINUSB_INTERFACE_HANDLE,
+    pipe: u8,
+    mps: u16,
 }
-unsafe impl Send for PipeHandle {}
+
+impl UsbPipe for WinUsbPipe {
+    fn read_bulk(&self, buf: &mut [u8], timeout: Duration) -> GentlResult<u32> {
+        read_pipe(self.handle, self.pipe, buf, timeout)
+    }
+
+    fn write_bulk(&self, buf: &[u8], timeout: Duration) -> GentlResult<()> {
+        write_pipe(self.handle, self.pipe, buf, timeout)
+    }
+
+    fn flush(&self) {
+        // Same call as the pre-port error path in control.rs
+        // (transaction failure → WinUsb_FlushPipe on the IN pipe).
+        unsafe {
+            let _ = WinUsb_FlushPipe(self.handle, self.pipe);
+        }
+    }
+
+    fn set_raw_io(&self) -> GentlResult<()> {
+        set_raw_io(self.handle, self.pipe)
+    }
+
+    fn max_packet(&self) -> u16 {
+        self.mps
+    }
+}
+
+unsafe impl Send for WinUsbPipe {}
+unsafe impl Sync for WinUsbPipe {}
 
 fn interface_pipes(
     h: WINUSB_INTERFACE_HANDLE,
@@ -377,7 +393,7 @@ fn interface_pipes(
             continue;
         }
         if info.PipeType != UsbdPipeTypeBulk {
-            continue; // §3.2.4/3.2.6/3.2.7: U3V default interfaces use bulk only
+            continue; // §3.2.4/§3.2.6/§3.2.7: U3V default interfaces use bulk only
         }
         pipes.push(PipeInfo {
             pipe_id: info.PipeId,

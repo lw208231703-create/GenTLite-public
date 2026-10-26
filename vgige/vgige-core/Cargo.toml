@@ -1,0 +1,13 @@
+[package]
+name = "vgige-core"
+description = "Transport-agnostic core of the vgige smart-camera gateway: CameraBack/FrameSource/FrameSession seams, register-space dispatch, XML injection, relay driver"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+# GEV status codes, bootstrap/stream register map constants and the §36.57
+# address decode reused by the (GigE-shaped) register space; the relay
+# machinery itself is transport-agnostic.
+gentl-core = { path = "../../crates/gentl-core" }
+gentl-gvcp = { path = "../../crates/gentl-gvcp" }

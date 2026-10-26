@@ -249,8 +249,8 @@ fn main() {
                 if drain_buf.len() > 8 && drain_buf[4] == 1 && leader_len == 0 {
                     leader_len = n.min(48);
                     leader[..leader_len].copy_from_slice(&drain_buf[..leader_len]);
-                    std::fs::write("D:/tmp/real_leader.bin", &drain_buf[..n]).unwrap();
-                    std::fs::write("D:/tmp/real_leader.len", n.to_string()).unwrap();
+                    let _ = std::fs::write("D:/tmp/real_leader.bin", &drain_buf[..n]);
+                    let _ = std::fs::write("D:/tmp/real_leader.len", n.to_string());
                 }
                 received += 1;
             }

@@ -10,10 +10,10 @@
 //!
 //! The built artifact is the cdylib (`gentl_u3v.dll` on Windows,
 //! `libgentl_u3v.so` on Linux); the `.cti` rename happens at packaging
-//! time (M5 release flow). The USB backend is Windows-only until Phase B
-//! (rusb/libusb, notes/PENDING.md "Linux 可移植"): other platforms build
-//! with stub modules — enumeration reads empty and device open reports
-//! GC_ERR_NOT_IMPLEMENTED.
+//! time (M5 release flow). The USB backend is split per OS (Phase B,
+//! notes/PENDING.md "Linux 可移植"): SetupAPI + WinUSB on Windows,
+//! rusb/libusb on Unix — behind the shared `usbio::UsbPipe` endpoint
+//! surface, with control/cti/stream/descriptors platform-independent.
 
 #![allow(non_snake_case)]
 
@@ -34,41 +34,32 @@ use gentl_core::{
 // keep the crate — and its full GenTL surface — building: enumeration
 // reads empty, device open returns GC_ERR_NOT_IMPLEMENTED. Phase B adds
 // the rusb/libusb backend behind the same module names.
-#[cfg(windows)]
-#[path = "control.rs"]
+// Module wiring after the Phase B USB-backend split (notes/PENDING.md
+// "Linux 可移植"): control/cti/stream/packets/descriptors/types are
+// platform-independent — the endpoint surface behind them is the
+// `usbio::UsbPipe` trait. discovery and the usbio backend internals are
+// per-OS: SetupAPI + WinUSB on Windows (discovery.rs, usbio/winusb.rs),
+// rusb/libusb on Unix (linux/discovery.rs, usbio/libusb.rs).
 mod control;
-#[cfg(not(windows))]
-#[path = "stub/control.rs"]
-mod control;
+mod cti;
+pub mod descriptors;
+pub mod packets;
+mod stream;
+mod types;
+mod usbio;
 
-#[cfg(windows)]
-#[path = "cti.rs"]
-mod cti;
-#[cfg(not(windows))]
-#[path = "stub/cti.rs"]
-mod cti;
+/// Library-shaped U3V client facade (no GenTL handles): enumerate → open →
+/// GenCP register/memory access → device XML → SIRM-programmed block pulls.
+/// Added for the vgige smart-camera gateway's U3V camera backend; see the
+/// module docs.
+pub mod client;
 
 #[cfg(windows)]
 #[path = "discovery.rs"]
 mod discovery;
 #[cfg(not(windows))]
-#[path = "stub/discovery.rs"]
+#[path = "linux/discovery.rs"]
 mod discovery;
-
-// The GenCP/U3V wire codec is platform-independent; on non-Windows
-// platforms its only users (control/stream) are compiled out, hence the
-// dead_code allow there.
-mod packets;
-
-#[cfg(windows)]
-#[path = "stream.rs"]
-mod stream;
-#[cfg(not(windows))]
-#[path = "stub/stream.rs"]
-mod stream;
-
-#[cfg(windows)]
-mod usbio;
 
 use cti::{DeviceAccess, DevicePort, TlSystem, U3vDevice, U3vInterface};
 use stream::{stream_id, EventModule, U3vBuffer, U3vDataStream};
@@ -690,7 +681,7 @@ pub extern "C" fn IFUpdateDeviceList(h_iface: IFHandle, pb_changed: *mut u8, _i_
     // USB enumeration is host-local and instant; the timeout has no
     // meaning here (nothing to wait for on the bus).
     let found = discovery::enumerate_devices();
-    let new_entries: Vec<discovery::FoundDevice> = found
+    let new_entries: Vec<types::FoundDevice> = found
         .devices
         .into_iter()
         .filter(|d| d.root_id == iface.root_id)
@@ -757,7 +748,7 @@ pub extern "C" fn IFGetDeviceID(
     unsafe { write_string(s_device_id, pi_size, &entry.id) }
 }
 
-fn find_device(iface: &U3vInterface, id: &str) -> Result<Option<discovery::FoundDevice>, GCError> {
+fn find_device(iface: &U3vInterface, id: &str) -> Result<Option<types::FoundDevice>, GCError> {
     let devices = lock(&iface.devices)?;
     Ok(devices.iter().find(|d| d.id == id).cloned())
 }
@@ -862,7 +853,7 @@ pub extern "C" fn IFOpenDevice(
         // §6.2/§6.3.3: opening by a known ID must be possible without a
         // prior IFUpdateDeviceList; run the enumeration ourselves.
         let found = discovery::enumerate_devices();
-        let entries: Vec<discovery::FoundDevice> = found
+        let entries: Vec<types::FoundDevice> = found
             .devices
             .into_iter()
             .filter(|d| d.root_id == iface.root_id)
@@ -911,56 +902,37 @@ pub extern "C" fn IFOpenDevice(
 }
 
 /// Open the USB device, collect interfaces, bring up the GenCP control
-/// channel and read the bootstrap registers. Windows-only: the WinUSB
-/// plumbing lives behind `cfg(windows)` (Phase A Linux port); other
-/// platforms report NOT_IMPLEMENTED (Phase B: rusb backend,
-/// notes/PENDING.md "Linux 可移植"). Unreachable there anyway — stub
-/// discovery enumerates nothing, so `IFOpenDevice` never reaches this
-/// path.
-#[cfg(windows)]
+/// channel and read the bootstrap registers. Backend-agnostic: opens via
+/// the platform discovery module, classifies endpoints via
+/// `usbio::InterfaceSet`, and transacts through `UsbPipe`s — the same
+/// control-plane flow on WinUSB and libusb.
 fn open_u3v_device(
     iface: &Arc<U3vInterface>,
-    entry: &discovery::FoundDevice,
+    entry: &types::FoundDevice,
     access: DeviceAccess,
 ) -> GentlResult<Arc<U3vDevice>> {
     let opened = discovery::open_device(&entry.instance_id)?;
-    let winusb = opened.winusb;
-    let ifaces = usbio::InterfaceSet::collect(winusb)?;
-    let (ctrl_idx, out_pipe, in_pipe) = {
-        let (idx, out, _) = ifaces.control_out.ok_or(GentlError::Io(
-            "no Device Control Interface bulk OUT endpoint".into(),
-        ))?;
-        let (_, inp, _) = ifaces
-            .control_in
-            .ok_or(GentlError::Io("no Device Control Interface bulk IN endpoint".into()))?;
-        (idx, out, inp)
-    };
-    let ctrl_handle = ifaces.handle(ctrl_idx).ok_or(GentlError::InvalidHandle)?;
-    let mut client = control::GenCpClient::new(opened, ctrl_handle, out_pipe, in_pipe);
+    let ifaces = usbio::InterfaceSet::collect(opened)?;
+    let out_pipe = ifaces.control_out.clone().ok_or(GentlError::Io(
+        "no Device Control Interface bulk OUT endpoint".into(),
+    ))?;
+    let in_pipe = ifaces.control_in.clone().ok_or(GentlError::Io(
+        "no Device Control Interface bulk IN endpoint".into(),
+    ))?;
+    let mut client = control::GenCpClient::new(out_pipe, in_pipe);
     let bootstrap = control::read_bootstrap(&mut client)?;
     Ok(Arc::new(U3vDevice {
         id: entry.id.clone(),
         identity: entry.identity.clone(),
         access,
-        // Drop order matters: associated interfaces first, then the
-        // control channel (which owns the file/WinUSB handles).
+        // Drop order matters: the interface set owns every backend
+        // handle (see cti.rs), the client only holds endpoint pipes.
         ifaces,
         client: Arc::new(std::sync::Mutex::new(client)),
         bootstrap,
         opened_streams: std::sync::Mutex::new(std::collections::HashSet::new()),
         parent: Arc::downgrade(iface),
     }))
-}
-
-#[cfg(not(windows))]
-fn open_u3v_device(
-    _iface: &Arc<U3vInterface>,
-    _entry: &discovery::FoundDevice,
-    _access: DeviceAccess,
-) -> GentlResult<Arc<U3vDevice>> {
-    Err(GentlError::NotImplemented(
-        "U3V USB backend on this platform (Phase B: rusb, notes/PENDING.md)",
-    ))
 }
 
 // Device functions ------------------------------------------------------------

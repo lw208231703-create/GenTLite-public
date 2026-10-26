@@ -5,9 +5,6 @@
 //!
 //! Byte order: all bootstrap registers and protocol fields are
 //! little-endian (U3V 1.2 R-30cd, §4.1.2); data blocks too (R-75st, §5.5.1).
-// On non-Windows platforms the codec's only users (control/stream) are
-// compiled out (Phase A Linux port), so unused-item lints are expected.
-#![cfg_attr(not(windows), allow(dead_code))]
 
 // ---------------------------------------------------------------------------
 // GenCP command layer (GenCP 1.3.1 §4)
@@ -126,6 +123,82 @@ impl CommandCcd {
         out[4..6].copy_from_slice(&self.length.to_le_bytes());
         out[6..8].copy_from_slice(&self.request_id.to_le_bytes());
     }
+
+    /// Decode the CCD area of a command transfer (already past the prefix)
+    /// — the device side of the wire (§4.3.1).
+    pub fn decode(buf: &[u8]) -> Option<Self> {
+        if buf.len() < CCD_LEN {
+            return None;
+        }
+        Some(Self {
+            flags: u16::from_le_bytes([buf[0], buf[1]]),
+            command_id: u16::from_le_bytes([buf[2], buf[3]]),
+            length: u16::from_le_bytes([buf[4], buf[5]]),
+            request_id: u16::from_le_bytes([buf[6], buf[7]]),
+        })
+    }
+}
+
+/// READMEM_CMD SCD (GenCP §4.4.1): u64 address + u16 reserved + u16 length.
+pub fn decode_readmem_scd(scd: &[u8]) -> Option<(u64, u16)> {
+    if scd.len() < READMEM_SCD_LEN {
+        return None;
+    }
+    Some((
+        u64::from_le_bytes(scd[0..8].try_into().ok()?),
+        u16::from_le_bytes([scd[10], scd[11]]),
+    ))
+}
+
+/// WRITEMEM_CMD SCD (GenCP §4.4.3): u64 address + data. Returns the
+/// address and the data offset inside the SCD.
+pub fn decode_writemem_scd(scd: &[u8]) -> Option<(u64, usize)> {
+    if scd.len() < WRITEMEM_SCD_HEADER_LEN {
+        return None;
+    }
+    Some((
+        u64::from_le_bytes(scd[0..8].try_into().ok()?),
+        WRITEMEM_SCD_HEADER_LEN,
+    ))
+}
+
+/// Build a GenCP acknowledge transfer (prefix + CCD + SCD) — the device
+/// side of the wire (§4.3.2). `ack_command` is the command id + 1 per
+/// Table 7; `scd` is the acknowledge SCD (empty for a header-only ack).
+pub fn encode_ack(status: u16, ack_command: u16, request_id: u16, scd: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CMD_OVERHEAD + scd.len());
+    out.extend_from_slice(&PREFIX_CONTROL.to_le_bytes());
+    let mut ccd = [0u8; CCD_LEN];
+    AckCcd {
+        status,
+        command_id: ack_command,
+        length: scd.len() as u16,
+        request_id,
+    }
+    .encode(&mut ccd);
+    out.extend_from_slice(&ccd);
+    out.extend_from_slice(scd);
+    out
+}
+
+/// READMEM acknowledge (§4.4.2): SCD = the requested bytes, or a
+/// header-only error ack when `data` is empty on a non-success status.
+pub fn encode_readmem_ack(status: u16, request_id: u16, data: &[u8]) -> Vec<u8> {
+    encode_ack(status, READMEM_ACK, request_id, data)
+}
+
+/// WRITEMEM acknowledge (§4.4.4): with the Written-Length field (reserved
+/// u16 + written u16) when the device declares the capability; without it
+/// the SCD is empty.
+pub fn encode_writemem_ack(status: u16, request_id: u16, written: Option<u16>) -> Vec<u8> {
+    match written {
+        Some(n) => {
+            let mut scd = [0u8; WRITEMEM_ACK_SCD_LEN];
+            scd[2..4].copy_from_slice(&n.to_le_bytes());
+            encode_ack(status, WRITEMEM_ACK, request_id, &scd)
+        }
+        None => encode_ack(status, WRITEMEM_ACK, request_id, &[]),
+    }
 }
 
 /// The 8-byte CCD of an acknowledge packet (GenCP §4.3.2).
@@ -149,6 +222,15 @@ impl AckCcd {
             length: u16::from_le_bytes([buf[4], buf[5]]),
             request_id: u16::from_le_bytes([buf[6], buf[7]]),
         })
+    }
+
+    /// Encode into the CCD area of a transfer — the device side of the
+    /// wire (§4.3.2).
+    pub fn encode(&self, out: &mut [u8; CCD_LEN]) {
+        out[0..2].copy_from_slice(&self.status.to_le_bytes());
+        out[2..4].copy_from_slice(&self.command_id.to_le_bytes());
+        out[4..6].copy_from_slice(&self.length.to_le_bytes());
+        out[6..8].copy_from_slice(&self.request_id.to_le_bytes());
     }
 }
 
@@ -461,6 +543,43 @@ pub enum TrailerError {
     BadSize,
 }
 
+/// Encode an image data leader (§5.5.5.1.1 Table 5-7, all little-endian) —
+/// the device/transmitter side of the wire; `decode_image_leader` is the
+/// host side. Round-trip locked by the packets tests.
+pub fn encode_image_leader(l: &ImageLeader) -> [u8; IMAGE_LEADER_LEN] {
+    let mut out = [0u8; IMAGE_LEADER_LEN];
+    out[0..4].copy_from_slice(&LEADER_MAGIC.to_le_bytes());
+    out[6..8].copy_from_slice(&l.leader_size.to_le_bytes());
+    out[8..16].copy_from_slice(&l.block_id.to_le_bytes());
+    out[18..20].copy_from_slice(&l.payload_type.to_le_bytes());
+    out[20..28].copy_from_slice(&l.timestamp.to_le_bytes());
+    out[28..32].copy_from_slice(&l.pixel_format.to_le_bytes());
+    out[32..36].copy_from_slice(&l.size_x.to_le_bytes());
+    out[36..40].copy_from_slice(&l.size_y.to_le_bytes());
+    out[40..44].copy_from_slice(&l.offset_x.to_le_bytes());
+    out[44..48].copy_from_slice(&l.offset_y.to_le_bytes());
+    out[48..50].copy_from_slice(&l.padding_x.to_le_bytes());
+    out
+}
+
+/// Encode an image data trailer (§5.5.5.1.3 Table 5-8, all little-endian)
+/// — the device/transmitter side; `decode_image_trailer` is the host side.
+pub fn encode_image_trailer(
+    block_id: u64,
+    status: u16,
+    valid_payload_size: u64,
+    size_y: u32,
+) -> [u8; IMAGE_TRAILER_LEN] {
+    let mut out = [0u8; IMAGE_TRAILER_LEN];
+    out[0..4].copy_from_slice(&TRAILER_MAGIC.to_le_bytes());
+    out[6..8].copy_from_slice(&(IMAGE_TRAILER_LEN as u16).to_le_bytes());
+    out[8..16].copy_from_slice(&block_id.to_le_bytes());
+    out[16..18].copy_from_slice(&status.to_le_bytes());
+    out[20..28].copy_from_slice(&valid_payload_size.to_le_bytes());
+    out[28..32].copy_from_slice(&size_y.to_le_bytes());
+    out
+}
+
 pub fn decode_image_trailer(buf: &[u8]) -> Result<ImageTrailer, TrailerError> {
     if buf.len() < IMAGE_TRAILER_LEN {
         return Err(TrailerError::TooShort);
@@ -705,5 +824,71 @@ mod tests {
         assert_eq!(e.file_format, FILE_FORMAT_ZIP_XML);
         assert_eq!(e.address, 0x10_000);
         assert_eq!(e.size, 4096);
+    }
+
+    /// Device-side codec round-trips: the transmitter's encoders produce
+    /// exactly what the host-side decoders parse (vgige-front-u3v builds
+    /// its device on these — Step 3).
+    #[test]
+    fn device_side_command_decode_and_ack_encode() {
+        let cmd = encode_readmem(7, 0x1122_3344_5566_7788, 0xABCD);
+        let ccd = CommandCcd::decode(&cmd[PREFIX_LEN..PREFIX_LEN + CCD_LEN]).expect("ccd");
+        assert_eq!(ccd.command_id, READMEM_CMD);
+        assert_eq!(ccd.request_id, 7);
+        let (addr, len) = decode_readmem_scd(&cmd[CMD_OVERHEAD..]).expect("scd");
+        assert_eq!(addr, 0x1122_3344_5566_7788);
+        assert_eq!(len, 0xABCD);
+
+        let wcmd = encode_writemem(9, 0xDEAD_BEEF, &[0xAA, 0xBB, 0xCC]);
+        let (waddr, off) = decode_writemem_scd(&wcmd[CMD_OVERHEAD..]).expect("wscd");
+        assert_eq!(waddr, 0xDEAD_BEEF);
+        assert_eq!(&wcmd[CMD_OVERHEAD + off..], &[0xAA, 0xBB, 0xCC]);
+
+        // Acknowledge: what encode_ack builds, decode_ack validates.
+        let ack = encode_readmem_ack(GENCP_SUCCESS, 7, &[1, 2, 3, 4]);
+        let parsed = decode_ack(PREFIX_CONTROL, &ack, READMEM_ACK, 7).expect("ack");
+        assert_eq!(parsed.status, GENCP_SUCCESS);
+        assert_eq!(parsed.length, 4);
+        assert_eq!(&ack[CMD_OVERHEAD..], &[1, 2, 3, 4]);
+
+        // Error acks are header-only (no SCD data).
+        let err = encode_readmem_ack(GENCP_INVALID_ADDRESS, 7, &[]);
+        let parsed = decode_ack(PREFIX_CONTROL, &err, READMEM_ACK, 7).expect("err ack");
+        assert_eq!(parsed.status, GENCP_INVALID_ADDRESS);
+        assert_eq!(parsed.length, 0);
+        assert_eq!(err.len(), CMD_OVERHEAD);
+
+        // Written-Length field round-trip.
+        let wack = encode_writemem_ack(GENCP_SUCCESS, 9, Some(0x1234));
+        let parsed = decode_ack(PREFIX_CONTROL, &wack, WRITEMEM_ACK, 9).expect("wack");
+        assert_eq!(parsed.status, GENCP_SUCCESS);
+        assert_eq!(u16::from_le_bytes([wack[CMD_OVERHEAD + 2], wack[CMD_OVERHEAD + 3]]), 0x1234);
+    }
+
+    /// Leader/trailer encoders (transmitter) round-trip through the host
+    /// decoders, field by field.
+    #[test]
+    fn device_side_leader_trailer_encode_roundtrip() {
+        let leader = ImageLeader {
+            leader_size: IMAGE_LEADER_LEN as u16,
+            block_id: 0x0102_0304_0506_0708,
+            payload_type: PAYLOAD_TYPE_IMAGE,
+            timestamp: 123_456_789,
+            pixel_format: 0x0108_0001,
+            size_x: 640,
+            size_y: 480,
+            offset_x: 10,
+            offset_y: 20,
+            padding_x: 3,
+        };
+        let l = decode_image_leader(&encode_image_leader(&leader)).expect("leader");
+        assert_eq!(l, leader);
+
+        let t = decode_image_trailer(&encode_image_trailer(99, U3V_STATUS_DATA_OVERRUN, 307_200, 470))
+            .expect("trailer");
+        assert_eq!(t.block_id, 99);
+        assert_eq!(t.status, U3V_STATUS_DATA_OVERRUN);
+        assert_eq!(t.valid_payload_size, 307_200);
+        assert_eq!(t.size_y, 470);
     }
 }

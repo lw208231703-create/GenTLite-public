@@ -42,8 +42,16 @@ pub struct GvcpServer {
 impl GvcpServer {
     /// Bind `0.0.0.0:port` and serve in a background thread.
     pub fn start<H: DeviceHandler>(port: u16, handler: H) -> GentlResult<Self> {
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, port))
-            .map_err(|e| GentlError::Io(format!("bind 0.0.0.0:{port}: {e}")))?;
+        Self::start_bound(Ipv4Addr::UNSPECIFIED, port, handler)
+    }
+
+    /// Bind `bind_ip:port` and serve in a background thread. A gateway
+    /// serving a virtual device on one specific NIC (e.g. linux-vgige's
+    /// up-facing port) binds that address instead of the unspecified one so
+    /// that the device is not also reachable on the down-facing network.
+    pub fn start_bound<H: DeviceHandler>(bind_ip: Ipv4Addr, port: u16, handler: H) -> GentlResult<Self> {
+        let socket = UdpSocket::bind((bind_ip, port))
+            .map_err(|e| GentlError::Io(format!("bind {bind_ip}:{port}: {e}")))?;
         socket
             .set_read_timeout(Some(Duration::from_millis(100)))
             .map_err(GentlError::from)?;

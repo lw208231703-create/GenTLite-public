@@ -1,6 +1,6 @@
 [package]
 name = "gentl-u3v"
-description = "USB3 Vision GenTL producer (.cti): WinUSB backend + GenCP control + U3V streaming"
+description = "USB3 Vision GenTL producer (.cti): WinUSB (Windows) / libusb (Unix) backend + GenCP control + U3V streaming"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -15,8 +15,7 @@ gentl-core = { path = "../gentl-core" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-# WinUSB backend (Phase B adds the rusb/libusb backend for Unix,
-# notes/PENDING.md "Linux 可移植").
+# WinUSB backend.
 windows-sys = { version = "0.59", features = [
     "Win32_Devices_Usb",
     "Win32_Devices_DeviceAndDriverInstallation",
@@ -28,3 +27,8 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+# Linux/Unix USB backend (Phase B, notes/PENDING.md "Linux 可移植"):
+# links the system libusb (usbfs) — no vendored C sources.
+rusb = "0.9"

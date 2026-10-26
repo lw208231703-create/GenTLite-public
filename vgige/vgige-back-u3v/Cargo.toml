@@ -1,0 +1,16 @@
+[package]
+name = "vgige-back-u3v"
+description = "vgige CameraBack/FrameSource adapter for USB3 Vision cameras (via the gentl-u3v client facade) — the 'GigE front ← U3V camera' matrix cell"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+vgige-core = { path = "../vgige-core" }
+# The library-shaped U3V client facade (U3vCamera/U3vStream/UsbPipe); no
+# GenTL handles involved.
+gentl-u3v = { path = "../../crates/gentl-u3v" }
+gentl-core = { path = "../../crates/gentl-core" }
+# GEV status constants for the mapping table (the common GenCP/GigE codes
+# share one namespace — GenCP 1.3.1 §4.3.2.1 Table 6).
+gentl-gvcp = { path = "../../crates/gentl-gvcp" }

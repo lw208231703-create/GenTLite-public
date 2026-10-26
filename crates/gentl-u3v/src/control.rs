@@ -17,12 +17,11 @@
 //!   a hard error, not a resend candidate — retries happen only on
 //!   USB-level failures, with a fresh request_id.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gentl_core::channel::ControlChannel;
 use gentl_core::{GentlError, GentlResult};
-use windows_sys::Win32::Devices::Usb::{WinUsb_FlushPipe, WINUSB_INTERFACE_HANDLE};
 
 use crate::cti::{DeviceAccess, U3vDevice};
 use crate::packets::{
@@ -30,7 +29,7 @@ use crate::packets::{
     GENCP_BUSY, GENCP_INVALID_ADDRESS, GENCP_SUCCESS, GENCP_WRITE_PROTECT, PENDING_ACK,
     READMEM_ACK, WRITEMEM_ACK, CMD_OVERHEAD, PREFIX_CONTROL,
 };
-use crate::usbio;
+use crate::usbio::UsbPipe;
 
 /// Default per-command timeout before the Maximum Device Response Time
 /// register has been read. The spec caps a device's response time at
@@ -44,38 +43,23 @@ const BOOTSTRAP_IN_SIZE: usize = 1024;
 /// Sane cap on device-advertised max transfer lengths (bounds memory).
 const MAX_TRANSFER_CAP: u32 = 1 << 20;
 
-/// GenCP request/response engine over one DCI bulk endpoint pair. Owns
-/// the opened device: the WinUSB/file handles live exactly as long as
-/// the control channel.
+/// GenCP request/response engine over one DCI bulk endpoint pair. The
+/// USB handle lifetime lives in the InterfaceSet (see cti.rs drop order);
+/// the client holds the two endpoint pipes it transacts on.
 pub struct GenCpClient {
-    #[allow(dead_code)] // the ownership IS the use: handle lifetime
-    dev: crate::discovery::OpenedDevice,
-    winusb: WINUSB_INTERFACE_HANDLE,
-    out_pipe: u8,
-    in_pipe: u8,
+    out_pipe: Arc<dyn UsbPipe>,
+    in_pipe: Arc<dyn UsbPipe>,
     request_id: Mutex<u16>,
     max_command_len: u32,
     max_ack_len: u32,
     mdrt: Duration,
 }
 
-// All WinUSB calls take the handle by value under the device's Mutex;
-// the client must be shareable like the device module itself.
-unsafe impl Send for GenCpClient {}
-unsafe impl Sync for GenCpClient {}
-
 impl GenCpClient {
     /// Create a client with bootstrap defaults; `read_bootstrap` refines
     /// the transfer limits from the SBRM.
-    pub fn new(
-        dev: crate::discovery::OpenedDevice,
-        winusb: WINUSB_INTERFACE_HANDLE,
-        out_pipe: u8,
-        in_pipe: u8,
-    ) -> Self {
+    pub fn new(out_pipe: Arc<dyn UsbPipe>, in_pipe: Arc<dyn UsbPipe>) -> Self {
         Self {
-            dev,
-            winusb,
             out_pipe,
             in_pipe,
             request_id: Mutex::new(0),
@@ -99,8 +83,21 @@ impl GenCpClient {
     }
 
     /// Run one command/acknowledge exchange. Returns the acknowledge
-    /// transfer (prefix + CCD + SCD).
+    /// transfer (prefix + CCD + SCD). A non-success device status is mapped
+    /// through `status_error` (GenTL producer semantics).
     pub fn transaction(&self, command: &[u8], expect_ack: u16) -> GentlResult<Vec<u8>> {
+        self.transaction_raw(command, expect_ack).map_err(|e| match e {
+            GentlError::GevStatus(s) => status_error(s),
+            other => other,
+        })
+    }
+
+    /// Like [`transaction`](Self::transaction), but a non-success device
+    /// status surfaces as `GentlError::GevStatus(raw_code)`: library
+    /// consumers (the `client` facade, and through it the vgige gateway)
+    /// keep the exact GenCP/U3V status for error transparency, where
+    /// mapping it to a GenTL error code would lose information.
+    pub fn transaction_raw(&self, command: &[u8], expect_ack: u16) -> GentlResult<Vec<u8>> {
         let request_id = self.next_request_id();
         self.transaction_with_id(command, expect_ack, request_id)
             .map_err(|e| {
@@ -108,10 +105,9 @@ impl GenCpClient {
                 // pipe (e.g. we timed out but the device answered later).
                 // Flush the IN pipe so the next exchange starts clean;
                 // full endpoint-halt re-synchronization (§4.1.4.1.2) is a
-                // follow-up (notes/OPEN-QUESTIONS.md UQ6).
-                unsafe {
-                    let _ = WinUsb_FlushPipe(self.winusb, self.in_pipe);
-                }
+                // follow-up (notes/OPEN-QUESTIONS.md UQ6) — on Linux the
+                // flush maps to clear_halt (see UsbPipe::flush).
+                self.in_pipe.flush();
                 e
             })
     }
@@ -122,13 +118,16 @@ impl GenCpClient {
         expect_ack: u16,
         request_id: u16,
     ) -> GentlResult<Vec<u8>> {
-        usbio::write_pipe(self.winusb, self.out_pipe, command, self.mdrt + Duration::from_millis(500))?;
+        self.out_pipe
+            .write_bulk(command, self.mdrt + Duration::from_millis(500))?;
 
         // One round = submit IN, wait, handle PENDING_ACK by waiting again.
         let mut pending_rounds = 0u32;
         loop {
             let mut buf = vec![0u8; self.in_size()];
-            let n = usbio::read_pipe(self.winusb, self.in_pipe, &mut buf, self.mdrt + Duration::from_millis(500))?;
+            let n = self
+                .in_pipe
+                .read_bulk(&mut buf, self.mdrt + Duration::from_millis(500))?;
             let transfer = &buf[..n as usize];
 
             let ccd: AckCcd = match packets::decode_ack(PREFIX_CONTROL, transfer, expect_ack, request_id) {
@@ -159,7 +158,7 @@ impl GenCpClient {
             };
 
             if ccd.status != GENCP_SUCCESS {
-                return Err(status_error(ccd.status));
+                return Err(GentlError::GevStatus(ccd.status));
             }
             // The SCD length the device claims must fit what arrived.
             let scd_len = ccd.length as usize;
@@ -196,12 +195,26 @@ impl GenCpClient {
     /// and lengths are legal for U3V (GenCP §4.4.1: byte aligned unless
     /// the technology states otherwise; U3V states no alignment rule).
     pub fn read_mem(&self, addr: u64, buf: &mut [u8]) -> GentlResult<()> {
+        self.read_mem_impl(addr, buf, false)
+    }
+
+    /// [`read_mem`](Self::read_mem) with the raw device status preserved
+    /// (`GentlError::GevStatus`) — the library facade's error transparency.
+    pub fn read_mem_raw(&self, addr: u64, buf: &mut [u8]) -> GentlResult<()> {
+        self.read_mem_impl(addr, buf, true)
+    }
+
+    fn read_mem_impl(&self, addr: u64, buf: &mut [u8], raw: bool) -> GentlResult<()> {
         let chunk = self.read_chunk();
         let mut done = 0usize;
         while done < buf.len() {
             let n = chunk.min(buf.len() - done).min(u16::MAX as usize);
             let req = packets::encode_readmem(self.peek_request_id(), addr + done as u64, n as u16);
-            let ack = self.transaction(&req, READMEM_ACK)?;
+            let ack = if raw {
+                self.transaction_raw(&req, READMEM_ACK)?
+            } else {
+                self.transaction(&req, READMEM_ACK)?
+            };
             let data = &ack[CMD_OVERHEAD..];
             if data.len() < n {
                 return Err(GentlError::Io(format!(
@@ -217,12 +230,25 @@ impl GenCpClient {
 
     /// WRITEMEM chunked to the device's limits.
     pub fn write_mem(&self, addr: u64, data: &[u8]) -> GentlResult<()> {
+        self.write_mem_impl(addr, data, false)
+    }
+
+    /// [`write_mem`](Self::write_mem) with the raw device status preserved.
+    pub fn write_mem_raw(&self, addr: u64, data: &[u8]) -> GentlResult<()> {
+        self.write_mem_impl(addr, data, true)
+    }
+
+    fn write_mem_impl(&self, addr: u64, data: &[u8], raw: bool) -> GentlResult<()> {
         let chunk = self.write_chunk();
         let mut done = 0usize;
         while done < data.len() {
             let n = chunk.min(data.len() - done);
             let req = packets::encode_writemem(self.peek_request_id(), addr + done as u64, &data[..n]);
-            let ack = self.transaction(&req, WRITEMEM_ACK)?;
+            let ack = if raw {
+                self.transaction_raw(&req, WRITEMEM_ACK)?
+            } else {
+                self.transaction(&req, WRITEMEM_ACK)?
+            };
             // U3V mandates Written Length Field support (R-111cd area):
             // verify the device accepted the full chunk when the field is
             // present. ack SCD length 0 means the field is absent.
@@ -570,8 +596,11 @@ mod tests {
 
     #[test]
     fn chunking_respects_u16_and_device_limits() {
-        let dev = unsafe { crate::discovery::OpenedDevice::from_raw(std::ptr::null_mut(), std::ptr::null_mut()) };
-        let client = GenCpClient::new(dev, std::ptr::null_mut(), 1, 0x81);
+        // The chunk math never touches the pipes; scripted mocks suffice.
+        let client = GenCpClient::new(
+            crate::usbio::mock::pipe(&[], 1024),
+            crate::usbio::mock::pipe(&[], 1024),
+        );
         // Bootstrap defaults: 4 KiB command / 1 KiB ack.
         assert!(client.read_chunk() <= 1024 - CMD_OVERHEAD);
         assert!(client.write_chunk() <= 4096 - CMD_OVERHEAD - 8);

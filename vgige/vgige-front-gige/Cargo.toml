@@ -1,0 +1,11 @@
+[package]
+name = "vgige-front-gige"
+description = "vgige front-end adapter for GigE Vision clients (GvcpServer device handler + GVSP 3.0 encoding FrameSession)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+vgige-core = { path = "../vgige-core" }
+gentl-core = { path = "../../crates/gentl-core" }
+gentl-gvcp = { path = "../../crates/gentl-gvcp" }

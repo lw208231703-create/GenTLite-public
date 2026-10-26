@@ -1,0 +1,14 @@
+[package]
+name = "vgige-front-u3v"
+description = "vgige U3V device-simulating front-end: the gateway presents itself as a USB3 Vision camera to a USB host (device-side GenCP/SIRM state machine + Linux FunctionFS gadget layer)"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+vgige-core = { path = "../vgige-core" }
+# Device-side wire codec (transmitters) + descriptor layouts + device-info
+# parser: shared with the host-side producer instead of re-transcribed
+# (packets/descriptors went pub in gentl-u3v for exactly this — Step 3).
+gentl-u3v = { path = "../../crates/gentl-u3v" }
+gentl-core = { path = "../../crates/gentl-core" }

@@ -7,6 +7,12 @@ members = [
     "crates/gentl-simulator",
     "crates/gentl-u3v",
     "crates/gentl-packager",
+    "vgige/vgige-core",
+    "vgige/vgige-back-gige",
+    "vgige/vgige-back-u3v",
+    "vgige/vgige-front-gige",
+    "vgige/vgige-front-u3v",
+    "vgige/vgige-cli",
 ]
 
 [workspace.package]
