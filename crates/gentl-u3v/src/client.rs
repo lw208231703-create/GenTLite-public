@@ -187,7 +187,9 @@ impl U3vCamera {
             .stream_in
             .get(channel as usize)
             .cloned()
-            .ok_or_else(|| U3vError::Transport(format!("stream channel {channel} has no endpoint")))?;
+            .ok_or_else(|| {
+                U3vError::Transport(format!("stream channel {channel} has no endpoint"))
+            })?;
         let sirm = {
             let c = self.locked_client()?;
             read_sirm(&c, sirm_address, channel, self.bootstrap.sirm_length)
@@ -232,13 +234,17 @@ impl U3vCamera {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<packets::EventPacket>();
         let pump_stop = Arc::clone(&stop);
-        let pump = std::thread::Builder::new()
+        let pump = match std::thread::Builder::new()
             .name("u3v-events".into())
             .spawn(move || {
                 let mut buf = vec![0u8; 4096];
                 while !pump_stop.load(Ordering::Relaxed) {
                     match pipe.read_bulk(&mut buf, EVENTS_POLL) {
-                        Ok(0) | Err(_) => continue,
+                        Ok(0) | Err(GentlError::Timeout) => continue,
+                        Err(_) => {
+                            std::thread::sleep(EVENTS_POLL);
+                            continue;
+                        }
                         Ok(n) => {
                             // §4.1.3.3.2: one transfer carries one event;
                             // the SCD may be padded to the endpoint MPS —
@@ -251,8 +257,17 @@ impl U3vCamera {
                         }
                     }
                 }
-            })
-            .map_err(|e| U3vError::Transport(format!("spawn event pump: {e}")))?;
+            }) {
+            Ok(pump) => pump,
+            Err(e) => {
+                if let Some(eirm) = self.bootstrap.eirm_address {
+                    let _ = self.locked_client().map(|c| {
+                        let _ = c.write_reg(eirm + packets::eirm::EI_CONTROL, 0);
+                    });
+                }
+                return Err(U3vError::Transport(format!("spawn event pump: {e}")));
+            }
+        };
         *guard = Some(EventPump {
             stop,
             thread: Some(pump),
@@ -278,6 +293,12 @@ impl U3vCamera {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for U3vCamera {
+    fn drop(&mut self) {
+        let _ = self.stop_events();
     }
 }
 
@@ -342,7 +363,10 @@ impl U3vStream {
     /// policy (RAW_IO on Windows, a no-op on usbfs — UQ16).
     pub fn start(&self) -> Result<(), U3vError> {
         self.pipe.set_raw_io().map_err(U3vError::from)?;
-        let c = self.client.lock().map_err(|_| U3vError::Transport("control client lock poisoned".into()))?;
+        let c = self
+            .client
+            .lock()
+            .map_err(|_| U3vError::Transport("control client lock poisoned".into()))?;
         let geometry = program_sirm(&c, &self.sirm).map_err(U3vError::from)?;
         *self.geometry.lock().expect("geometry lock") = Some(geometry);
         Ok(())
@@ -364,7 +388,9 @@ impl U3vStream {
     /// receiver's desync).
     pub fn next_block(&self, timeout: Duration) -> Option<Result<Block, U3vError>> {
         if timeout.is_zero() {
-            return Some(Err(U3vError::Transport("next_block with a zero timeout".into())));
+            return Some(Err(U3vError::Transport(
+                "next_block with a zero timeout".into(),
+            )));
         }
         let Some(geometry) = *self.geometry.lock().expect("geometry lock") else {
             return Some(Err(U3vError::Transport("stream not started".into())));
@@ -430,7 +456,8 @@ fn read_block_alloc(
     let mps = usize::from(pipe.max_packet().max(1));
 
     // -- Leader (single transfer, §5.2.1.2) --------------------------------
-    let mut leader_buf = vec![0u8; crate::usbio::align_request(geometry.max_leader, pipe.max_packet()) as usize];
+    let mut leader_buf =
+        vec![0u8; crate::usbio::align_request(geometry.max_leader, pipe.max_packet()) as usize];
     let n = match read_piece_capped(pipe, &mut leader_buf, mps, stop, false) {
         Ok(n) => n as usize,
         Err(ReadAbort::Stop) => return Err(U3vBlockError::U3vTimeout),
@@ -451,7 +478,12 @@ fn read_block_alloc(
                         stream::DrainOutcome::Done => {
                             return Ok(Block::Skipped);
                         }
-                        stream::DrainOutcome::Stop => return Err(U3vBlockError::U3vTimeout),
+                        stream::DrainOutcome::Stop => {
+                            return Err(U3vError::Transport(
+                                "stream timed out while draining a block".into(),
+                            )
+                            .into())
+                        }
                         stream::DrainOutcome::Desync => {
                             return Err(U3vError::Transport("drain failed".into()).into());
                         }
@@ -499,7 +531,9 @@ fn read_block_alloc(
         }
         let n = match read_piece_exact(pipe, &mut scratch[..request], size as usize, mps, stop) {
             Ok(n) => n as usize,
-            Err(ReadAbort::Stop) => return Err(U3vBlockError::U3vTimeout),
+            Err(ReadAbort::Stop) => {
+                return Err(U3vError::Transport("stream timed out during payload".into()).into())
+            }
             Err(ReadAbort::Io(e)) => return Err(U3vError::Transport(e).into()),
         };
         if !short_seen {
@@ -517,10 +551,13 @@ fn read_block_alloc(
     }
 
     // -- Trailer (single transfer, §5.2.1.4) ---------------------------------
-    let mut trailer_buf = vec![0u8; crate::usbio::align_request(geometry.max_trailer, pipe.max_packet()) as usize];
+    let mut trailer_buf =
+        vec![0u8; crate::usbio::align_request(geometry.max_trailer, pipe.max_packet()) as usize];
     let n = match read_piece_capped(pipe, &mut trailer_buf, mps, stop, false) {
         Ok(n) => n as usize,
-        Err(ReadAbort::Stop) => return Err(U3vBlockError::U3vTimeout),
+        Err(ReadAbort::Stop) => {
+            return Err(U3vError::Transport("stream timed out during trailer".into()).into())
+        }
         Err(ReadAbort::Io(e)) => return Err(U3vError::Transport(e).into()),
     };
     let trailer = match packets::decode_image_trailer(&trailer_buf[..n]) {
@@ -551,4 +588,89 @@ fn read_block_alloc(
         payload,
         trailer,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    struct MidBlockTimeoutPipe {
+        state: Mutex<u8>,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl UsbPipe for MidBlockTimeoutPipe {
+        fn read_bulk(&self, buf: &mut [u8], _timeout: Duration) -> GentlResult<u32> {
+            let mut state = self.state.lock().unwrap();
+            match *state {
+                0 => {
+                    let leader = packets::ImageLeader {
+                        leader_size: packets::IMAGE_LEADER_LEN as u16,
+                        block_id: 1,
+                        payload_type: packets::PAYLOAD_TYPE_IMAGE,
+                        timestamp: 0,
+                        pixel_format: gentl_core::pixfmt::PFNC_MONO8,
+                        size_x: 1,
+                        size_y: 1,
+                        offset_x: 0,
+                        offset_y: 0,
+                        padding_x: 0,
+                    };
+                    let bytes = packets::encode_image_leader(&leader);
+                    buf[..bytes.len()].copy_from_slice(&bytes);
+                    *state = 1;
+                    Ok(bytes.len() as u32)
+                }
+                1 => {
+                    buf[0] = 0x5A;
+                    *state = 2;
+                    self.stop.store(true, Ordering::SeqCst);
+                    Ok(1)
+                }
+                _ => Err(GentlError::Timeout),
+            }
+        }
+
+        fn write_bulk(&self, _buf: &[u8], _timeout: Duration) -> GentlResult<()> {
+            Ok(())
+        }
+
+        fn flush(&self) {}
+
+        fn set_raw_io(&self) -> GentlResult<()> {
+            Ok(())
+        }
+
+        fn max_packet(&self) -> u16 {
+            1
+        }
+    }
+
+    #[test]
+    fn timeout_after_leader_is_a_transport_error() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let pipe = MidBlockTimeoutPipe {
+            state: Mutex::new(0),
+            stop: stop.clone(),
+        };
+        let geometry = TransferGeometry {
+            max_leader: packets::IMAGE_LEADER_LEN as u32,
+            transfer_size: 1,
+            transfer_count: 1,
+            final1: 0,
+            final2: 0,
+            max_trailer: packets::IMAGE_TRAILER_LEN as u32,
+        };
+
+        let result = read_block_alloc(&pipe, &geometry, 1, &stop);
+        match result {
+            Err(U3vBlockError::U3v(U3vError::Transport(message))) => {
+                assert!(message.contains("trailer"));
+            }
+            _ => panic!("mid-block timeout must not look like an idle timeout"),
+        }
+    }
 }

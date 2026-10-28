@@ -25,9 +25,9 @@ use gentl_core::{GentlError, GentlResult};
 
 use crate::cti::{DeviceAccess, U3vDevice};
 use crate::packets::{
-    self, abrm, sbrm, status_name, AckCcd, AckError, ManifestEntry, GENCP_ACCESS_DENIED,
-    GENCP_BUSY, GENCP_INVALID_ADDRESS, GENCP_SUCCESS, GENCP_WRITE_PROTECT, PENDING_ACK,
-    READMEM_ACK, WRITEMEM_ACK, CMD_OVERHEAD, PREFIX_CONTROL,
+    self, abrm, sbrm, status_name, AckCcd, AckError, ManifestEntry, CMD_OVERHEAD,
+    GENCP_ACCESS_DENIED, GENCP_BUSY, GENCP_INVALID_ADDRESS, GENCP_SUCCESS, GENCP_WRITE_PROTECT,
+    PENDING_ACK, PREFIX_CONTROL, READMEM_ACK, WRITEMEM_ACK,
 };
 use crate::usbio::UsbPipe;
 
@@ -243,7 +243,11 @@ impl GenCpClient {
         let mut done = 0usize;
         while done < data.len() {
             let n = chunk.min(data.len() - done);
-            let req = packets::encode_writemem(self.peek_request_id(), addr + done as u64, &data[..n]);
+            let req = packets::encode_writemem(
+                self.peek_request_id(),
+                addr + done as u64,
+                &data[done..done + n],
+            );
             let ack = if raw {
                 self.transaction_raw(&req, WRITEMEM_ACK)?
             } else {
@@ -297,7 +301,10 @@ fn status_error(code: u16) -> GentlError {
         GENCP_INVALID_ADDRESS => GentlError::InvalidAddress,
         GENCP_ACCESS_DENIED | GENCP_WRITE_PROTECT => GentlError::AccessDenied,
         GENCP_BUSY => GentlError::Busy,
-        other => GentlError::Io(format!("device status {} (0x{other:04X})", status_name(other))),
+        other => GentlError::Io(format!(
+            "device status {} (0x{other:04X})",
+            status_name(other)
+        )),
     }
 }
 
@@ -370,7 +377,9 @@ pub fn read_bootstrap(client: &mut GenCpClient) -> GentlResult<Bootstrap> {
     // requires it (R-111cd area: "SBRM Supported--Available (Required by
     // this standard)"), so its absence is a device error.
     if device_capability & abrm::CAP_SBRM == 0 {
-        return Err(GentlError::Io(format!("device reports no SBRM (required by U3V), capability=0x{device_capability:016x}")));
+        return Err(GentlError::Io(format!(
+            "device reports no SBRM (required by U3V), capability=0x{device_capability:016x}"
+        )));
     }
     let mut sbrm_b = [0u8; 8];
     client.read_mem(abrm::SBRM_ADDRESS, &mut sbrm_b)?;
@@ -442,12 +451,17 @@ pub fn read_manifest(client: &GenCpClient, table_addr: u64) -> GentlResult<Vec<M
     client.read_mem(table_addr, &mut count_b)?;
     let count = u64::from_le_bytes(count_b);
     if count > 64 {
-        return Err(GentlError::Io(format!("unreasonable manifest entry count {count}")));
+        return Err(GentlError::Io(format!(
+            "unreasonable manifest entry count {count}"
+        )));
     }
     let mut entries = Vec::new();
     for i in 0..count {
         let mut buf = vec![0u8; packets::MANIFEST_ENTRY_LEN];
-        client.read_mem(table_addr + 8 + i * packets::MANIFEST_ENTRY_LEN as u64, &mut buf)?;
+        client.read_mem(
+            table_addr + 8 + i * packets::MANIFEST_ENTRY_LEN as u64,
+            &mut buf,
+        )?;
         if let Some(e) = packets::decode_manifest_entry(&buf) {
             entries.push(e);
         }
@@ -464,7 +478,10 @@ pub fn read_device_xml(client: &GenCpClient, manifest_table: u64) -> GentlResult
         .find(|e| e.file_type == packets::FILE_TYPE_DEVICE_XML)
         .ok_or_else(|| GentlError::Io("manifest has no Device XML entry".into()))?;
     if entry.size == 0 || entry.size > (32 << 20) {
-        return Err(GentlError::Io(format!("manifest XML size {} invalid", entry.size)));
+        return Err(GentlError::Io(format!(
+            "manifest XML size {} invalid",
+            entry.size
+        )));
     }
     let mut raw = vec![0u8; entry.size as usize];
     client.read_mem(entry.address, &mut raw)?;
@@ -546,7 +563,10 @@ impl ControlChannel for U3vDevice {
             .find(|e| e.file_type == packets::FILE_TYPE_DEVICE_XML)
             .ok_or(GentlError::NotAvailable)?;
         let model = sanitize_file_stem(&self.bootstrap.model);
-        Ok(format!("Local:{model}.xml;{:X};{:X}", entry.address, entry.size))
+        Ok(format!(
+            "Local:{model}.xml;{:X};{:X}",
+            entry.address, entry.size
+        ))
     }
 }
 
@@ -606,7 +626,79 @@ mod tests {
         assert!(client.write_chunk() <= 4096 - CMD_OVERHEAD - 8);
         let mut client = client;
         client.set_limits(1 << 20, 1 << 20, 300);
-        assert_eq!(client.read_chunk(), u16::MAX as usize, "u16 length field caps reads");
+        assert_eq!(
+            client.read_chunk(),
+            u16::MAX as usize,
+            "u16 length field caps reads"
+        );
         assert_eq!(client.write_chunk(), u16::MAX as usize - 8);
+    }
+
+    #[derive(Default)]
+    struct WriteIo {
+        commands: Mutex<Vec<Vec<u8>>>,
+        replies: Mutex<std::collections::VecDeque<Vec<u8>>>,
+    }
+
+    impl UsbPipe for WriteIo {
+        fn read_bulk(&self, buf: &mut [u8], _timeout: Duration) -> GentlResult<u32> {
+            let reply = self.replies.lock().unwrap().pop_front().expect("reply");
+            buf[..reply.len()].copy_from_slice(&reply);
+            Ok(reply.len() as u32)
+        }
+
+        fn write_bulk(&self, buf: &[u8], _timeout: Duration) -> GentlResult<()> {
+            let request_id = u16::from_le_bytes([buf[10], buf[11]]);
+            let written = buf.len() - CMD_OVERHEAD - packets::WRITEMEM_SCD_HEADER_LEN;
+            self.commands.lock().unwrap().push(buf.to_vec());
+            self.replies
+                .lock()
+                .unwrap()
+                .push_back(packets::encode_writemem_ack(
+                    GENCP_SUCCESS,
+                    request_id,
+                    Some(written as u16),
+                ));
+            Ok(())
+        }
+
+        fn flush(&self) {}
+
+        fn set_raw_io(&self) -> GentlResult<()> {
+            Ok(())
+        }
+
+        fn max_packet(&self) -> u16 {
+            64
+        }
+    }
+
+    #[test]
+    fn chunked_write_sends_each_data_slice_once() {
+        let io = Arc::new(WriteIo::default());
+        let mut client = GenCpClient::new(io.clone(), io.clone());
+        client.set_limits(64, 64, 300);
+        let data: Vec<u8> = (0..100).collect();
+
+        client.write_mem(0x1000, &data).unwrap();
+
+        let commands = io.commands.lock().unwrap();
+        assert_eq!(commands.len(), 3);
+        let mut done = 0usize;
+        for (index, command) in commands.iter().enumerate() {
+            let n = command.len() - CMD_OVERHEAD - packets::WRITEMEM_SCD_HEADER_LEN;
+            assert_eq!(
+                u16::from_le_bytes([command[6], command[7]]),
+                packets::WRITEMEM_CMD
+            );
+            assert_eq!(u16::from_le_bytes([command[10], command[11]]), index as u16);
+            assert_eq!(
+                u64::from_le_bytes(command[CMD_OVERHEAD..CMD_OVERHEAD + 8].try_into().unwrap()),
+                0x1000 + done as u64
+            );
+            assert_eq!(&command[CMD_OVERHEAD + 8..], &data[done..done + n]);
+            done += n;
+        }
+        assert_eq!(done, data.len());
     }
 }

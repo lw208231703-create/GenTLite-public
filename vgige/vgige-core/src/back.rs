@@ -3,10 +3,9 @@
 //! error-transparency contract: a camera's 0x8006 must reach the remote
 //! client unchanged, whatever the transport below).
 //!
-//! The trait exists because a second implementation is planned: v1 ships
-//! the GigE Vision adapter (`vgige-back-gige`, GVCP client + GVSP receive);
-//! a USB3 Vision adapter (rusb control channel + U3V payload receive) is
-//! Step 2 of the roadmap. Adapters translate their transport's failures to
+//! Implementations include GigE Vision (`vgige-back-gige`), USB3 Vision
+//! (`vgige-back-u3v`) and the synthetic null backend. Adapters translate
+//! their transport's failures to
 //! GEV status codes at this boundary (timeout/I/O -> 0x8FFF, Appendix B.21,
 //! the simulator regmap's precedent).
 

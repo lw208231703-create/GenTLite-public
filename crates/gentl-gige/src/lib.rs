@@ -3,11 +3,11 @@
 //! GenTL 1.6 loading: the consumer resolves every function below by name
 //! (GetProcAddress / dlsym) and starts with `GCInitLib`.
 //!
-//! M1 implements the control plane: TL/IF/Dev module functions and the
-//! device Port functions (GCReadPort/GCWritePort/GCGetPortURL/GCGetPortInfo)
-//! over a GVCP control channel. Data streams and events stay stubs until
-//! M2/M3. Panics must never cross this boundary: real implementations
-//! convert errors at the edge.
+//! The implementation covers TL/IF/Dev modules, GVCP port access, GVSP
+//! streams, buffer events and packet resend. Optional GenTL capabilities
+//! outside the implemented image-acquisition surface return NOT_IMPLEMENTED.
+//! Panics must never cross this boundary: real implementations convert
+//! errors at the edge.
 //!
 //! The built artifact is `gentl_gige.dll`; the `.cti` rename happens at
 //! packaging time (M5 release flow).
@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use gentl_core::types::*;
 use gentl_core::{
-    channel::ControlChannel, ds as ds_core, event_queue::WaitResult, from_handle, free_handle,
+    channel::ControlChannel, ds as ds_core, event_queue::WaitResult, free_handle, from_handle,
     last_error, set_error, set_last_error, to_handle, GentlError,
 };
 use gentl_gvcp::registers;
@@ -33,7 +33,6 @@ mod discovery;
 mod gvsp_receiver;
 mod stream;
 mod sys;
-
 
 use cti::{DeviceAccess, DeviceEntry, DevicePort, GevDevice, GevInterface, TlSystem};
 use stream::{EventModule, GevBuffer, GevDataStream, STREAM_ID};
@@ -236,7 +235,11 @@ unsafe fn write_string(s_out: *mut c_char, pi_size: *mut usize, s: &str) -> GCEr
 ///
 /// # Safety
 /// Same contract as `write_string` for `p_buffer`/`pi_size`.
-unsafe fn write_value<T: Copy>(p_buffer: *mut core::ffi::c_void, pi_size: *mut usize, v: &T) -> GCError {
+unsafe fn write_value<T: Copy>(
+    p_buffer: *mut core::ffi::c_void,
+    pi_size: *mut usize,
+    v: &T,
+) -> GCError {
     let needed = std::mem::size_of::<T>();
     if p_buffer.is_null() {
         *pi_size = needed;
@@ -504,7 +507,9 @@ pub extern "C" fn TLGetInterfaceInfo(
     unsafe {
         match i_info_cmd {
             INTERFACE_INFO_ID => info_string(pi_type, p_buffer, pi_size, GevInterface::ID),
-            INTERFACE_INFO_DISPLAYNAME => info_string(pi_type, p_buffer, pi_size, GevInterface::DISPLAY_NAME),
+            INTERFACE_INFO_DISPLAYNAME => {
+                info_string(pi_type, p_buffer, pi_size, GevInterface::DISPLAY_NAME)
+            }
             INTERFACE_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_GEV),
             _ => not_implemented("TLGetInterfaceInfo cmd"),
         }
@@ -512,7 +517,11 @@ pub extern "C" fn TLGetInterfaceInfo(
 }
 
 #[no_mangle]
-pub extern "C" fn TLOpenInterface(h_tl: TLHandle, s_iface_id: *const c_char, ph_iface: *mut IFHandle) -> GCError {
+pub extern "C" fn TLOpenInterface(
+    h_tl: TLHandle,
+    s_iface_id: *const c_char,
+    ph_iface: *mut IFHandle,
+) -> GCError {
     if ph_iface.is_null() {
         return fail(GentlError::InvalidParameter("phIface"));
     }
@@ -547,7 +556,11 @@ pub extern "C" fn TLOpenInterface(h_tl: TLHandle, s_iface_id: *const c_char, ph_
 }
 
 #[no_mangle]
-pub extern "C" fn TLUpdateInterfaceList(h_tl: TLHandle, pb_changed: *mut u8, _i_timeout: u64) -> GCError {
+pub extern "C" fn TLUpdateInterfaceList(
+    h_tl: TLHandle,
+    pb_changed: *mut u8,
+    _i_timeout: u64,
+) -> GCError {
     let system = module!(h_tl, TlSystem);
     // The aggregate interface itself never appears/disappears; what can
     // change is the underlying NIC set, which determines discovery reach.
@@ -615,7 +628,9 @@ pub extern "C" fn IFGetInfo(
     unsafe {
         match i_info_cmd {
             INTERFACE_INFO_ID => info_string(pi_type, p_buffer, pi_size, GevInterface::ID),
-            INTERFACE_INFO_DISPLAYNAME => info_string(pi_type, p_buffer, pi_size, GevInterface::DISPLAY_NAME),
+            INTERFACE_INFO_DISPLAYNAME => {
+                info_string(pi_type, p_buffer, pi_size, GevInterface::DISPLAY_NAME)
+            }
             INTERFACE_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_GEV),
             _ => not_implemented("IFGetInfo cmd"),
         }
@@ -632,7 +647,11 @@ fn update_timeout(i_timeout: u64) -> Duration {
 }
 
 #[no_mangle]
-pub extern "C" fn IFUpdateDeviceList(h_iface: IFHandle, pb_changed: *mut u8, i_timeout: u64) -> GCError {
+pub extern "C" fn IFUpdateDeviceList(
+    h_iface: IFHandle,
+    pb_changed: *mut u8,
+    i_timeout: u64,
+) -> GCError {
     let iface = match iface_from(h_iface) {
         Ok(i) => i,
         Err(e) => return e,
@@ -770,7 +789,9 @@ pub extern "C" fn IFGetDeviceInfo(
                 };
                 info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &v)
             }
-            DEVICE_INFO_USER_DEFINED_NAME => info_string(pi_type, p_buffer, pi_size, &d.user_defined_name),
+            DEVICE_INFO_USER_DEFINED_NAME => {
+                info_string(pi_type, p_buffer, pi_size, &d.user_defined_name)
+            }
             DEVICE_INFO_SERIAL_NUMBER => info_string(pi_type, p_buffer, pi_size, &d.serial_number),
             DEVICE_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &d.device_version),
             DEVICE_INFO_TIMESTAMP_FREQUENCY => fail(GentlError::NotAvailable),
@@ -892,7 +913,9 @@ fn device_info(
                 };
                 info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &v)
             }
-            DEVICE_INFO_USER_DEFINED_NAME => info_string(pi_type, p_buffer, pi_size, &d.user_defined_name),
+            DEVICE_INFO_USER_DEFINED_NAME => {
+                info_string(pi_type, p_buffer, pi_size, &d.user_defined_name)
+            }
             DEVICE_INFO_SERIAL_NUMBER => info_string(pi_type, p_buffer, pi_size, &d.serial_number),
             DEVICE_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &d.device_version),
             DEVICE_INFO_TIMESTAMP_FREQUENCY => {
@@ -994,7 +1017,10 @@ fn aborted() -> GCError {
 // Data stream functions (GenTL 1.6 §6.3.4.5, §6.3.5) -------------------------
 
 #[no_mangle]
-pub extern "C" fn DevGetNumDataStreams(h_device: DevHandle, pi_num_data_streams: *mut u32) -> GCError {
+pub extern "C" fn DevGetNumDataStreams(
+    h_device: DevHandle,
+    pi_num_data_streams: *mut u32,
+) -> GCError {
     if pi_num_data_streams.is_null() {
         return fail(GentlError::InvalidParameter("piNumDataStreams"));
     }
@@ -1318,7 +1344,7 @@ pub extern "C" fn DSStartAcquisition(
         return fail(e);
     }
     if let Err(e) = ds.start() {
-        // Roll the engine state back; the channel is not open.
+        // Roll the engine back; transport start cleans up partial channels.
         let _ = ds.core.stop_acquisition();
         return fail(e);
     }
@@ -1419,11 +1445,19 @@ pub extern "C" fn DSGetBufferInfo(
     let need_meta = |snap: &BufferSnapshot| snap.meta.ok_or(GentlError::NotAvailable);
     unsafe {
         match i_info_cmd {
-            BUFFER_INFO_BASE => info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.base),
-            BUFFER_INFO_SIZE => info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.size),
-            BUFFER_INFO_USER_PTR => {
-                info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.user_ptr)
+            BUFFER_INFO_BASE => {
+                info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.base)
             }
+            BUFFER_INFO_SIZE => {
+                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.size)
+            }
+            BUFFER_INFO_USER_PTR => info_value(
+                pi_type,
+                INFO_DATATYPE_PTR,
+                p_buffer,
+                pi_size,
+                &snap.user_ptr,
+            ),
             BUFFER_INFO_TIMESTAMP => match need_meta(&snap) {
                 Ok(m) => {
                     let v = m.timestamp;
@@ -1448,9 +1482,13 @@ pub extern "C" fn DSGetBufferInfo(
                 info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
             }
             BUFFER_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_GEV),
-            BUFFER_INFO_SIZE_FILLED => {
-                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.filled_size)
-            }
+            BUFFER_INFO_SIZE_FILLED => info_value(
+                pi_type,
+                INFO_DATATYPE_SIZET,
+                p_buffer,
+                pi_size,
+                &snap.filled_size,
+            ),
             BUFFER_INFO_WIDTH => match need_meta(&snap) {
                 Ok(m) => {
                     let v = m.width as usize;
@@ -1539,11 +1577,21 @@ pub extern "C" fn DSGetBufferInfo(
             BUFFER_INFO_FILENAME => info_string(pi_type, p_buffer, pi_size, ""),
             BUFFER_INFO_PIXEL_ENDIANNESS => {
                 // GVSP image payloads carry little-endian pixel data.
-                info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &PIXELENDIANNESS_LITTLE)
+                info_value(
+                    pi_type,
+                    INFO_DATATYPE_INT32,
+                    p_buffer,
+                    pi_size,
+                    &PIXELENDIANNESS_LITTLE,
+                )
             }
-            BUFFER_INFO_DATA_SIZE => {
-                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.filled_size)
-            }
+            BUFFER_INFO_DATA_SIZE => info_value(
+                pi_type,
+                INFO_DATATYPE_SIZET,
+                p_buffer,
+                pi_size,
+                &snap.filled_size,
+            ),
             BUFFER_INFO_TIMESTAMP_NS => match (need_meta(&snap), ds.tick_freq) {
                 (Ok(m), Some(freq)) if freq > 0 => {
                     let v = m.timestamp.saturating_mul(1_000_000_000) / freq;
@@ -1763,7 +1811,9 @@ pub extern "C" fn EventKill(h_event: EventHandle) -> GCError {
 
 fn port_device(h_port: PortHandle) -> Result<Arc<GevDevice>, GCError> {
     let port = unsafe { from_handle::<DevicePort>(h_port) }.map_err(fail)?;
-    port.device.upgrade().ok_or_else(|| fail(GentlError::InvalidHandle))
+    port.device
+        .upgrade()
+        .ok_or_else(|| fail(GentlError::InvalidHandle))
 }
 
 #[no_mangle]
@@ -1824,7 +1874,11 @@ pub extern "C" fn GCWritePort(
 }
 
 #[no_mangle]
-pub extern "C" fn GCGetPortURL(h_port: PortHandle, s_url: *mut c_char, pi_size: *mut usize) -> GCError {
+pub extern "C" fn GCGetPortURL(
+    h_port: PortHandle,
+    s_url: *mut c_char,
+    pi_size: *mut usize,
+) -> GCError {
     if pi_size.is_null() {
         return fail(GentlError::InvalidParameter("piSize"));
     }
@@ -1880,15 +1934,25 @@ pub extern "C" fn GCGetPortInfo(
             PORT_INFO_MODEL => info_string(pi_type, p_buffer, pi_size, &d.model_name),
             PORT_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_GEV),
             PORT_INFO_MODULE => info_string(pi_type, p_buffer, pi_size, "Device"),
-            PORT_INFO_LITTLE_ENDIAN => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
-            PORT_INFO_BIG_ENDIAN => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8),
-            PORT_INFO_ACCESS_READ => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8),
+            PORT_INFO_LITTLE_ENDIAN => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
+            PORT_INFO_BIG_ENDIAN => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8)
+            }
+            PORT_INFO_ACCESS_READ => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8)
+            }
             PORT_INFO_ACCESS_WRITE => {
                 let v: u8 = (device.access != DeviceAccess::Monitor).into();
                 info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
             }
-            PORT_INFO_ACCESS_NA => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
-            PORT_INFO_ACCESS_NI => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
+            PORT_INFO_ACCESS_NA => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
+            PORT_INFO_ACCESS_NI => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
             PORT_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &d.device_version),
             PORT_INFO_PORTNAME => info_string(pi_type, p_buffer, pi_size, PORT_NAME_DEVICE),
             _ => not_implemented("GCGetPortInfo cmd"),
@@ -2034,7 +2098,13 @@ mod tests {
         let mut dtype: InfoDataType = -1;
         let mut size = 0usize;
         assert_eq!(
-            TLGetInfo(ptr::null_mut(), TL_INFO_VENDOR, &mut dtype, ptr::null_mut(), &mut size),
+            TLGetInfo(
+                ptr::null_mut(),
+                TL_INFO_VENDOR,
+                &mut dtype,
+                ptr::null_mut(),
+                &mut size
+            ),
             GC_ERR_INVALID_HANDLE
         );
 
@@ -2042,16 +2112,31 @@ mod tests {
         let mut buf = [0u8; 64];
         let mut size = buf.len();
         assert_eq!(
-            TLGetInfo(tl, TL_INFO_VENDOR, &mut dtype, buf.as_mut_ptr().cast(), &mut size),
+            TLGetInfo(
+                tl,
+                TL_INFO_VENDOR,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(dtype, INFO_DATATYPE_STRING);
-        assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("GenTLite"));
+        assert_eq!(
+            unsafe { c_str(buf.as_ptr() as *const c_char) },
+            Some("GenTLite")
+        );
 
         // TLTYPE "GEV".
         let mut size = buf.len();
         assert_eq!(
-            TLGetInfo(tl, TL_INFO_TLTYPE, &mut dtype, buf.as_mut_ptr().cast(), &mut size),
+            TLGetInfo(
+                tl,
+                TL_INFO_TLTYPE,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("GEV"));
@@ -2074,7 +2159,13 @@ mod tests {
 
         // NULL piType -> INVALID_PARAMETER.
         assert_eq!(
-            TLGetInfo(tl, TL_INFO_VENDOR, ptr::null_mut(), ptr::null_mut(), &mut size),
+            TLGetInfo(
+                tl,
+                TL_INFO_VENDOR,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut size
+            ),
             GC_ERR_INVALID_PARAMETER
         );
 
@@ -2084,10 +2175,16 @@ mod tests {
         // *piSize (GenTL 1.6 §6.3.1.3); piSize=NULL -> INVALID_PARAMETER.
         let mut err_code: GCError = 0;
         let mut needed = 0usize;
-        assert_eq!(GCGetLastError(&mut err_code, ptr::null_mut(), &mut needed), GC_ERR_SUCCESS);
+        assert_eq!(
+            GCGetLastError(&mut err_code, ptr::null_mut(), &mut needed),
+            GC_ERR_SUCCESS
+        );
         assert_eq!(err_code, GC_ERR_INVALID_HANDLE);
         assert!(needed > 1, "needed size includes NUL");
-        assert_eq!(GCGetLastError(&mut err_code, ptr::null_mut(), ptr::null_mut()), GC_ERR_INVALID_PARAMETER);
+        assert_eq!(
+            GCGetLastError(&mut err_code, ptr::null_mut(), ptr::null_mut()),
+            GC_ERR_INVALID_PARAMETER
+        );
 
         // Out-of-range interface index -> GC_ERR_INVALID_INDEX.
         let mut n = 0u32;
@@ -2120,9 +2217,15 @@ mod tests {
 
         // List access with a NULL handle -> INVALID_HANDLE, no crash.
         let mut n2 = 0u32;
-        assert_eq!(TLGetNumInterfaces(ptr::null_mut(), &mut n2), GC_ERR_INVALID_HANDLE);
+        assert_eq!(
+            TLGetNumInterfaces(ptr::null_mut(), &mut n2),
+            GC_ERR_INVALID_HANDLE
+        );
         // NULL out-pointer -> INVALID_PARAMETER (checked before the handle).
-        assert_eq!(TLGetNumInterfaces(tl, ptr::null_mut()), GC_ERR_INVALID_PARAMETER);
+        assert_eq!(
+            TLGetNumInterfaces(tl, ptr::null_mut()),
+            GC_ERR_INVALID_PARAMETER
+        );
 
         assert_eq!(TLClose(tl), GC_ERR_SUCCESS);
 

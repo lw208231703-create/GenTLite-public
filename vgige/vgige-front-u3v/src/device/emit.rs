@@ -88,33 +88,7 @@ fn emit_block(
 
     let payload = &frame.payload;
     let (ts, count, f1, f2) = regs.programmed_geometry();
-    if ts == 0 && count == 0 && f1 == 0 && f2 == 0 {
-        // Host enabled without programming: emit the payload as one
-        // piece (QoI — a standards-strict device would reject at Stream
-        // Enable with SI_REGISTERS_INCONSISTENT; Q39).
-        stream.send(payload)?;
-    } else {
-        let planned: Vec<u32> = (0..count)
-            .map(|_| ts)
-            .chain([f1, f2])
-            .filter(|&s| s > 0)
-            .collect();
-        let mut offset = 0usize;
-        for size in planned {
-            let n = size as usize;
-            let end = (offset + n).min(payload.len());
-            let mut piece = Vec::with_capacity(n);
-            piece.extend_from_slice(&payload[offset..end]);
-            // The programmed geometry rules the wire; pad a short tail
-            // (the configured frame size is the contract — Q39).
-            piece.resize(n, 0);
-            stream.send(&piece)?;
-            offset = end;
-            if end == payload.len() {
-                break;
-            }
-        }
-    }
+    emit_payload(stream, payload, ts, count, f1, f2)?;
 
     let trailer = packets::encode_image_trailer(
         block_id,
@@ -123,4 +97,72 @@ fn emit_block(
         frame.height,
     );
     stream.send(&trailer)
+}
+
+fn emit_payload(
+    stream: &dyn super::DeviceTransfers,
+    payload: &[u8],
+    ts: u32,
+    count: u32,
+    f1: u32,
+    f2: u32,
+) -> Result<(), StreamError> {
+    if ts == 0 && count == 0 && f1 == 0 && f2 == 0 {
+        // Host enabled without programming: emit the payload as one
+        // piece (QoI — a standards-strict device would reject at Stream
+        // Enable with SI_REGISTERS_INCONSISTENT; Q39).
+        return stream.send(payload);
+    }
+    let planned: Vec<u32> = (0..count)
+        .map(|_| ts)
+        .chain([f1, f2])
+        .filter(|&s| s > 0)
+        .collect();
+    let mut offset = 0usize;
+    for size in planned {
+        let n = size as usize;
+        let end = (offset + n).min(payload.len());
+        let mut piece = Vec::with_capacity(n);
+        piece.extend_from_slice(&payload[offset..end]);
+        // Every programmed piece must be present, including zero-filled
+        // pieces after a short frame's real payload has been exhausted.
+        piece.resize(n, 0);
+        stream.send(&piece)?;
+        offset = end;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingTransfers {
+        pieces: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl super::super::DeviceTransfers for RecordingTransfers {
+        fn send(&self, bytes: &[u8]) -> Result<(), StreamError> {
+            self.pieces.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn max_packet(&self) -> u16 {
+            512
+        }
+    }
+
+    #[test]
+    fn short_frame_still_emits_every_programmed_piece() {
+        let stream = RecordingTransfers::default();
+        emit_payload(&stream, &[1, 2], 4, 2, 3, 0).unwrap();
+        let pieces = stream.pieces.lock().unwrap();
+        assert_eq!(pieces.as_slice(), &[
+            vec![1, 2, 0, 0],
+            vec![0, 0, 0, 0],
+            vec![0, 0, 0],
+        ]);
+    }
 }

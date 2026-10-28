@@ -25,15 +25,10 @@ use std::time::Duration;
 
 use gentl_core::types::*;
 use gentl_core::{
-    channel::ControlChannel, ds as ds_core, event_queue::WaitResult, from_handle, free_handle,
+    channel::ControlChannel, ds as ds_core, event_queue::WaitResult, free_handle, from_handle,
     last_error, set_error, set_last_error, to_handle, GentlError, GentlResult,
 };
 
-// The WinUSB-backed modules are Windows-only (Phase A Linux port,
-// notes/PENDING.md "Linux 可移植"). On other platforms the stub modules
-// keep the crate — and its full GenTL surface — building: enumeration
-// reads empty, device open returns GC_ERR_NOT_IMPLEMENTED. Phase B adds
-// the rusb/libusb backend behind the same module names.
 // Module wiring after the Phase B USB-backend split (notes/PENDING.md
 // "Linux 可移植"): control/cti/stream/packets/descriptors/types are
 // platform-independent — the endpoint surface behind them is the
@@ -71,8 +66,6 @@ pub fn fetch_device_xml(h_device: DevHandle) -> Result<Vec<u8>, GCError> {
     let device = unsafe { from_handle::<U3vDevice>(h_device) }.map_err(fail)?;
     device.device_xml().map_err(fail)
 }
-
-
 
 // GenTL 1.6 enum values (include/GenTL.h is authoritative).
 const INFO_DATATYPE_STRING: InfoDataType = 1;
@@ -272,7 +265,11 @@ unsafe fn write_string(s_out: *mut c_char, pi_size: *mut usize, s: &str) -> GCEr
 ///
 /// # Safety
 /// Same contract as `write_string` for `p_buffer`/`pi_size`.
-unsafe fn write_value<T: Copy>(p_buffer: *mut core::ffi::c_void, pi_size: *mut usize, v: &T) -> GCError {
+unsafe fn write_value<T: Copy>(
+    p_buffer: *mut core::ffi::c_void,
+    pi_size: *mut usize,
+    v: &T,
+) -> GCError {
     let needed = std::mem::size_of::<T>();
     if p_buffer.is_null() {
         *pi_size = needed;
@@ -557,7 +554,11 @@ pub extern "C" fn TLGetInterfaceInfo(
 }
 
 #[no_mangle]
-pub extern "C" fn TLOpenInterface(h_tl: TLHandle, s_iface_id: *const c_char, ph_iface: *mut IFHandle) -> GCError {
+pub extern "C" fn TLOpenInterface(
+    h_tl: TLHandle,
+    s_iface_id: *const c_char,
+    ph_iface: *mut IFHandle,
+) -> GCError {
     if ph_iface.is_null() {
         return fail(GentlError::InvalidParameter("phIface"));
     }
@@ -592,7 +593,11 @@ pub extern "C" fn TLOpenInterface(h_tl: TLHandle, s_iface_id: *const c_char, ph_
 }
 
 #[no_mangle]
-pub extern "C" fn TLUpdateInterfaceList(h_tl: TLHandle, pb_changed: *mut u8, _i_timeout: u64) -> GCError {
+pub extern "C" fn TLUpdateInterfaceList(
+    h_tl: TLHandle,
+    pb_changed: *mut u8,
+    _i_timeout: u64,
+) -> GCError {
     let system = module!(h_tl, TlSystem);
     // Re-enumerate root hubs; opened interface instances keep their own
     // device lists (a re-open picks up the new template list).
@@ -673,7 +678,11 @@ pub extern "C" fn IFGetInfo(
 }
 
 #[no_mangle]
-pub extern "C" fn IFUpdateDeviceList(h_iface: IFHandle, pb_changed: *mut u8, _i_timeout: u64) -> GCError {
+pub extern "C" fn IFUpdateDeviceList(
+    h_iface: IFHandle,
+    pb_changed: *mut u8,
+    _i_timeout: u64,
+) -> GCError {
     let iface = match iface_from(h_iface) {
         Ok(i) => i,
         Err(e) => return e,
@@ -807,8 +816,12 @@ pub extern "C" fn IFGetDeviceInfo(
                 };
                 info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &v)
             }
-            DEVICE_INFO_USER_DEFINED_NAME => info_string(pi_type, p_buffer, pi_size, &ident.user_defined_name),
-            DEVICE_INFO_SERIAL_NUMBER => info_string(pi_type, p_buffer, pi_size, &ident.serial_number),
+            DEVICE_INFO_USER_DEFINED_NAME => {
+                info_string(pi_type, p_buffer, pi_size, &ident.user_defined_name)
+            }
+            DEVICE_INFO_SERIAL_NUMBER => {
+                info_string(pi_type, p_buffer, pi_size, &ident.serial_number)
+            }
             DEVICE_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &ident.device_version),
             DEVICE_INFO_TIMESTAMP_FREQUENCY => {
                 // U3V timestamps are nanoseconds (§5.5.5.1.1 timestamp).
@@ -988,8 +1001,12 @@ fn device_info(
                 };
                 info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &v)
             }
-            DEVICE_INFO_USER_DEFINED_NAME => info_string(pi_type, p_buffer, pi_size, &ident.user_defined_name),
-            DEVICE_INFO_SERIAL_NUMBER => info_string(pi_type, p_buffer, pi_size, &ident.serial_number),
+            DEVICE_INFO_USER_DEFINED_NAME => {
+                info_string(pi_type, p_buffer, pi_size, &ident.user_defined_name)
+            }
+            DEVICE_INFO_SERIAL_NUMBER => {
+                info_string(pi_type, p_buffer, pi_size, &ident.serial_number)
+            }
             DEVICE_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &ident.device_version),
             DEVICE_INFO_TIMESTAMP_FREQUENCY => {
                 let v: u64 = 1_000_000_000; // U3V timestamps are ns
@@ -1062,7 +1079,10 @@ fn aborted() -> GCError {
 // Data stream functions (GenTL 1.6 §6.3.4.5, §6.3.5) --------------------------
 
 #[no_mangle]
-pub extern "C" fn DevGetNumDataStreams(h_device: DevHandle, pi_num_data_streams: *mut u32) -> GCError {
+pub extern "C" fn DevGetNumDataStreams(
+    h_device: DevHandle,
+    pi_num_data_streams: *mut u32,
+) -> GCError {
     if pi_num_data_streams.is_null() {
         return fail(GentlError::InvalidParameter("piNumDataStreams"));
     }
@@ -1113,8 +1133,8 @@ pub extern "C" fn DevOpenDataStream(
         Ok(d) => d,
         Err(e) => return e,
     };
-    let Some(channel) = (0..device.bootstrap.number_of_stream_channels)
-        .find(|i| stream_id(*i) == id)
+    let Some(channel) =
+        (0..device.bootstrap.number_of_stream_channels).find(|i| stream_id(*i) == id)
     else {
         return fail(GentlError::InvalidId);
     };
@@ -1385,7 +1405,7 @@ pub extern "C" fn DSStartAcquisition(
         return fail(e);
     }
     if let Err(e) = ds.start() {
-        // Roll the engine state back; the channel is not open.
+        // Roll the engine back; transport start cleans up partial SIRM state.
         let _ = ds.core.stop_acquisition();
         return fail(e);
     }
@@ -1485,11 +1505,19 @@ pub extern "C" fn DSGetBufferInfo(
     let need_meta = |snap: &BufferSnapshot| snap.meta.ok_or(GentlError::NotAvailable);
     unsafe {
         match i_info_cmd {
-            BUFFER_INFO_BASE => info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.base),
-            BUFFER_INFO_SIZE => info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.size),
-            BUFFER_INFO_USER_PTR => {
-                info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.user_ptr)
+            BUFFER_INFO_BASE => {
+                info_value(pi_type, INFO_DATATYPE_PTR, p_buffer, pi_size, &snap.base)
             }
+            BUFFER_INFO_SIZE => {
+                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.size)
+            }
+            BUFFER_INFO_USER_PTR => info_value(
+                pi_type,
+                INFO_DATATYPE_PTR,
+                p_buffer,
+                pi_size,
+                &snap.user_ptr,
+            ),
             BUFFER_INFO_TIMESTAMP => match need_meta(&snap) {
                 // U3V leader timestamps are ns; the legacy tick field
                 // reports them as-is (tick frequency = 1 GHz).
@@ -1516,9 +1544,13 @@ pub extern "C" fn DSGetBufferInfo(
                 info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
             }
             BUFFER_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_U3V),
-            BUFFER_INFO_SIZE_FILLED => {
-                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.filled_size)
-            }
+            BUFFER_INFO_SIZE_FILLED => info_value(
+                pi_type,
+                INFO_DATATYPE_SIZET,
+                p_buffer,
+                pi_size,
+                &snap.filled_size,
+            ),
             BUFFER_INFO_WIDTH => match need_meta(&snap) {
                 Ok(m) => {
                     let v = m.width as usize;
@@ -1608,11 +1640,21 @@ pub extern "C" fn DSGetBufferInfo(
             BUFFER_INFO_FILENAME => info_string(pi_type, p_buffer, pi_size, ""),
             BUFFER_INFO_PIXEL_ENDIANNESS => {
                 // U3V data blocks are little-endian end to end (R-75st).
-                info_value(pi_type, INFO_DATATYPE_INT32, p_buffer, pi_size, &PIXELENDIANNESS_LITTLE)
+                info_value(
+                    pi_type,
+                    INFO_DATATYPE_INT32,
+                    p_buffer,
+                    pi_size,
+                    &PIXELENDIANNESS_LITTLE,
+                )
             }
-            BUFFER_INFO_DATA_SIZE => {
-                info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &snap.filled_size)
-            }
+            BUFFER_INFO_DATA_SIZE => info_value(
+                pi_type,
+                INFO_DATATYPE_SIZET,
+                p_buffer,
+                pi_size,
+                &snap.filled_size,
+            ),
             BUFFER_INFO_TIMESTAMP_NS => match need_meta(&snap) {
                 Ok(m) => {
                     let v = m.timestamp;
@@ -1819,7 +1861,9 @@ pub extern "C" fn EventKill(h_event: EventHandle) -> GCError {
 
 fn port_device(h_port: PortHandle) -> Result<Arc<U3vDevice>, GCError> {
     let port = unsafe { from_handle::<DevicePort>(h_port) }.map_err(fail)?;
-    port.device.upgrade().ok_or_else(|| fail(GentlError::InvalidHandle))
+    port.device
+        .upgrade()
+        .ok_or_else(|| fail(GentlError::InvalidHandle))
 }
 
 #[no_mangle]
@@ -1877,7 +1921,11 @@ pub extern "C" fn GCWritePort(
 }
 
 #[no_mangle]
-pub extern "C" fn GCGetPortURL(h_port: PortHandle, s_url: *mut c_char, pi_size: *mut usize) -> GCError {
+pub extern "C" fn GCGetPortURL(
+    h_port: PortHandle,
+    s_url: *mut c_char,
+    pi_size: *mut usize,
+) -> GCError {
     if pi_size.is_null() {
         return fail(GentlError::InvalidParameter("piSize"));
     }
@@ -1988,15 +2036,25 @@ pub extern "C" fn GCGetPortInfo(
             PORT_INFO_MODULE => info_string(pi_type, p_buffer, pi_size, "Device"),
             // U3V bootstrap registers and protocol fields are
             // little-endian (R-30cd).
-            PORT_INFO_LITTLE_ENDIAN => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8),
-            PORT_INFO_BIG_ENDIAN => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
-            PORT_INFO_ACCESS_READ => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8),
+            PORT_INFO_LITTLE_ENDIAN => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8)
+            }
+            PORT_INFO_BIG_ENDIAN => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
+            PORT_INFO_ACCESS_READ => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &1u8)
+            }
             PORT_INFO_ACCESS_WRITE => {
                 let v: u8 = (device.access != DeviceAccess::Monitor).into();
                 info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
             }
-            PORT_INFO_ACCESS_NA => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
-            PORT_INFO_ACCESS_NI => info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8),
+            PORT_INFO_ACCESS_NA => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
+            PORT_INFO_ACCESS_NI => {
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &0u8)
+            }
             PORT_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, &ident.device_version),
             PORT_INFO_PORTNAME => info_string(pi_type, p_buffer, pi_size, PORT_NAME_DEVICE),
             _ => not_implemented("GCGetPortInfo cmd"),
@@ -2130,23 +2188,44 @@ mod tests {
         let mut dtype: InfoDataType = -1;
         let mut size = 0usize;
         assert_eq!(
-            TLGetInfo(ptr::null_mut(), TL_INFO_VENDOR, &mut dtype, ptr::null_mut(), &mut size),
+            TLGetInfo(
+                ptr::null_mut(),
+                TL_INFO_VENDOR,
+                &mut dtype,
+                ptr::null_mut(),
+                &mut size
+            ),
             GC_ERR_INVALID_HANDLE
         );
 
         let mut buf = [0u8; 64];
         let mut size = buf.len();
         assert_eq!(
-            TLGetInfo(tl, TL_INFO_VENDOR, &mut dtype, buf.as_mut_ptr().cast(), &mut size),
+            TLGetInfo(
+                tl,
+                TL_INFO_VENDOR,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(dtype, INFO_DATATYPE_STRING);
-        assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("GenTLite"));
+        assert_eq!(
+            unsafe { c_str(buf.as_ptr() as *const c_char) },
+            Some("GenTLite")
+        );
 
         // TLTYPE "U3V".
         let mut size = buf.len();
         assert_eq!(
-            TLGetInfo(tl, TL_INFO_TLTYPE, &mut dtype, buf.as_mut_ptr().cast(), &mut size),
+            TLGetInfo(
+                tl,
+                TL_INFO_TLTYPE,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("U3V"));
@@ -2168,7 +2247,14 @@ mod tests {
             let bad_id = b"USB\\ROOT_HUB99\\bogus\0".as_ptr() as *const c_char;
             let mut size = 0usize;
             assert_eq!(
-                TLGetInterfaceInfo(tl, bad_id, INTERFACE_INFO_TLTYPE, &mut dtype, ptr::null_mut(), &mut size),
+                TLGetInterfaceInfo(
+                    tl,
+                    bad_id,
+                    INTERFACE_INFO_TLTYPE,
+                    &mut dtype,
+                    ptr::null_mut(),
+                    &mut size
+                ),
                 GC_ERR_INVALID_ID
             );
             let mut tl2: TLHandle = ptr::null_mut();
@@ -2189,13 +2275,27 @@ mod tests {
         assert!(id.to_ascii_uppercase().starts_with("USB\\ROOT_HUB"));
         let mut size = 0usize;
         assert_eq!(
-            TLGetInterfaceInfo(tl, idbuf.as_ptr() as *const c_char, INTERFACE_INFO_TLTYPE, &mut dtype, ptr::null_mut(), &mut size),
+            TLGetInterfaceInfo(
+                tl,
+                idbuf.as_ptr() as *const c_char,
+                INTERFACE_INFO_TLTYPE,
+                &mut dtype,
+                ptr::null_mut(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(size, 4, "\"U3V\" + NUL");
         let mut size = buf.len();
         assert_eq!(
-            TLGetInterfaceInfo(tl, idbuf.as_ptr() as *const c_char, INTERFACE_INFO_TLTYPE, &mut dtype, buf.as_mut_ptr().cast(), &mut size),
+            TLGetInterfaceInfo(
+                tl,
+                idbuf.as_ptr() as *const c_char,
+                INTERFACE_INFO_TLTYPE,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
             GC_ERR_SUCCESS
         );
         assert_eq!(unsafe { c_str(buf.as_ptr() as *const c_char) }, Some("U3V"));
@@ -2209,7 +2309,14 @@ mod tests {
         let bad_id = b"USB\\ROOT_HUB99\\bogus\0".as_ptr() as *const c_char;
         let mut size = 0usize;
         assert_eq!(
-            TLGetInterfaceInfo(tl, bad_id, INTERFACE_INFO_TLTYPE, &mut dtype, ptr::null_mut(), &mut size),
+            TLGetInterfaceInfo(
+                tl,
+                bad_id,
+                INTERFACE_INFO_TLTYPE,
+                &mut dtype,
+                ptr::null_mut(),
+                &mut size
+            ),
             GC_ERR_INVALID_ID
         );
         let mut tl2: TLHandle = ptr::null_mut();
@@ -2218,7 +2325,10 @@ mod tests {
         // Open/close the interface; device list update works with no
         // cameras attached (returns success, zero devices).
         let mut iface: IFHandle = ptr::null_mut();
-        assert_eq!(TLOpenInterface(tl, idbuf.as_ptr() as *const c_char, &mut iface), GC_ERR_SUCCESS);
+        assert_eq!(
+            TLOpenInterface(tl, idbuf.as_ptr() as *const c_char, &mut iface),
+            GC_ERR_SUCCESS
+        );
         assert!(!iface.is_null());
         let mut changed = 2u8;
         assert_eq!(IFUpdateDeviceList(iface, &mut changed, 100), GC_ERR_SUCCESS);

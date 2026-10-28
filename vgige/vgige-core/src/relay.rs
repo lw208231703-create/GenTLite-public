@@ -73,8 +73,7 @@ pub fn virtual_payload_chunk(scps: u32) -> usize {
 /// Front plug point: builds the encoding session for one channel open, with
 /// the shared register file attached. `FnMut` so the relay stays reusable
 /// across open/close cycles (the factory is stored, not consumed).
-pub type SessionFactory =
-    Box<dyn FnMut(Arc<Mutex<StreamRegs>>) -> Box<dyn FrameSession> + Send>;
+pub type SessionFactory = Box<dyn FnMut(Arc<Mutex<StreamRegs>>) -> Box<dyn FrameSession> + Send>;
 
 struct RelayInner {
     regs: Arc<Mutex<StreamRegs>>,
@@ -174,7 +173,12 @@ impl Relay {
     /// downstream stream close. Used by the SCP0=0 write path and by
     /// `Drop`.
     pub fn close(&self) {
-        let run = self.inner.run.lock().expect("vgige relay run poisoned").take();
+        let run = self
+            .inner
+            .run
+            .lock()
+            .expect("vgige relay run poisoned")
+            .take();
         let was_open = run.is_some();
         drop(run); // RelayRun::drop stops and joins the threads.
         if was_open {
@@ -277,24 +281,50 @@ impl Relay {
         };
 
         let mut factory = self.inner.factory.lock().map_err(|_| GEV_STATUS_ERROR)?;
-        let session = factory(Arc::clone(&self.inner.regs));
+        let mut session = factory(Arc::clone(&self.inner.regs));
         drop(factory);
+
+        let hint = virtual_payload_chunk(
+            self.inner
+                .regs
+                .lock()
+                .expect("vgige relay regs poisoned")
+                .scps,
+        );
+        if let Err(e) = session.open(hint) {
+            eprintln!("vgige: relay session open: {e}");
+            let _ = self.inner.back.lock().map(|mut b| b.close_stream());
+            return Err(GEV_STATUS_ERROR);
+        }
 
         let stop = Arc::new(AtomicBool::new(false));
         let (frame_tx, frame_rx) = sync_channel(RING_DEPTH);
-        let rx_stop = stop.clone();
-        let rx_handle = std::thread::Builder::new()
-            .name("vgige-relay-rx".into())
-            .spawn(move || driver_rx(rx_stop, source, frame_tx))
-            .map_err(|_| GEV_STATUS_ERROR)?;
-
         let frames_relayed = Arc::clone(&self.inner.frames_relayed);
         let tx_stop = stop.clone();
-        let hint = virtual_payload_chunk(self.inner.regs.lock().expect("vgige relay regs poisoned").scps);
-        let tx_handle = std::thread::Builder::new()
+        let tx_handle = match std::thread::Builder::new()
             .name("vgige-relay-tx".into())
-            .spawn(move || driver_tx(tx_stop, session, frame_rx, frames_relayed, hint))
-            .map_err(|_| GEV_STATUS_ERROR)?;
+            .spawn(move || driver_tx(tx_stop, session, frame_rx, frames_relayed))
+        {
+            Ok(handle) => handle,
+            Err(_) => {
+                let _ = self.inner.back.lock().map(|mut b| b.close_stream());
+                return Err(GEV_STATUS_ERROR);
+            }
+        };
+
+        let rx_stop = stop.clone();
+        let rx_handle = match std::thread::Builder::new()
+            .name("vgige-relay-rx".into())
+            .spawn(move || driver_rx(rx_stop, source, frame_tx))
+        {
+            Ok(handle) => handle,
+            Err(_) => {
+                stop.store(true, Ordering::Relaxed);
+                let _ = tx_handle.join();
+                let _ = self.inner.back.lock().map(|mut b| b.close_stream());
+                return Err(GEV_STATUS_ERROR);
+            }
+        };
 
         self.with_regs_mut(|r| r.scp = reg::scp_make(host_port));
         *self.inner.run.lock().expect("vgige relay run poisoned") = Some(RelayRun {
@@ -346,19 +376,14 @@ fn driver_rx(
 }
 
 /// Sender side of the driver: pop frames and hand them to the session for
-/// wire encoding. `payload_hint` seeds the session's open() with the slice
-/// size derived from the virtual SCPS0 at channel-open time.
+/// wire encoding. The session was opened synchronously before this thread
+/// was spawned, so startup errors can roll back the downstream channel.
 fn driver_tx(
     stop: Arc<AtomicBool>,
     mut session: Box<dyn FrameSession>,
     frame_rx: Receiver<CanonicalFrame>,
     frames_relayed: Arc<AtomicU32>,
-    payload_hint: usize,
 ) {
-    if let Err(e) = session.open(payload_hint) {
-        eprintln!("vgige: relay session open: {e}");
-        return;
-    }
     while !stop.load(Ordering::Relaxed) {
         match frame_rx.recv_timeout(POLL) {
             Ok(frame) => {

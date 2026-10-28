@@ -13,8 +13,8 @@
 //!   touches USB, and is fully testable — `tests/pairing.rs` drives it
 //!   with the real host-side client (`gentl_u3v::client::U3vCamera`).
 //! - [`gadget`]: the Linux FunctionFS physical layer binding those byte
-//!   streams to configfs + /dev/*-ep* endpoints. Integration path only;
-//!   the machine-level bring-up is 待验 (design note §5, Q39).
+//!   streams to configfs + /dev/*-ep* endpoints. USB 2.0 High-Speed has
+//!   passed the gadget burn-in; SuperSpeed remains hardware follow-up (Q39).
 //!
 //! Gateway semantics (symmetric to the backs): the bootstrap/vendor
 //! register space forwards to the downstream [`vgige_core::CameraBack`]
@@ -78,7 +78,12 @@ pub fn synthesize_guid(seed: &str) -> [u8; 16] {
 impl DeviceConfig {
     /// Convenience: build from the downstream camera's identity and the
     /// injected XML blob.
-    pub fn from_parts(identity: BackIdentity, xml: &[u8], payload_size: u64, guid: [u8; 16]) -> Self {
+    pub fn from_parts(
+        identity: BackIdentity,
+        xml: &[u8],
+        payload_size: u64,
+        guid: [u8; 16],
+    ) -> Self {
         DeviceConfig {
             manufacturer: identity.manufacturer,
             model: identity.model,

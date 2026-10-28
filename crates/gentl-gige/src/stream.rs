@@ -4,12 +4,11 @@
 //!
 //! Channel rules (notes/gvcp-wirefacts.md, spec §11.5/§36.57): the primary
 //! application opens a channel by writing SCDAx (destination IP) and then
-//! SCPx = host_port << 16 (spec §36.57 — identical in GigE 1.2 §27.45;
-//! the layout never changed). host_port != 0 activates, 0 closes, and SCPx
-//! must be the last stream channel register written when opening. Pure
-//! spec-only behavior: a device that ignores the spec encoding fails the
-//! readback check with a clear error (project decision 2026-10-12,
-//! notes/OPEN-QUESTIONS Q25).
+//! SCPx with host_port in the low 16 bits (spec §36.57, MSB-first print
+//! numbering — identical in GigE 1.2 §27.45; Q31). host_port != 0 activates,
+//! 0 closes, and SCPx must be the last stream channel register written when
+//! opening. Pure spec-only behavior: a device that ignores the spec encoding
+//! fails the readback check with a clear error (notes/OPEN-QUESTIONS Q31).
 //!
 //! M3-4a multi-stream fan-out: the single GenTL DataStream ("Stream0",
 //! GenTL surface unchanged) drives K GVSP channels, each with its own UDP
@@ -73,7 +72,7 @@ use crate::discovery::desired_stream_channels;
 use crate::gvsp_receiver::{receiver_loop, ReceiverStats};
 
 /// The single stream channel's ID (fixed across sessions, GenTL 1.6 §3;
-/// format not mandated by the spec — OPEN-QUESTION Q16).
+/// format not mandated by the spec — OPEN-QUESTION Q19).
 pub const STREAM_ID: &str = "Stream0";
 
 // §11.7 probe candidates: "To find the search limits one can write a very
@@ -121,10 +120,7 @@ fn desired_rcvbuf_kb() -> u32 {
 /// guessing).
 fn desired_rx_affinity() -> Option<usize> {
     let v = std::env::var("GENTLITE_GEV_RX_CORES").ok()?;
-    let hex = v
-        .trim()
-        .trim_start_matches("0x")
-        .trim_start_matches("0X");
+    let hex = v.trim().trim_start_matches("0x").trim_start_matches("0X");
     usize::from_str_radix(hex, 16).ok()
 }
 
@@ -240,7 +236,8 @@ fn probe(
             // §11.7 verbatim: "Write the packet size without bit 0
             // (fire_test_packet) set, read back the rounded packet size,
             // write the rounded packet size with bit 0 set".
-            c.write_reg(registers::scps(x), registers::scps_make(m)).ok()?;
+            c.write_reg(registers::scps(x), registers::scps_make(m))
+                .ok()?;
             let r = registers::scps_packet_size(c.read_reg(registers::scps(x)).ok()?);
             c.write_reg(
                 registers::scps(x),
@@ -255,7 +252,9 @@ fn probe(
             // yields the rounded r.
             c.write_reg(
                 registers::scps(x),
-                registers::scps_make(m) | registers::SCPS_FIRE_TEST_PACKET | registers::SCPS_DO_NOT_FRAGMENT,
+                registers::scps_make(m)
+                    | registers::SCPS_FIRE_TEST_PACKET
+                    | registers::SCPS_DO_NOT_FRAGMENT,
             )
             .ok()?;
             registers::scps_packet_size(c.read_reg(registers::scps(x)).ok()?)
@@ -287,7 +286,11 @@ fn search_from(
 ) -> Option<u32> {
     let mut lo = lo0;
     let (hi_r, hi_arrived) = probe(c, x, socket, PROBE_MAX, mode, test_data_supported)?;
-    let mut hi = if hi_arrived { hi_r } else { hi_r.saturating_sub(1) };
+    let mut hi = if hi_arrived {
+        hi_r
+    } else {
+        hi_r.saturating_sub(1)
+    };
     let mut last_mid = u32::MAX;
     while hi > lo {
         let mid = lo + (hi - lo + 1) / 2;
@@ -325,7 +328,14 @@ fn negotiate_packet_size(
     socket: &UdpSocket,
     test_data_supported: bool,
 ) -> Option<u32> {
-    match probe(c, x, socket, PROBE_MIN, ProbeMode::ThreeStep, test_data_supported) {
+    match probe(
+        c,
+        x,
+        socket,
+        PROBE_MIN,
+        ProbeMode::ThreeStep,
+        test_data_supported,
+    ) {
         Some((r, true)) => search_from(c, x, socket, r, ProbeMode::ThreeStep, test_data_supported),
         // Minimum size undeliverable: nothing below it can work either.
         Some((_, false)) => None,
@@ -340,7 +350,14 @@ fn bisect_fire_only(
     socket: &UdpSocket,
     test_data_supported: bool,
 ) -> Option<u32> {
-    let (r, arrived) = probe(c, x, socket, PROBE_MIN, ProbeMode::FireOnly, test_data_supported)?;
+    let (r, arrived) = probe(
+        c,
+        x,
+        socket,
+        PROBE_MIN,
+        ProbeMode::FireOnly,
+        test_data_supported,
+    )?;
     if !arrived {
         return None;
     }
@@ -351,7 +368,8 @@ fn bisect_fire_only(
 /// total size without fire, read back the rounded value (R-562st), use it.
 /// No test packet is fired — the operator override is trusted (QoI).
 fn fixed_packet_size(c: &GvcpClient, x: u32, size: u32) -> Option<u32> {
-    c.write_reg(registers::scps(x), registers::scps_make(size)).ok()?;
+    c.write_reg(registers::scps(x), registers::scps_make(size))
+        .ok()?;
     let r = registers::scps_packet_size(c.read_reg(registers::scps(x)).ok()?);
     (r > registers::GVSP_HEADERS_OVERHEAD).then_some(r)
 }
@@ -401,8 +419,7 @@ fn test_packet_arrived(socket: &UdpSocket, total: u32, test_data_supported: bool
                 return true;
             }
             Err(e)
-                if e.kind() == io::ErrorKind::TimedOut
-                    || e.kind() == io::ErrorKind::WouldBlock =>
+                if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock =>
             {
                 break
             }
@@ -635,75 +652,79 @@ impl GevDataStream {
         if self.is_running() {
             return Err(GentlError::ResourceInUse);
         }
-        let local_ip = local_ip_for(Ipv4Addr::from(device.discovery.current_ip))?;
-        let rx_affinity = desired_rx_affinity();
-        let test_data_supported = device.test_data_supported;
-        // §16.7 (R-197ca): resend only when the device declares the
-        // PACKETRESEND capability and the operator did not switch it off.
-        let resend_cfg = crate::gvsp_receiver::ResendConfig {
-            enabled: device.packet_resend_supported && desired_resend(),
-            frame_retention: desired_frame_retention(),
-        };
-        let channels = self.channels.lock().unwrap();
-        let mut opened = 0usize;
-        let mut first_err: Option<GentlError> = None;
-        for idx in 0..channels.len() {
-            let x = u32::from(channels[idx].index);
-            let port = channels[idx]
-                .socket
-                .local_addr()
-                .map_err(GentlError::from)?
-                .port();
-            let res = {
-                let c = self
-                    .control
-                    .lock()
-                    .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-                open_channel(&c, x, local_ip, port, &channels[idx].socket, test_data_supported)
+        let result = (|| {
+            let local_ip = local_ip_for(Ipv4Addr::from(device.discovery.current_ip))?;
+            let rx_affinity = desired_rx_affinity();
+            let test_data_supported = device.test_data_supported;
+            // §16.7 (R-197ca): resend only when the device declares the
+            // PACKETRESEND capability and the operator did not switch it off.
+            let resend_cfg = crate::gvsp_receiver::ResendConfig {
+                enabled: device.packet_resend_supported && desired_resend(),
+                frame_retention: desired_frame_retention(),
             };
-            match res {
-                Ok(()) => {
-                    *channels[idx].opened.lock().unwrap() = true;
-                    channels[idx].stop.store(false, Ordering::SeqCst);
-                    channels[idx].kill.store(false, Ordering::SeqCst);
-                    let sock = channels[idx].socket.try_clone().map_err(GentlError::from)?;
-                    let sink = self.core.clone();
-                    let stop = channels[idx].stop.clone();
-                    let kill = channels[idx].kill.clone();
-                    let stats = channels[idx].stats.clone();
-                    let resend = resend_cfg.enabled.then(|| crate::gvsp_receiver::ResendHandle {
-                        client: self.control.clone(),
-                        channel: x as u16,
-                        config: resend_cfg,
-                    });
-                    let name = format!("gvsp-recv-{}-ch{x}", device.id);
-                    let me = self.clone();
-                    let handle = std::thread::Builder::new()
-                        .name(name)
-                        .spawn(move || {
-                            if let Some(mask) = rx_affinity {
-                                set_rx_affinity(mask);
-                            }
-                            receiver_loop(sock, sink, stop, kill, stats, me, resend)
-                        })
-                        .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
-                    *channels[idx].receiver.lock().unwrap() = Some(handle);
-                    opened += 1;
-                }
-                Err(e) => {
-                    first_err = Some(e);
-                    break;
+            let channels = self.channels.lock().unwrap();
+            let mut opened = 0usize;
+            let mut first_err: Option<GentlError> = None;
+            for idx in 0..channels.len() {
+                let x = u32::from(channels[idx].index);
+                let port = channels[idx]
+                    .socket
+                    .local_addr()
+                    .map_err(GentlError::from)?
+                    .port();
+                let res = {
+                    let c = self
+                        .control
+                        .lock()
+                        .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
+                    open_channel(&c, x, local_ip, port, &channels[idx].socket, test_data_supported)
+                };
+                match res {
+                    Ok(()) => {
+                        *channels[idx].opened.lock().unwrap() = true;
+                        channels[idx].stop.store(false, Ordering::SeqCst);
+                        channels[idx].kill.store(false, Ordering::SeqCst);
+                        let sock = channels[idx].socket.try_clone().map_err(GentlError::from)?;
+                        let sink = self.core.clone();
+                        let stop = channels[idx].stop.clone();
+                        let kill = channels[idx].kill.clone();
+                        let stats = channels[idx].stats.clone();
+                        let resend = resend_cfg.enabled.then(|| crate::gvsp_receiver::ResendHandle {
+                            client: self.control.clone(),
+                            channel: x as u16,
+                            config: resend_cfg,
+                        });
+                        let name = format!("gvsp-recv-{}-ch{x}", device.id);
+                        let me = self.clone();
+                        let handle = std::thread::Builder::new()
+                            .name(name)
+                            .spawn(move || {
+                                if let Some(mask) = rx_affinity {
+                                    set_rx_affinity(mask);
+                                }
+                                receiver_loop(sock, sink, stop, kill, stats, me, resend)
+                            })
+                            .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
+                        *channels[idx].receiver.lock().unwrap() = Some(handle);
+                        opened += 1;
+                    }
+                    Err(e) => {
+                        first_err = Some(e);
+                        break;
+                    }
                 }
             }
+            if opened == 0 {
+                return Err(first_err.unwrap_or_else(|| {
+                    GentlError::Io("no stream channel available".into())
+                }));
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.stop(true);
         }
-        if opened == 0 {
-            // Total failure: the caller (DSStartAcquisition) rolls the
-            // engine state back and the start fails, as before M3-4a.
-            return Err(first_err.unwrap_or_else(|| {
-                GentlError::Io("no stream channel available".into())
-            }));
-        }
-        Ok(())
+        result
     }
 
     /// Receiver-fatal recovery (IO error / unrecoverable desync): the
@@ -738,7 +759,8 @@ impl GevDataStream {
                 let mut opened = ch.opened.lock().unwrap();
                 if *opened {
                     // 0 closes the channel (spec §36.57).
-                    let _ = c.write_reg(registers::scp(u32::from(ch.index)), registers::scp_make(0));
+                    let _ =
+                        c.write_reg(registers::scp(u32::from(ch.index)), registers::scp_make(0));
                     *opened = false;
                 }
             }
@@ -803,7 +825,10 @@ impl GevDataStream {
     /// Record the handle handed out for a core buffer id. Stored as an
     /// address-sized integer so the stream stays `Send`/`Sync`.
     pub fn set_buffer_handle(&self, id: u64, handle: *mut core::ffi::c_void) {
-        self.buffer_handles.lock().unwrap().insert(id, handle as usize);
+        self.buffer_handles
+            .lock()
+            .unwrap()
+            .insert(id, handle as usize);
     }
 
     /// The stable BUFFER_HANDLE for a core buffer id.

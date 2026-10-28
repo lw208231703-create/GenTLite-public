@@ -6,9 +6,8 @@
 **English** | [简体中文](README.zh-CN.md)
 
 A universal GenTL producer (`.cti`) for GigE Vision and USB3 Vision
-machine-vision cameras. One library drives every compliant camera —
-Hikvision, Basler, etc. — for parameter control and image acquisition,
-with no vendor SDK on the host.
+machine-vision cameras. The goal is one CTI for compliant cameras, with
+parameter control and image acquisition and no vendor SDK on the host.
 
 Written in Rust, C ABI, MIT licensed.
 
@@ -16,9 +15,10 @@ Written in Rust, C ABI, MIT licensed.
 
 - GigE Vision (GVCP/GVSP, spec 3.0 / 1.2) and USB3 Vision (GenCP 1.3.1,
   spec 1.2) transport implementations
-- Complete GenTL 1.6 interface — 64 entry points, zero-copy acquisition
-- All 273 PFNC pixel formats; any camera parameter via the camera's own
-  GenICam XML
+- GenTL 1.6 C ABI — 64 entry points; zero-copy GVSP acquisition and
+  segmented U3V reassembly
+- All 273 PFNC pixel formats; camera parameters via the camera's own
+  GenICam XML; optional Chunk and Buffer Parts features are implemented on demand
 
 ## Quick start
 
@@ -29,17 +29,20 @@ cargo cti    # build the workspace, then place gentl_gige.cti /
              # still works, it just skips the .cti copies)
 ```
 
-Point any GenTL consumer at the build directory (add it to
-`GENICAM_GENTL64_PATH`, or load a `.cti` explicitly) — pylon, HALCON, or your
-own GenApi code. `consumer-test/` is a C++ reference; run
-`cargo run --example grab_u3v -- <id> 100` to grab frames, or
-`cargo test --workspace` for a hardware-free regression.
+Point a GenTL consumer at the build directory (add it to
+`GENICAM_GENTL64_PATH`, or load a `.cti` explicitly). `consumer-test/` is a
+C++ reference; run `cargo run --example grab_u3v -- <id> 100` to grab frames,
+or `cargo test --workspace` for a hardware-free regression.
 
 ## Status
 
-USB3 Vision: verified with a Hikvision USB3 Vision camera (note: use Zadig
-to switch the USB driver to WinUSB before use).
-GigE Vision: no camera on hand yet, untested.
+- USB3 Vision: verified with a Hikrobot U3V camera; on Windows, switch the
+  device to WinUSB with Zadig first.
+- GigE Vision: 1000/1000 frames verified with a project camera; Linux/aarch64
+  completed a 380,000-frame, 2-hour-10-minute soak test.
+- `vgige`: GigE relay and USB 2.0 High-Speed U3V gadget soak reports are available.
+- Third-party hosts (pylon, MVS, HALCON) and the multi-brand camera matrix
+  remain to be verified; see `docs/interop-matrix.md`.
 
 ## License
 

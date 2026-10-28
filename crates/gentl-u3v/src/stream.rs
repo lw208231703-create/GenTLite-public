@@ -30,9 +30,6 @@ pub fn stream_id(index: u32) -> String {
 }
 
 /// Preferred size of one payload transfer (§5.2.1.3 "equal sized
-/// blocks"). Well inside every USB limit (WinUSB RAW_IO and usbfs alike)
-/// and a 1 KB multiple.
-/// Preferred size of one payload transfer (§5.2.1.3 "equal sized
 /// blocks"). A 1 KiB multiple and well inside every USB limit — EXCEPT
 /// the one found the hard way (vgige bring-up 2026-10-27): a 1 MiB
 /// piece makes WinUSB/xHCI halt the bulk-IN endpoint on the very first
@@ -181,7 +178,9 @@ pub(crate) fn program_sirm(client: &GenCpClient, sirm: &SirmInfo) -> GentlResult
         // GenDC container/flow modes are not implemented by this
         // producer; streaming a GenDC-configured channel would
         // mis-deliver payloads.
-        return Err(GentlError::NotImplemented("non-standard U3V payload mode (GenDC)"));
+        return Err(GentlError::NotImplemented(
+            "non-standard U3V payload mode (GenDC)",
+        ));
     }
     let alignment = sirm.alignment();
     let geometry = plan_geometry(
@@ -203,6 +202,7 @@ pub(crate) fn program_sirm(client: &GenCpClient, sirm: &SirmInfo) -> GentlResult
     client.write_reg(a + sirm::SI_CONTROL, sirm::CONTROL_STREAM_ENABLE)?;
     let enabled = client.read_reg(a + sirm::SI_CONTROL)?;
     if enabled & sirm::CONTROL_STREAM_ENABLE == 0 {
+        disable_sirm(client, sirm);
         return Err(GentlError::Io(
             "Stream Enable did not latch (SI registers inconsistent?)".into(),
         ));
@@ -225,19 +225,27 @@ fn align_up(v: u64, alignment: u64) -> u64 {
 }
 
 /// Program the payload transfer sizes for a required payload (§5.2.1.3
-/// Figure 5-2): total = required aligned up; TS = min(1 MiB, total);
+/// Figure 5-2): total = required aligned up; TS = min(512 KiB, total);
 /// count = total / TS; final1 = remainder; final2 = 0. All values are
 /// multiples of the SIRM alignment. (The spec example additionally
 /// assumes a 1 KB/64 KB WinUSB granularity; see notes/OPEN-QUESTIONS.md
 /// UQ9 — only the alignment rule is normative.)
-fn plan_geometry(required_payload: u64, required_leader: u32, required_trailer: u32, alignment: u64) -> TransferGeometry {
+fn plan_geometry(
+    required_payload: u64,
+    required_leader: u32,
+    required_trailer: u32,
+    alignment: u64,
+) -> TransferGeometry {
     let total = align_up(required_payload, alignment);
     let ts_cap = align_up(PAYLOAD_TRANSFER, alignment).max(alignment);
     let transfer_size = ts_cap.min(total.max(alignment)).min(u32::MAX as u64) as u32;
     let (transfer_count, final1) = if transfer_size == 0 {
         (0, 0)
     } else {
-        ((total / transfer_size as u64) as u32, (total % transfer_size as u64) as u32)
+        (
+            (total / transfer_size as u64) as u32,
+            (total % transfer_size as u64) as u32,
+        )
     };
     TransferGeometry {
         max_leader: align_up(required_leader as u64, alignment).min(u32::MAX as u64) as u32,
@@ -270,7 +278,12 @@ impl U3vDataStream {
                 .client
                 .lock()
                 .map_err(|_| GentlError::Io("control client lock poisoned".into()))?;
-            read_sirm(&c, sirm_address, channel_index, device.bootstrap.sirm_length)?
+            read_sirm(
+                &c,
+                sirm_address,
+                channel_index,
+                device.bootstrap.sirm_length,
+            )?
         };
         let core = Arc::new(DsCore::new());
         core.set_expected_payload_size(sirm_info.required_payload as usize);
@@ -306,6 +319,9 @@ impl U3vDataStream {
         if self.is_running() {
             return Err(GentlError::ResourceInUse);
         }
+        // Apply the backend policy before enabling the device, so a policy
+        // failure cannot leave SIRM streaming without a receiver.
+        self.pipe.set_raw_io()?;
         let geometry = {
             let c = device
                 .client
@@ -317,18 +333,6 @@ impl U3vDataStream {
         self.stop_receiver.store(false, Ordering::SeqCst);
         self.kill_receiver.store(false, Ordering::SeqCst);
 
-        // Backend pipe policy on the stream pipe: RAW_IO on Windows
-        // (bypass WinUSB queuing gaps, UQ16); the receiver honors the
-        // MPS-aligned-request contract via `usbio::align_request`. No-op
-        // on the libusb backend — usbfs has no such policy and the UQ16
-        // accumulation layer is OS-independent.
-        self.pipe.set_raw_io()?;
-
-        // Backend pipe policy on the stream pipe: RAW_IO on Windows
-        // (bypass WinUSB queuing gaps, UQ16); the receiver honors the
-        // MPS-aligned-request contract via `usbio::align_request`. No-op
-        // on the libusb backend — usbfs has no such policy and the UQ16
-        // accumulation layer is OS-independent.
         let pipe = self.pipe.clone();
         let sink = self.core.clone();
         let stop = self.stop_receiver.clone();
@@ -342,12 +346,22 @@ impl U3vDataStream {
         // stream for fatal-exit engine cleanup (audit C16).
         let device = device.clone();
         let me = self.clone();
-        let handle = std::thread::Builder::new()
+        let handle = match std::thread::Builder::new()
             .name(name)
-            .spawn(move || {
-                receiver_loop(pipe, sink, stop, kill, stats, geometry, me, device)
-            })
-            .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
+            .spawn(move || receiver_loop(pipe, sink, stop, kill, stats, geometry, me, device))
+        {
+            Ok(handle) => handle,
+            Err(e) => {
+                *self.geometry.lock().expect("geometry lock") = None;
+                self.pipe.cancel_pending_read();
+                if let Some(device) = self.parent.upgrade() {
+                    if let Ok(c) = device.client.lock() {
+                        disable_sirm(&c, &self.sirm);
+                    }
+                }
+                return Err(GentlError::Io(format!("spawn receiver: {e}")));
+            }
+        };
         *self.receiver.lock().expect("receiver lock") = Some(handle);
         Ok(())
     }
@@ -407,7 +421,10 @@ impl U3vDataStream {
         for h in handles {
             unsafe { gentl_core::free_handle(h as *mut core::ffi::c_void) };
         }
-        self.buffer_handles.lock().expect("buffer handles lock").clear();
+        self.buffer_handles
+            .lock()
+            .expect("buffer handles lock")
+            .clear();
     }
 
     pub fn register_event(
@@ -454,7 +471,10 @@ impl U3vDataStream {
     }
 
     pub fn remove_buffer_handle(&self, id: u64) {
-        self.buffer_handles.lock().expect("buffer handles lock").remove(&id);
+        self.buffer_handles
+            .lock()
+            .expect("buffer handles lock")
+            .remove(&id);
     }
 }
 
@@ -481,7 +501,14 @@ fn receiver_loop(
             state.abandon(&sink, kill.load(Ordering::SeqCst));
             break;
         }
-        match read_block(&*pipe, &sink, &mut state, &stop, &geometry, required_payload) {
+        match read_block(
+            &*pipe,
+            &sink,
+            &mut state,
+            &stop,
+            &geometry,
+            required_payload,
+        ) {
             BlockOutcome::Completed => {}
             BlockOutcome::Stopped => {
                 state.abandon(&sink, kill.load(Ordering::SeqCst));
@@ -538,7 +565,8 @@ fn read_block(
     // contract on Windows); the piece itself ends on a short packet, so
     // `n` stays the true size.
     let mps = u32::from(pipe.max_packet().max(1));
-    let mut leader_buf = vec![0u8; usbio::align_request(geometry.max_leader, pipe.max_packet()) as usize];
+    let mut leader_buf =
+        vec![0u8; usbio::align_request(geometry.max_leader, pipe.max_packet()) as usize];
     let n = match usbio::read_piece_capped(pipe, &mut leader_buf, mps as usize, stop, false) {
         Ok(n) => n as usize,
         Err(ReadAbort::Stop) => return BlockOutcome::Stopped,
@@ -580,9 +608,7 @@ fn read_block(
     // known, else the SIRM-declared SI Required Payload Size (§5.4.1.3) —
     // the register exists exactly for buffer sizing and lets unknown or
     // custom pixel formats stream instead of being dropped.
-    let expected = meta
-        .payload_bytes()
-        .unwrap_or(required_payload as usize);
+    let expected = meta.payload_bytes().unwrap_or(required_payload as usize);
 
     // -- Reserve the output buffer (zero-copy target) ---------------------
     let target: Option<FrameTarget> = match sink.begin_frame(expected) {
@@ -632,7 +658,13 @@ fn read_block(
             if request > scratch.len() {
                 scratch.resize(request, 0);
             }
-            let n = match usbio::read_piece_exact(pipe, &mut scratch[..request], size as usize, mps as usize, stop) {
+            let n = match usbio::read_piece_exact(
+                pipe,
+                &mut scratch[..request],
+                size as usize,
+                mps as usize,
+                stop,
+            ) {
                 Ok(n) => n as u64,
                 Err(ReadAbort::Stop) => return BlockOutcome::Stopped,
                 Err(ReadAbort::Io(_)) => {
@@ -649,7 +681,13 @@ fn read_block(
         if request > scratch.len() {
             scratch.resize(request, 0);
         }
-        let n = match usbio::read_piece_exact(pipe, &mut scratch[..request], size as usize, mps as usize, stop) {
+        let n = match usbio::read_piece_exact(
+            pipe,
+            &mut scratch[..request],
+            size as usize,
+            mps as usize,
+            stop,
+        ) {
             Ok(n) => n as u64,
             Err(ReadAbort::Stop) => return BlockOutcome::Stopped,
             Err(ReadAbort::Io(_)) => {
@@ -681,7 +719,8 @@ fn read_block(
     }
 
     // -- Trailer (single transfer, §5.2.1.4) -------------------------------
-    let mut trailer_buf = vec![0u8; usbio::align_request(geometry.max_trailer, pipe.max_packet()) as usize];
+    let mut trailer_buf =
+        vec![0u8; usbio::align_request(geometry.max_trailer, pipe.max_packet()) as usize];
     let n = match usbio::read_piece_capped(pipe, &mut trailer_buf, mps as usize, stop, true) {
         Ok(n) => n as usize,
         Err(ReadAbort::Stop) => return BlockOutcome::Stopped,

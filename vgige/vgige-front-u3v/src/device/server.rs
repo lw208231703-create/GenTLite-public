@@ -21,8 +21,12 @@ pub(crate) fn serve_loop(
         // bridge (gadget.rs) is immortal, so a disconnected channel —
         // the only case that would spin this loop — coincides with
         // teardown, where the stop flag ends us.
-        let Some(cmd) = control_out.recv(POLL) else { continue };
-        let Some(ack) = dispatch(&cmd, regs) else { continue };
+        let Some(cmd) = control_out.recv(POLL) else {
+            continue;
+        };
+        let Some(ack) = dispatch(&cmd, regs) else {
+            continue;
+        };
         if inner.control_in.send(&ack).is_err() {
             eprintln!("vgige: u3v control-IN stream closed; GenCP server stopping");
             break;
@@ -37,33 +41,44 @@ pub(crate) fn serve_loop(
 /// here as None, which the server loop drops on the floor (an empty
 /// ack Vec is avoided because zero bytes is not a representable GenCP
 /// ack anyway).
-fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
-    let bad = |req| packets::encode_ack(packets::GENCP_NOT_IMPLEMENTED, packets::READMEM_ACK, req, &[]);
+fn decode_command(cmd: &[u8]) -> Option<(packets::CommandCcd, &[u8])> {
     if cmd.len() < packets::CMD_OVERHEAD
         || u32::from_le_bytes([cmd[0], cmd[1], cmd[2], cmd[3]]) != packets::PREFIX_CONTROL
     {
         return None;
     }
-    let Some(ccd) = packets::CommandCcd::decode(&cmd[packets::PREFIX_LEN..]) else {
+    let ccd = packets::CommandCcd::decode(&cmd[packets::PREFIX_LEN..])?;
+    if cmd.len() != packets::CMD_OVERHEAD + ccd.length as usize {
         return None;
-    };
-    let scd = &cmd[packets::CMD_OVERHEAD..];
+    }
+    match ccd.command_id {
+        packets::READMEM_CMD if ccd.length as usize != packets::READMEM_SCD_LEN => return None,
+        packets::WRITEMEM_CMD if (ccd.length as usize) < packets::WRITEMEM_SCD_HEADER_LEN => {
+            return None
+        }
+        _ => {}
+    }
+    Some((ccd, &cmd[packets::CMD_OVERHEAD..]))
+}
+
+fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
+    let (ccd, scd) = decode_command(cmd)?;
     match ccd.command_id {
         packets::READMEM_CMD => {
-            let Some((addr, len)) = packets::decode_readmem_scd(scd) else {
-                return Some(bad(ccd.request_id));
-            };
+            let (addr, len) = packets::decode_readmem_scd(scd)?;
             let mut data = vec![0u8; len as usize];
             match regs.read(addr, &mut data) {
-                Ok(()) => Some(packets::encode_readmem_ack(packets::GENCP_SUCCESS, ccd.request_id, &data)),
+                Ok(()) => Some(packets::encode_readmem_ack(
+                    packets::GENCP_SUCCESS,
+                    ccd.request_id,
+                    &data,
+                )),
                 Err(status) => Some(packets::encode_readmem_ack(status, ccd.request_id, &[])),
             }
         }
         packets::WRITEMEM_CMD => {
-            let Some((addr, off)) = packets::decode_writemem_scd(scd) else {
-                return Some(bad(ccd.request_id));
-            };
-            let data = &scd[off.min(scd.len())..];
+            let (addr, off) = packets::decode_writemem_scd(scd)?;
+            let data = &scd[off..];
             match regs.write(addr, data) {
                 Ok(()) => {
                     // Written-Length field: the ABRM capability declares
@@ -74,7 +89,11 @@ fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
                         Some(data.len() as u16),
                     ))
                 }
-                Err(status) => Some(packets::encode_writemem_ack(status, ccd.request_id, Some(0))),
+                Err(status) => Some(packets::encode_writemem_ack(
+                    status,
+                    ccd.request_id,
+                    Some(0),
+                )),
             }
         }
         other => Some(packets::encode_ack(
@@ -83,5 +102,34 @@ fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
             ccd.request_id,
             &[],
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_commands_have_exact_envelopes() {
+        let read = packets::encode_readmem(7, 0x1000, 4);
+        assert!(decode_command(&read).is_some());
+        let write = packets::encode_writemem(8, 0x1000, &[1, 2, 3, 4]);
+        assert!(decode_command(&write).is_some());
+    }
+
+    #[test]
+    fn malformed_lengths_are_ignored() {
+        let mut read = packets::encode_readmem(7, 0x1000, 4);
+        read[8..10].copy_from_slice(&0u16.to_le_bytes());
+        assert!(decode_command(&read).is_none());
+
+        let mut write = packets::encode_writemem(8, 0x1000, &[1, 2, 3, 4]);
+        write.truncate(write.len() - 1);
+        assert!(decode_command(&write).is_none());
+
+        let mut short_write = packets::encode_writemem(9, 0x1000, &[]);
+        short_write[8..10].copy_from_slice(&4u16.to_le_bytes());
+        short_write.truncate(packets::CMD_OVERHEAD + 4);
+        assert!(decode_command(&short_write).is_none());
     }
 }

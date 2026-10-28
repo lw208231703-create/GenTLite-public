@@ -215,29 +215,95 @@ impl ControlChannel for GevDevice {
             return Err(GentlError::InvalidAddress);
         }
         let start = addr as u32;
-        let end = start + buf.len() as u32;
 
         let client = self.client.lock().map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-        let mut reg = start & !3;
-        while reg < end {
-            let reg_end = reg + 4;
-            let from = start.max(reg) - start;
-            let to = end.min(reg_end) - start;
-            if from == 0 && to == 4 {
-                let v = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
-                client.write_reg(reg, v)?;
-            } else {
-                let mut v = client.read_reg(reg)?.to_be_bytes();
-                v[from as usize..to as usize].copy_from_slice(&buf[from as usize..to as usize]);
-                client.write_reg(reg, u32::from_be_bytes(v))?;
-            }
-            reg = reg_end;
-        }
-        Ok(())
+        write_aligned_registers(&client, start, buf)
     }
 
     fn xml_url(&self) -> GentlResult<String> {
         let client = self.client.lock().map_err(|_| GentlError::Io("client lock poisoned".into()))?;
         client.xml_url()
+    }
+}
+
+fn write_aligned_registers(client: &GvcpClient, start: u32, buf: &[u8]) -> GentlResult<()> {
+    let end = start + buf.len() as u32;
+    let mut reg = start & !3;
+    while reg < end {
+        let reg_end = reg + 4;
+        let from = start.max(reg) - start;
+        let to = end.min(reg_end) - start;
+        if to - from == 4 {
+            let v = u32::from_be_bytes(buf[from as usize..to as usize].try_into().expect("full register"));
+            client.write_reg(reg, v)?;
+        } else {
+            let mut v = client.read_reg(reg)?.to_be_bytes();
+            v[from as usize..to as usize].copy_from_slice(&buf[from as usize..to as usize]);
+            client.write_reg(reg, u32::from_be_bytes(v))?;
+        }
+        reg = reg_end;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gentl_gvcp::wire::GEV_STATUS_ACCESS_DENIED;
+    use gentl_gvcp::{DeviceHandler, DiscoveryInfo, GvcpServer};
+
+    #[derive(Clone, Default)]
+    struct WriteOnly {
+        writes: Arc<Mutex<Vec<(u32, u32)>>>,
+    }
+
+    impl DeviceHandler for WriteOnly {
+        fn discovery_info(&self) -> DiscoveryInfo {
+            DiscoveryInfo {
+                spec_version_major: 2,
+                spec_version_minor: 2,
+                device_mode: 0,
+                mac: [0; 6],
+                ip_config_options: 0,
+                ip_config_current: 0,
+                current_ip: 0,
+                current_subnet_mask: 0,
+                default_gateway: 0,
+                manufacturer_name: String::new(),
+                model_name: String::new(),
+                device_version: String::new(),
+                manufacturer_info: String::new(),
+                serial_number: String::new(),
+                user_defined_name: String::new(),
+            }
+        }
+
+        fn read_reg(&self, _addr: u32) -> Result<u32, u16> {
+            Err(GEV_STATUS_ACCESS_DENIED)
+        }
+
+        fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
+            self.writes.lock().unwrap().push((addr, value));
+            Ok(())
+        }
+
+        fn read_mem(&self, _addr: u32, _count: u16) -> Result<Vec<u8>, u16> {
+            Err(GEV_STATUS_ACCESS_DENIED)
+        }
+    }
+
+    #[test]
+    fn consecutive_full_registers_are_written_without_readback() {
+        let handler = WriteOnly::default();
+        let server = GvcpServer::start(0, handler.clone()).unwrap();
+        let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, server.local_port().unwrap()).unwrap();
+
+        write_aligned_registers(&client, 0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+
+        assert_eq!(
+            handler.writes.lock().unwrap().as_slice(),
+            &[(0x2000, 0x0102_0304), (0x2004, 0x0506_0708)]
+        );
+        server.stop();
     }
 }

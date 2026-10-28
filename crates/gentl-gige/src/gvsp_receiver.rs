@@ -4,8 +4,8 @@
 //! notes/gvcp-wirefacts.md (spec §24–25), codec in `gentl_gvcp::gvsp`.
 //!
 //! Reassembly is zero-copy: payload bytes are written directly into the
-//! buffer reserved at the leader; core finalizes at the trailer. Blocks
-//! with in-block packet gaps are dropped (M2 has no resend; that is M3).
+//! buffer reserved at the leader; core finalizes at the trailer. Packet
+//! gaps enter the §16.7 resend window when the device supports it.
 
 use std::collections::BTreeMap;
 use std::io;
@@ -295,7 +295,8 @@ impl GvspReassembler {
                     if let Some(gap) = block.gaps.get_mut(start) {
                         gap.next_request = now + PACKET_RESEND_INTERVAL;
                     }
-                }            }
+                }
+            }
         }
         if expired {
             // §16.7.3 QoI: kept the block long enough; give up.
@@ -444,7 +445,9 @@ impl GvspReassembler {
     /// A resend-filled block became complete: run the trailer-time
     /// validation and deliver.
     fn complete(&mut self, sink: &DsCore) {
-        let Some(block) = self.block.take() else { return };
+        let Some(block) = self.block.take() else {
+            return;
+        };
         let trailer_body = block.trailer_body.clone();
         self.deliver(sink, &block, &trailer_body);
     }
@@ -465,8 +468,7 @@ impl GvspReassembler {
                 | GEV_STATUS_NOT_YET_AVAILABLE
                 | GEV_STATUS_PACKET_AND_PREV_REMOVED_FROM_MEMORY
                 | GEV_STATUS_PACKET_REMOVED_FROM_MEMORY => {
-                    let and_previous =
-                        hdr.status == GEV_STATUS_PACKET_AND_PREV_REMOVED_FROM_MEMORY;
+                    let and_previous = hdr.status == GEV_STATUS_PACKET_AND_PREV_REMOVED_FROM_MEMORY;
                     self.on_unrecoverable(sink, hdr, and_previous);
                 }
                 _ => self.stats.malformed += 1,
@@ -533,8 +535,7 @@ impl GvspReassembler {
                 }
             }
             block.highest_packet = block.highest_packet.max(hdr.packet_id);
-            let Some((base, capacity)) = block.target.as_ref().map(|t| (t.base, t.capacity))
-            else {
+            let Some((base, capacity)) = block.target.as_ref().map(|t| (t.base, t.capacity)) else {
                 // Dropping block: payloads counted, not written — but a
                 // resend still closes its gap so completion can be told
                 // apart from a vanished block.
@@ -648,7 +649,10 @@ impl GvspReassembler {
             sink.abort_frame(false);
             return;
         }
-        if sink.on_frame(block.block_id, frame_meta(&block.leader), &[]).is_some() {
+        if sink
+            .on_frame(block.block_id, frame_meta(&block.leader), &[])
+            .is_some()
+        {
             self.stats.frames_delivered += 1;
             if block.resend_touched {
                 self.stats.resend_recovered += 1;
@@ -760,8 +764,8 @@ pub fn receiver_loop(
         match socket.recv_from(&mut buf) {
             Ok((n, _src)) => reasm.on_datagram(&sink, &buf[..n]),
             Err(e)
-                if e.kind() == io::ErrorKind::TimedOut
-                    || e.kind() == io::ErrorKind::WouldBlock => {}
+                if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock => {
+            }
             Err(_) => {
                 // Transport-level failure: the socket is unusable. Abandon
                 // the in-flight frame and make the engine state reflect the
@@ -899,8 +903,7 @@ mod tests {
         assert_eq!(core.await_delivery_count(), 1);
         core.with_buffer(buf_id, |b| {
             assert_eq!(b.state, BufferState::Filled);
-            let mem =
-                unsafe { std::slice::from_raw_parts(b.base_ptr() as *const u8, PAYLOAD) };
+            let mem = unsafe { std::slice::from_raw_parts(b.base_ptr() as *const u8, PAYLOAD) };
             let expect: Vec<u8> = (0..PAYLOAD).map(|i| i as u8 ^ 0xF0).collect();
             assert_eq!(mem, &expect);
             assert_eq!(b.meta.unwrap().timestamp, 0xF0);
@@ -941,9 +944,21 @@ mod tests {
         let mut v = vec![[hdr(PACKET_FORMAT_DATA_LEADER, 0).as_slice(), &leader_body].concat()];
         let payload: Vec<u8> = (0..PAYLOAD).map(|i| i as u8 ^ pattern_seed).collect();
         for (i, chunk) in payload.chunks(CHUNK).enumerate() {
-            v.push([hdr(PACKET_FORMAT_DATA_PAYLOAD, (i + 1) as u32).as_slice(), chunk].concat());
+            v.push(
+                [
+                    hdr(PACKET_FORMAT_DATA_PAYLOAD, (i + 1) as u32).as_slice(),
+                    chunk,
+                ]
+                .concat(),
+            );
         }
-        v.push([hdr(PACKET_FORMAT_DATA_TRAILER, 0).as_slice(), &encode_image_trailer_body(H)].concat());
+        v.push(
+            [
+                hdr(PACKET_FORMAT_DATA_TRAILER, 0).as_slice(),
+                &encode_image_trailer_body(H),
+            ]
+            .concat(),
+        );
         v
     }
 
@@ -1063,8 +1078,7 @@ mod tests {
         core.with_buffer(buf_id, |b| {
             assert_eq!(b.state, BufferState::Filled);
             assert_eq!(b.filled_size, 0);
-            let mem =
-                unsafe { std::slice::from_raw_parts(b.base_ptr() as *const u8, PAYLOAD) };
+            let mem = unsafe { std::slice::from_raw_parts(b.base_ptr() as *const u8, PAYLOAD) };
             assert_eq!(mem, &payload);
         })
         .unwrap();
@@ -1195,7 +1209,10 @@ mod tests {
         });
         assert!(again.is_empty());
         // The device answers with the marked retransmission.
-        r.on_datagram(&core, &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]));
+        r.on_datagram(
+            &core,
+            &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]),
+        );
         let s = r.stats();
         assert_eq!(s.resend_packets, 1);
         assert_eq!(s.resend_recovered, 1);
@@ -1236,7 +1253,10 @@ mod tests {
         r.on_datagram(&core, &err);
         let s = r.stats();
         assert_eq!(s.resend_unavailable, 1);
-        assert_eq!(s.frames_dropped_incomplete, 1, "24 bytes expected, 20 written");
+        assert_eq!(
+            s.frames_dropped_incomplete, 1,
+            "24 bytes expected, 20 written"
+        );
         assert_eq!(s.frames_delivered, 0);
     }
 
@@ -1292,8 +1312,14 @@ mod tests {
         // The resend of packet 2 arrives twice (device memory kept the
         // whole requested range; re-requesting also re-sends). The second
         // copy is an in-block duplicate and must not double-count.
-        r.on_datagram(&core, &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]));
-        r.on_datagram(&core, &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]));
+        r.on_datagram(
+            &core,
+            &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]),
+        );
+        r.on_datagram(
+            &core,
+            &resend_payload_dgram(1, 2, &payload[CHUNK..2 * CHUNK]),
+        );
         let s = r.stats();
         assert_eq!(s.duplicate_packets, 1);
         assert_eq!(s.frames_delivered, 0, "packet 3 still missing");

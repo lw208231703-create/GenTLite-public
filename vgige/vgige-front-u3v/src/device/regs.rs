@@ -7,9 +7,9 @@
 //! exactly these addresses, so the host's GenApi traffic lands on the
 //! camera 1:1.
 //!
-//! Layout (device QoI, matches the Step-2 test fake):
-//! ABRM @0x0000 (0x400), manifest @0x1000, SBRM @0x2000, XML blob
-//! @0x3000, SIRM @0x4000 (0x48), custom window @0x2000_0000 (0x1000).
+//! Layout (device QoI): ABRM @0x0000 (0x400), manifest @0x0001_0000,
+//! SBRM @0x0001_1000, XML @0x0002_0000, SIRM @0x0003_0000 (0x48),
+//! demo acquisition @0x0004_0000, custom window @0x2000_0000 (0x1000).
 //! All multi-byte registers are little-endian (R-30cd).
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -37,7 +37,8 @@ struct Region {
 
 impl Region {
     fn contains(&self, addr: u64, len: u64) -> bool {
-        addr >= self.base && addr + len <= self.base + self.mem.lock().expect("region lock").len() as u64
+        addr >= self.base
+            && addr + len <= self.base + self.mem.lock().expect("region lock").len() as u64
     }
 }
 
@@ -118,7 +119,8 @@ impl RegisterFile {
 
     /// Current Stream Enable bit (the emitter's gate).
     pub fn stream_enabled(&self) -> bool {
-        *self.sirm_control.lock().expect("sirm control lock") & packets::sirm::CONTROL_STREAM_ENABLE != 0
+        *self.sirm_control.lock().expect("sirm control lock") & packets::sirm::CONTROL_STREAM_ENABLE
+            != 0
     }
 
     /// The host-programmed transfer geometry (§5.2.1.3): transfer size,
@@ -172,7 +174,8 @@ impl RegisterFile {
             buf.copy_from_slice(&m[off..off + buf.len()]);
             return Ok(());
         }
-        self.back_read(addr, len).map(|data| buf.copy_from_slice(&data))
+        self.back_read(addr, len)
+            .map(|data| buf.copy_from_slice(&data))
     }
 
     /// One register/block write; Err is a GenCP status code.
@@ -272,7 +275,10 @@ fn put_str(out: &mut Vec<u8>, s: &str, len: usize) {
 
 /// Build the device-local regions (ABRM/manifest/SBRM/XML/SIRM).
 fn build_regions(config: &DeviceConfig) -> Vec<Region> {
-    assert!(config.xml.len() <= XML_MAX, "XML blob exceeds the device cap");
+    assert!(
+        config.xml.len() <= XML_MAX,
+        "XML blob exceeds the device cap"
+    );
     // ABRM (GenCP §5.4 / U3V Table 4-6) at the spec offsets, including
     // the capability-gated slots as zeros (FAMILY_NAME / MANUFACTURER_INFO
     // / USER_DEFINED_NAME bits are unset in Device Capability). Strings
@@ -342,41 +348,93 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     // Regions MUST be listed in ascending base order: the lookup takes
     // the last region with base <= addr.
     vec![
-        Region { base: crate::ABRM_BASE, mem: Mutex::new(abrm), writable: false },
-        Region { base: MANIFEST_BASE, mem: Mutex::new(manifest), writable: false },
-        Region { base: SBRM_BASE, mem: Mutex::new(sbrm), writable: false },
-        Region { base: XML_BASE, mem: Mutex::new(config.xml.clone()), writable: false },
-        Region { base: SIRM_BASE, mem: Mutex::new(sirm), writable: true },
-        Region { base: ACQ_BASE, mem: Mutex::new(acq), writable: true },
+        Region {
+            base: crate::ABRM_BASE,
+            mem: Mutex::new(abrm),
+            writable: false,
+        },
+        Region {
+            base: MANIFEST_BASE,
+            mem: Mutex::new(manifest),
+            writable: false,
+        },
+        Region {
+            base: SBRM_BASE,
+            mem: Mutex::new(sbrm),
+            writable: false,
+        },
+        Region {
+            base: XML_BASE,
+            mem: Mutex::new(config.xml.clone()),
+            writable: false,
+        },
+        Region {
+            base: SIRM_BASE,
+            mem: Mutex::new(sirm),
+            writable: true,
+        },
+        Region {
+            base: ACQ_BASE,
+            mem: Mutex::new(acq),
+            writable: true,
+        },
     ]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vgige_core::BackIdentity;
     use crate::synthesize_guid;
+    use vgige_core::BackIdentity;
 
     struct NullBack;
     impl vgige_core::CameraBack for NullBack {
-        fn read_reg(&mut self, _a: u32) -> Result<u32, u16> { Ok(0) }
-        fn write_reg(&mut self, _a: u32, _v: u32) -> Result<(), u16> { Ok(()) }
-        fn read_block(&mut self, _a: u32, len: u32) -> Result<Vec<u8>, u16> { Ok(vec![0; len as usize]) }
-        fn write_block(&mut self, _a: u32, _d: &[u8]) -> Result<(), u16> { Ok(()) }
-        fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> { Ok(vec![]) }
+        fn read_reg(&mut self, _a: u32) -> Result<u32, u16> {
+            Ok(0)
+        }
+        fn write_reg(&mut self, _a: u32, _v: u32) -> Result<(), u16> {
+            Ok(())
+        }
+        fn read_block(&mut self, _a: u32, len: u32) -> Result<Vec<u8>, u16> {
+            Ok(vec![0; len as usize])
+        }
+        fn write_block(&mut self, _a: u32, _d: &[u8]) -> Result<(), u16> {
+            Ok(())
+        }
+        fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> {
+            Ok(vec![])
+        }
         fn fetch_identity(&mut self) -> Result<BackIdentity, u16> {
-            Ok(BackIdentity { manufacturer: "m".into(), model: "m".into(), device_version: "1".into(), serial_number: "s".into(), user_defined_name: String::new(), spec_version_major: 1, spec_version_minor: 2 })
+            Ok(BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            })
         }
         fn open_stream(&mut self) -> Result<Box<dyn vgige_core::FrameSource>, u16> {
             Err(0x8001)
         }
-        fn close_stream(&mut self) -> Result<(), u16> { Ok(()) }
+        fn close_stream(&mut self) -> Result<(), u16> {
+            Ok(())
+        }
     }
 
     #[test]
     fn abrm_walk_reads() {
         let cfg = DeviceConfig::from_parts(
-            BackIdentity { manufacturer: "m".into(), model: "m".into(), device_version: "1".into(), serial_number: "s".into(), user_defined_name: String::new(), spec_version_major: 1, spec_version_minor: 2 },
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
             b"<x/>",
             3072,
             synthesize_guid("s"),
@@ -384,16 +442,33 @@ mod tests {
         let rf = RegisterFile::new(cfg, std::sync::Arc::new(std::sync::Mutex::new(NullBack)));
         let mut b = [0u8; 8];
         for (addr, len) in [
-            (0x0000u64, 4usize), (0x01C4, 8), (0x0004, 64), (0x0044, 64),
-            (0x00C4, 64), (0x0144, 64), (0x01CC, 4), (0x01D0, 8), (0x01D8, 8),
+            (0x0000u64, 4usize),
+            (0x01C4, 8),
+            (0x0004, 64),
+            (0x0044, 64),
+            (0x00C4, 64),
+            (0x0144, 64),
+            (0x01CC, 4),
+            (0x01D0, 8),
+            (0x01D8, 8),
         ] {
             let mut buf = vec![0u8; len];
-            rf.read(addr, &mut buf).unwrap_or_else(|s| panic!("ABRM read 0x{addr:04X}/{len} -> 0x{s:04X}"));
+            rf.read(addr, &mut buf)
+                .unwrap_or_else(|s| panic!("ABRM read 0x{addr:04X}/{len} -> 0x{s:04X}"));
         }
         // SBRM region reads.
-        for (off, len) in [(0u64, 4usize), (0x04, 8), (0x14, 4), (0x18, 4), (0x1C, 4), (0x20, 8), (0x28, 4)] {
+        for (off, len) in [
+            (0u64, 4usize),
+            (0x04, 8),
+            (0x14, 4),
+            (0x18, 4),
+            (0x1C, 4),
+            (0x20, 8),
+            (0x28, 4),
+        ] {
             let mut buf = vec![0u8; len];
-            rf.read(crate::SBRM_BASE + off, &mut buf).unwrap_or_else(|s| panic!("SBRM read +0x{off:02X}/{len} -> 0x{s:04X}"));
+            rf.read(crate::SBRM_BASE + off, &mut buf)
+                .unwrap_or_else(|s| panic!("SBRM read +0x{off:02X}/{len} -> 0x{s:04X}"));
         }
         let _ = &mut b;
     }
