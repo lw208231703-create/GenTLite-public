@@ -16,17 +16,17 @@ use std::time::{Duration, Instant};
 
 use gentl_core::{GentlError, GentlResult};
 
-#[cfg(windows)]
-mod winusb;
 #[cfg(not(windows))]
 pub(crate) mod libusb;
+#[cfg(windows)]
+mod winusb;
 
+#[cfg(not(windows))]
+pub use libusb::InterfaceSet;
 #[cfg(windows)]
 pub use winusb::last_error_text;
 #[cfg(windows)]
 pub use winusb::InterfaceSet;
-#[cfg(not(windows))]
-pub use libusb::InterfaceSet;
 
 /// Pipe poll cadence for the receiver stop flags.
 /// Stream receiver poll cadence: one read_bulk may block this long before
@@ -312,7 +312,10 @@ mod tests {
         let pipe = mock::pipe(&[1024], 1024);
         let mut buf = vec![0u8; 1024];
         let r = read_piece_exact(&*pipe, &mut buf, 1000, 1024, &stop);
-        assert!(matches!(r, Err(ReadAbort::Io(_))), "piece exceeded planned size");
+        assert!(
+            matches!(r, Err(ReadAbort::Io(_))),
+            "piece exceeded planned size"
+        );
     }
 
     #[test]
@@ -322,7 +325,10 @@ mod tests {
         let pipe = mock::pipe(&[1024], 1024);
         let mut buf = vec![0u8; 1024];
         let r = read_piece_exact(&*pipe, &mut buf, 2048, 1024, &stop);
-        assert!(matches!(r, Err(ReadAbort::Io(_))), "piece ended before planned size");
+        assert!(
+            matches!(r, Err(ReadAbort::Io(_))),
+            "piece ended before planned size"
+        );
     }
 
     /// Leader/trailer: a short transaction (sub-MPS) or ZLP ends the

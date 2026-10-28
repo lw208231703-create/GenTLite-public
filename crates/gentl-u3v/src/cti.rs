@@ -117,9 +117,7 @@ macro_rules! impl_module {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
-            fn as_any_arc(
-                self: Arc<Self>,
-            ) -> Arc<dyn std::any::Any + Send + Sync> {
+            fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
                 self
             }
         }

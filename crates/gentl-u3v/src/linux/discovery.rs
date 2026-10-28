@@ -11,14 +11,14 @@
 use std::sync::Arc;
 
 use gentl_core::{GentlError, GentlResult};
-use rusb::{Device, DeviceHandle, GlobalContext};
+use rusb::{Device, UsbContext as _};
 
 use crate::descriptors::{
     device_info_descriptor, DESC_CONFIGURATION, DESC_INTERFACE, USB_CLASS_MISC,
     USB_DEVICE_SUBCLASS_U3V, USB_INTERFACE_SUBCLASS_U3V,
 };
 use crate::types::{DeviceIdentity, Enumeration, FoundDevice, RootHubInfo};
-use crate::usbio::libusb::LibUsbDevice;
+use crate::usbio::libusb::{usb_context, LibUsbDevice, UsbHandle};
 
 /// One GenTL Interface per USB bus that currently has devices on it.
 ///
@@ -28,7 +28,13 @@ use crate::usbio::libusb::LibUsbDevice;
 /// "one interface per root hub" model. Interface IDs stay in the
 /// `USB\ROOT_HUB30\...` family so consumers see the same shape.
 pub fn list_root_hubs() -> Vec<RootHubInfo> {
-    let mut buses: Vec<u8> = match rusb::devices() {
+    let Some(context) = usb_context() else {
+        // No libusb context: no USB stack on this host (container, CI
+        // runner, WSL without usbipd). An empty list is the honest answer
+        // and keeps every caller on the "no devices" path.
+        return Vec::new();
+    };
+    let mut buses: Vec<u8> = match context.devices() {
         Ok(list) => list.iter().map(|d| d.bus_number()).collect(),
         Err(_) => return Vec::new(),
     };
@@ -51,7 +57,10 @@ fn root_hub_id(bus: u8) -> String {
 /// counted in `skipped`; enumeration itself never fails.
 pub fn enumerate_devices() -> Enumeration {
     let mut out = Enumeration::default();
-    let Ok(list) = rusb::devices() else {
+    let Some(context) = usb_context() else {
+        return out;
+    };
+    let Ok(list) = context.devices() else {
         return out;
     };
     for dev in list.iter() {
@@ -117,7 +126,7 @@ fn fallback_id(vid: u16, pid: u16, instance_id: &str) -> String {
 ///
 /// Unlike the Windows registry path (Q12), no open is needed for
 /// matching: libusb reads the configuration descriptor directly.
-fn is_u3v_candidate(dev: &Device<GlobalContext>, dd: &rusb::DeviceDescriptor) -> bool {
+fn is_u3v_candidate(dev: &Device<rusb::Context>, dd: &rusb::DeviceDescriptor) -> bool {
     if dd.class_code() == USB_CLASS_MISC && dd.sub_class_code() == USB_DEVICE_SUBCLASS_U3V {
         return true;
     }
@@ -128,7 +137,8 @@ fn is_u3v_candidate(dev: &Device<GlobalContext>, dd: &rusb::DeviceDescriptor) ->
         .map(|cfg| {
             cfg.interfaces().any(|i| {
                 i.descriptors().next().is_some_and(|d| {
-                    d.class_code() == USB_CLASS_MISC && d.sub_class_code() == USB_INTERFACE_SUBCLASS_U3V
+                    d.class_code() == USB_CLASS_MISC
+                        && d.sub_class_code() == USB_INTERFACE_SUBCLASS_U3V
                 })
             })
         })
@@ -146,7 +156,7 @@ impl OpenedDevice {
         self.inner
     }
 
-    fn handle(&self) -> &DeviceHandle<GlobalContext> {
+    fn handle(&self) -> &UsbHandle {
         self.inner.handle()
     }
 }
@@ -162,8 +172,11 @@ pub fn open_device_all(instance_id: &str) -> Vec<OpenedDevice> {
 /// Open the device identified by the `<bus>:<address>` instance ID.
 pub fn open_device(instance_id: &str) -> GentlResult<OpenedDevice> {
     let (bus, addr) = parse_bus_addr(instance_id).ok_or(GentlError::InvalidId)?;
-    let list =
-        rusb::devices().map_err(|e| GentlError::Io(format!("libusb device list: {e}")))?;
+    let context = usb_context()
+        .ok_or_else(|| GentlError::Io("libusb context unavailable on this host".to_string()))?;
+    let list = context
+        .devices()
+        .map_err(|e| GentlError::Io(format!("libusb device list: {e}")))?;
     let dev = list
         .iter()
         .find(|d| d.bus_number() == bus && d.address() == addr)
@@ -255,7 +268,7 @@ fn config_blob(cfg: &rusb::ConfigDescriptor) -> Vec<u8> {
 }
 
 /// Read USB string descriptor `index` (ASCII view, first language).
-fn string_descriptor(h: &DeviceHandle<GlobalContext>, index: u8) -> Option<String> {
+fn string_descriptor(h: &UsbHandle, index: u8) -> Option<String> {
     if index == 0 {
         return None;
     }

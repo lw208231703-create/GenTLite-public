@@ -156,9 +156,11 @@ mod tests {
         b.extend_from_slice(&[
             8,
             DESC_INTERFACE_ASSOCIATION,
-            0,    // bFirstInterface
-            3,    // bInterfaceCount
-            0xEF, 0x05, 0x00, // function codes
+            0, // bFirstInterface
+            3, // bInterfaceCount
+            0xEF,
+            0x05,
+            0x00, // function codes
             0,    // iFunction
         ]);
         b.extend_from_slice(&[9, DESC_INTERFACE, 0, 0, 1, 0xEF, 0x05, 0x00, 0]);
@@ -166,9 +168,22 @@ mod tests {
             20,
             DESC_CS_INTERFACE,
             0x01, // U3V_DEVICEINFO
-            0x02, 0x00, 0x03, 0x00, // GenCP version 3.2 (minor, major)
-            0x02, 0x00, 0x01, 0x00, // U3V version 1.2
-            5, 1, 2, 3, 4, 6, 7, 8, // string indexes
+            0x02,
+            0x00,
+            0x03,
+            0x00, // GenCP version 3.2 (minor, major)
+            0x02,
+            0x00,
+            0x01,
+            0x00, // U3V version 1.2
+            5,
+            1,
+            2,
+            3,
+            4,
+            6,
+            7,
+            8,    // string indexes
             0x08, // bmSpeedSupport: SuperSpeed
         ]);
         b.extend_from_slice(&[9, DESC_INTERFACE, 1, 0, 1, 0xEF, 0x05, 0x01, 0]);

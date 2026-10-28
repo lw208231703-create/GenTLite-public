@@ -86,10 +86,11 @@ impl GenCpClient {
     /// transfer (prefix + CCD + SCD). A non-success device status is mapped
     /// through `status_error` (GenTL producer semantics).
     pub fn transaction(&self, command: &[u8], expect_ack: u16) -> GentlResult<Vec<u8>> {
-        self.transaction_raw(command, expect_ack).map_err(|e| match e {
-            GentlError::GevStatus(s) => status_error(s),
-            other => other,
-        })
+        self.transaction_raw(command, expect_ack)
+            .map_err(|e| match e {
+                GentlError::GevStatus(s) => status_error(s),
+                other => other,
+            })
     }
 
     /// Like [`transaction`](Self::transaction), but a non-success device
@@ -130,32 +131,35 @@ impl GenCpClient {
                 .read_bulk(&mut buf, self.mdrt + Duration::from_millis(500))?;
             let transfer = &buf[..n as usize];
 
-            let ccd: AckCcd = match packets::decode_ack(PREFIX_CONTROL, transfer, expect_ack, request_id) {
-                Ok(c) => c,
-                Err(AckError::UnexpectedCommand { got, .. }) if got == PENDING_ACK => {
-                    pending_rounds += 1;
-                    if pending_rounds > 8 || self.mdrt.saturating_mul(pending_rounds + 2) > MAX_CMD_TIMEOUT {
-                        return Err(GentlError::Timeout);
+            let ccd: AckCcd =
+                match packets::decode_ack(PREFIX_CONTROL, transfer, expect_ack, request_id) {
+                    Ok(c) => c,
+                    Err(AckError::UnexpectedCommand { got, .. }) if got == PENDING_ACK => {
+                        pending_rounds += 1;
+                        if pending_rounds > 8
+                            || self.mdrt.saturating_mul(pending_rounds + 2) > MAX_CMD_TIMEOUT
+                        {
+                            return Err(GentlError::Timeout);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(AckError::RequestIdMismatch { .. }) => {
-                    return Err(GentlError::Io(
-                        "acknowledge request_id mismatch (device out of sync)".into(),
-                    ));
-                }
-                Err(AckError::UnexpectedCommand { expected, got }) => {
-                    return Err(GentlError::Io(format!(
+                    Err(AckError::RequestIdMismatch { .. }) => {
+                        return Err(GentlError::Io(
+                            "acknowledge request_id mismatch (device out of sync)".into(),
+                        ));
+                    }
+                    Err(AckError::UnexpectedCommand { expected, got }) => {
+                        return Err(GentlError::Io(format!(
                         "unexpected acknowledge command 0x{got:04X} (expected 0x{expected:04X})"
                     )));
-                }
-                Err(AckError::TooShort) => {
-                    return Err(GentlError::Io("short acknowledge transfer".into()));
-                }
-                Err(AckError::BadPrefix) => {
-                    return Err(GentlError::Io("bad acknowledge prefix".into()));
-                }
-            };
+                    }
+                    Err(AckError::TooShort) => {
+                        return Err(GentlError::Io("short acknowledge transfer".into()));
+                    }
+                    Err(AckError::BadPrefix) => {
+                        return Err(GentlError::Io("bad acknowledge prefix".into()));
+                    }
+                };
 
             if ccd.status != GENCP_SUCCESS {
                 return Err(GentlError::GevStatus(ccd.status));
@@ -394,12 +398,13 @@ pub fn read_bootstrap(client: &mut GenCpClient) -> GentlResult<Bootstrap> {
     let max_command_transfer = client.read_reg(sbrm + sbrm::MAX_COMMAND_TRANSFER_LENGTH)?;
     let max_ack_transfer = client.read_reg(sbrm + sbrm::MAX_ACK_TRANSFER_LENGTH)?;
     let number_of_stream_channels = client.read_reg(sbrm + sbrm::NUMBER_OF_STREAM_CHANNELS)?;
-    let sirm_address = (capability & sbrm::CAP_SIRM != 0 && number_of_stream_channels > 0).then(|| {
-        let mut b = [0u8; 8];
-        client
-            .read_mem(sbrm + sbrm::SIRM_ADDRESS, &mut b)
-            .map(|_| u64::from_le_bytes(b))
-    });
+    let sirm_address =
+        (capability & sbrm::CAP_SIRM != 0 && number_of_stream_channels > 0).then(|| {
+            let mut b = [0u8; 8];
+            client
+                .read_mem(sbrm + sbrm::SIRM_ADDRESS, &mut b)
+                .map(|_| u64::from_le_bytes(b))
+        });
     let sirm_address = match sirm_address {
         Some(Ok(a)) => Some(a),
         Some(Err(e)) => return Err(e),

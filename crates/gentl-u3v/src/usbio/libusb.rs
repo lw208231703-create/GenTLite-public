@@ -5,11 +5,11 @@
 //! completion contract RAW_IO documents on Windows, so the receiver loop
 //! runs unchanged.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
-use rusb::{ConfigDescriptor, DeviceHandle, GlobalContext, TransferType};
+use rusb::{ConfigDescriptor, DeviceHandle, TransferType};
 
 use crate::descriptors::{
     USB_CLASS_MISC, USB_INTERFACE_SUBCLASS_U3V, USB_PROTOCOL_CONTROL, USB_PROTOCOL_EVENT,
@@ -18,24 +18,42 @@ use crate::descriptors::{
 use crate::discovery::OpenedDevice;
 use crate::usbio::UsbPipe;
 
+/// The libusb context every handle in this module belongs to.
+///
+/// Deliberately `rusb::Context`, never `rusb::GlobalContext`: the global
+/// context runs `libusb_init` inside `Once::call_once` and reports failure
+/// with `panic!("Can't init Global usb context, …")` (rusb 0.9.4
+/// `context.rs:263-272`). A host without usbfs — container, GitHub's Linux
+/// runner, WSL without usbipd — triggers exactly that, and a panic crossing
+/// an `extern "C"` entry point aborts the process ("thread caused
+/// non-unwinding panic. aborting.", SIGABRT). `Context::new` returns `Err`
+/// for the same condition, so discovery reports "no devices" instead.
+pub(crate) fn usb_context() -> Option<&'static rusb::Context> {
+    static CONTEXT: OnceLock<Option<rusb::Context>> = OnceLock::new();
+    CONTEXT.get_or_init(|| rusb::Context::new().ok()).as_ref()
+}
+
+/// Device handle bound to [`usb_context`]'s context.
+pub(crate) type UsbHandle = DeviceHandle<rusb::Context>;
+
 /// Shared device-handle owner: keeps the libusb handle alive for every
 /// pipe, and releases the claimed interfaces (reverse order) on drop.
 /// `auto_detach_kernel_driver` was enabled at open, so releasing also
 /// re-attaches whatever kernel driver owned an interface.
 pub(crate) struct LibUsbDevice {
-    handle: DeviceHandle<GlobalContext>,
+    handle: UsbHandle,
     claimed: Mutex<Vec<u8>>,
 }
 
 impl LibUsbDevice {
-    pub(crate) fn new(handle: DeviceHandle<GlobalContext>) -> Self {
+    pub(crate) fn new(handle: UsbHandle) -> Self {
         Self {
             handle,
             claimed: Mutex::new(Vec::new()),
         }
     }
 
-    pub(crate) fn handle(&self) -> &DeviceHandle<GlobalContext> {
+    pub(crate) fn handle(&self) -> &UsbHandle {
         &self.handle
     }
 
@@ -81,9 +99,10 @@ impl InterfaceSet {
         // libusb: one handle owns all interfaces; extra entries would be
         // duplicate opens of the same device (Windows opens one handle
         // per MI interface instead).
-        let opened = owners.into_iter().next().ok_or_else(|| {
-            GentlError::Io("device has no openable interface".into())
-        })?;
+        let opened = owners
+            .into_iter()
+            .next()
+            .ok_or_else(|| GentlError::Io("device has no openable interface".into()))?;
         let device = opened.into_libusb();
         let cfg = active_config(&device)?;
         let mut set = Self {
@@ -97,7 +116,9 @@ impl InterfaceSet {
             let Some(desc) = iface.descriptors().next() else {
                 continue; // no alt-0 descriptor: cannot happen on real devices
             };
-            if desc.class_code() != USB_CLASS_MISC || desc.sub_class_code() != USB_INTERFACE_SUBCLASS_U3V {
+            if desc.class_code() != USB_CLASS_MISC
+                || desc.sub_class_code() != USB_INTERFACE_SUBCLASS_U3V
+            {
                 continue;
             }
             set.device.claim(desc.interface_number())?;
@@ -157,11 +178,7 @@ struct LibUsbPipe {
 
 impl UsbPipe for LibUsbPipe {
     fn read_bulk(&self, buf: &mut [u8], timeout: Duration) -> GentlResult<u32> {
-        match self
-            .device
-            .handle
-            .read_bulk(self.endpoint, buf, timeout)
-        {
+        match self.device.handle.read_bulk(self.endpoint, buf, timeout) {
             Ok(n) => Ok(n as u32),
             Err(rusb::Error::Timeout) => Err(GentlError::Timeout),
             Err(e) => Err(GentlError::Io(format!(
@@ -172,11 +189,7 @@ impl UsbPipe for LibUsbPipe {
     }
 
     fn write_bulk(&self, buf: &[u8], timeout: Duration) -> GentlResult<()> {
-        match self
-            .device
-            .handle
-            .write_bulk(self.endpoint, buf, timeout)
-        {
+        match self.device.handle.write_bulk(self.endpoint, buf, timeout) {
             Ok(n) if n == buf.len() => Ok(()),
             Ok(n) => Err(GentlError::Io(format!(
                 "libusb bulk OUT 0x{:02x} short: {n}/{}",

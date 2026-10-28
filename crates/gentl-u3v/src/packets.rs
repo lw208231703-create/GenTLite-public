@@ -245,7 +245,12 @@ pub enum AckError {
 
 /// Validate the envelope of an acknowledge transfer and return its CCD.
 /// `prefix` selects the control or event channel magic.
-pub fn decode_ack(prefix: u32, buf: &[u8], expect_command: u16, expect_request_id: u16) -> Result<AckCcd, AckError> {
+pub fn decode_ack(
+    prefix: u32,
+    buf: &[u8],
+    expect_command: u16,
+    expect_request_id: u16,
+) -> Result<AckCcd, AckError> {
     if buf.len() < CMD_OVERHEAD {
         return Err(AckError::TooShort);
     }
@@ -271,7 +276,11 @@ pub fn decode_ack(prefix: u32, buf: &[u8], expect_command: u16, expect_request_i
 
 /// Encode a READMEM command transfer. `len` is the byte count (u16 field,
 /// GenCP §4.4.1). Returns the full 24-byte transfer.
-pub fn encode_readmem(request_id: u16, addr: u64, len: u16) -> [u8; CMD_OVERHEAD + READMEM_SCD_LEN] {
+pub fn encode_readmem(
+    request_id: u16,
+    addr: u64,
+    len: u16,
+) -> [u8; CMD_OVERHEAD + READMEM_SCD_LEN] {
     let mut out = [0u8; CMD_OVERHEAD + READMEM_SCD_LEN];
     out[0..4].copy_from_slice(&PREFIX_CONTROL.to_le_bytes());
     CommandCcd {
@@ -713,8 +722,14 @@ mod tests {
         );
         let mut bad = t.clone();
         bad[0] = b'X';
-        assert_eq!(decode_ack(PREFIX_CONTROL, &bad, READMEM_ACK, 42), Err(AckError::BadPrefix));
-        assert_eq!(decode_ack(PREFIX_CONTROL, &t[..7], READMEM_ACK, 42), Err(AckError::TooShort));
+        assert_eq!(
+            decode_ack(PREFIX_CONTROL, &bad, READMEM_ACK, 42),
+            Err(AckError::BadPrefix)
+        );
+        assert_eq!(
+            decode_ack(PREFIX_CONTROL, &t[..7], READMEM_ACK, 42),
+            Err(AckError::TooShort)
+        );
     }
 
     #[test]
@@ -722,8 +737,14 @@ mod tests {
         assert_eq!(status_name(GENCP_SUCCESS), "GENCP_SUCCESS");
         assert_eq!(status_name(GENCP_INVALID_ADDRESS), "GENCP_INVALID_ADDRESS");
         assert_eq!(status_name(GENCP_ERROR), "GENCP_ERROR");
-        assert_eq!(status_name(U3V_STATUS_RESEND_NOT_SUPPORTED), "U3V_STATUS_RESEND_NOT_SUPPORTED");
-        assert_eq!(status_name(U3V_STATUS_DATA_OVERRUN), "U3V_STATUS_DATA_OVERRUN");
+        assert_eq!(
+            status_name(U3V_STATUS_RESEND_NOT_SUPPORTED),
+            "U3V_STATUS_RESEND_NOT_SUPPORTED"
+        );
+        assert_eq!(
+            status_name(U3V_STATUS_DATA_OVERRUN),
+            "U3V_STATUS_DATA_OVERRUN"
+        );
         assert_eq!(status_name(0x1234), "status 0x1234");
     }
 
@@ -862,7 +883,10 @@ mod tests {
         let wack = encode_writemem_ack(GENCP_SUCCESS, 9, Some(0x1234));
         let parsed = decode_ack(PREFIX_CONTROL, &wack, WRITEMEM_ACK, 9).expect("wack");
         assert_eq!(parsed.status, GENCP_SUCCESS);
-        assert_eq!(u16::from_le_bytes([wack[CMD_OVERHEAD + 2], wack[CMD_OVERHEAD + 3]]), 0x1234);
+        assert_eq!(
+            u16::from_le_bytes([wack[CMD_OVERHEAD + 2], wack[CMD_OVERHEAD + 3]]),
+            0x1234
+        );
     }
 
     /// Leader/trailer encoders (transmitter) round-trip through the host
@@ -884,8 +908,13 @@ mod tests {
         let l = decode_image_leader(&encode_image_leader(&leader)).expect("leader");
         assert_eq!(l, leader);
 
-        let t = decode_image_trailer(&encode_image_trailer(99, U3V_STATUS_DATA_OVERRUN, 307_200, 470))
-            .expect("trailer");
+        let t = decode_image_trailer(&encode_image_trailer(
+            99,
+            U3V_STATUS_DATA_OVERRUN,
+            307_200,
+            470,
+        ))
+        .expect("trailer");
         assert_eq!(t.block_id, 99);
         assert_eq!(t.status, U3V_STATUS_DATA_OVERRUN);
         assert_eq!(t.valid_payload_size, 307_200);

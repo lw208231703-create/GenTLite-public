@@ -17,21 +17,25 @@ use std::os::windows::ffi::OsStrExt;
 
 use gentl_core::{GentlError, GentlResult};
 use windows_sys::Win32::Devices::DeviceAndDriverInstallation::{
-    CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW, CR_SUCCESS,
-    SetupDiDestroyDeviceInfoList, SetupDiEnumDeviceInfo, SetupDiEnumDeviceInterfaces,
-    SetupDiGetClassDevsW, SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceInterfaceDetailW,
-    SetupDiGetDevicePropertyW, SetupDiGetDeviceRegistryPropertyW,
-    HDEVINFO, SP_DEVICE_INTERFACE_DATA, SP_DEVINFO_DATA, SPDRP_COMPATIBLEIDS, SPDRP_HARDWAREID,
-    DIGCF_ALLCLASSES, DIGCF_DEVICEINTERFACE, DIGCF_PRESENT,
+    CM_Get_Device_IDW, CM_Get_Parent, CM_Locate_DevNodeW, SetupDiDestroyDeviceInfoList,
+    SetupDiEnumDeviceInfo, SetupDiEnumDeviceInterfaces, SetupDiGetClassDevsW,
+    SetupDiGetDeviceInstanceIdW, SetupDiGetDeviceInterfaceDetailW, SetupDiGetDevicePropertyW,
+    SetupDiGetDeviceRegistryPropertyW, CR_SUCCESS, DIGCF_ALLCLASSES, DIGCF_DEVICEINTERFACE,
+    DIGCF_PRESENT, HDEVINFO, SPDRP_COMPATIBLEIDS, SPDRP_HARDWAREID, SP_DEVICE_INTERFACE_DATA,
+    SP_DEVINFO_DATA,
 };
-use windows_sys::Win32::Devices::Properties::{DEVPROPKEY, DEVPKEY_Device_BusReportedDeviceDesc, DEVPROPTYPE};
-use windows_sys::Win32::System::Registry::{
-    HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_READ, RegCloseKey, RegEnumKeyExW, RegOpenKeyExW,
+use windows_sys::Win32::Devices::Properties::{
+    DEVPKEY_Device_BusReportedDeviceDesc, DEVPROPKEY, DEVPROPTYPE,
 };
 use windows_sys::Win32::Devices::Usb::{
     WinUsb_Free, WinUsb_GetDescriptor, WinUsb_Initialize, WINUSB_INTERFACE_HANDLE,
 };
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY_LOCAL_MACHINE, KEY_ENUMERATE_SUB_KEYS, KEY_READ,
+};
 
 /// SetupAPI "no device set" value (HDEVINFO is an isize in windows-sys).
 const INVALID_HDEVINFO: HDEVINFO = -1isize;
@@ -59,7 +63,11 @@ fn class_compat_prefix() -> String {
 const ROOT_HUB_PREFIX: &str = "USB\\ROOT_HUB";
 
 fn wide(s: &str) -> Vec<u16> {
-    OsString::from(s).as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    OsString::from(s)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 fn wide_to_string(p: &[u16]) -> String {
@@ -135,7 +143,7 @@ fn bus_reported_desc(info: HDEVINFO, data: &SP_DEVINFO_DATA) -> Option<String> {
             0,
         )
     };
-    (ok != 0 && prop_type == 1 /* DEVPROP_TYPE_STRING */).then(|| wide_to_string(&buf))
+    (ok != 0 && prop_type == 1/* DEVPROP_TYPE_STRING */).then(|| wide_to_string(&buf))
 }
 
 /// Enumerate all present USB root hubs.
@@ -293,7 +301,10 @@ pub fn enumerate_devices() -> Enumeration {
                 out.skipped += 1;
                 continue;
             };
-            if instance_id.to_ascii_uppercase().starts_with(ROOT_HUB_PREFIX) {
+            if instance_id
+                .to_ascii_uppercase()
+                .starts_with(ROOT_HUB_PREFIX)
+            {
                 continue;
             }
             let compat = dev_reg_string(info, &data, SPDRP_COMPATIBLEIDS).unwrap_or_default();
@@ -311,7 +322,8 @@ pub fn enumerate_devices() -> Enumeration {
             let parent = parent.to_ascii_uppercase();
             all.iter().any(|(child_id, child_compat)| {
                 child_id.contains("&MI_")
-                    && direct_parent(child_id).map(|p| p.to_ascii_uppercase()) == Some(parent.clone())
+                    && direct_parent(child_id).map(|p| p.to_ascii_uppercase())
+                        == Some(parent.clone())
                     && child_compat.contains("CLASS_EF&SUBCLASS_05")
             })
         };
@@ -336,7 +348,10 @@ pub fn enumerate_devices() -> Enumeration {
             match read_identity(&instance_id) {
                 Ok(identity) => {
                     let id = identity.guid.clone().unwrap_or_else(|| {
-                        format!("{vid:04X}:{pid:04X}:{}", instance_serial(&instance_id).unwrap_or_default())
+                        format!(
+                            "{vid:04X}:{pid:04X}:{}",
+                            instance_serial(&instance_id).unwrap_or_default()
+                        )
                     });
                     out.devices.push(FoundDevice {
                         id,
@@ -391,9 +406,6 @@ fn direct_parent(instance_id: &str) -> Option<String> {
         Some(wide_to_string(&buf))
     }
 }
-
-
-
 
 /// Open the device and read the Class-Specific Device Info Descriptor
 /// plus its strings. Fails when the device cannot be opened or does not
@@ -482,7 +494,10 @@ fn open_path(path: &str) -> GentlResult<OpenedDevice> {
         )
     };
     if file == INVALID_HANDLE_VALUE {
-        return Err(GentlError::Io(format!("open {path}: {}", usbio::last_error_text())));
+        return Err(GentlError::Io(format!(
+            "open {path}: {}",
+            usbio::last_error_text()
+        )));
     }
     let mut winusb: WINUSB_INTERFACE_HANDLE = std::ptr::null_mut();
     let ok = unsafe { WinUsb_Initialize(file, &mut winusb) };
@@ -507,9 +522,7 @@ fn open_path(path: &str) -> GentlResult<OpenedDevice> {
 const GUID_DEVINTERFACE_WINUSB: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0xf72fe0d4_cbcb_407d_8814_9ed673d0dd6b);
 
-const GUID_DEVINTERFACE_WINUSB_REF: *const windows_sys::core::GUID =
-    &GUID_DEVINTERFACE_WINUSB;
-
+const GUID_DEVINTERFACE_WINUSB_REF: *const windows_sys::core::GUID = &GUID_DEVINTERFACE_WINUSB;
 
 /// GUID_DEVINTERFACE_USB_DEVICE ({A5DCBF10-6530-11D2-901F-00C04FB951ED}).
 const GUID_DEVINTERFACE_USB_DEVICE: windows_sys::core::GUID =
@@ -523,9 +536,15 @@ const GUID_DEVINTERFACE_USB_DEVICE_REF: *const windows_sys::core::GUID =
 /// enumeration is required: per-devnode SetupDi filtering by instance ID
 /// is not supported by SetupDiGetClassDevs (its second parameter matches
 /// enumerator names, not instance IDs — a silent no-op).
-fn interface_paths(instance_ids: &[String], class_guid: *const windows_sys::core::GUID) -> Vec<String> {
+fn interface_paths(
+    instance_ids: &[String],
+    class_guid: *const windows_sys::core::GUID,
+) -> Vec<String> {
     let mut paths = Vec::new();
-    let targets: Vec<String> = instance_ids.iter().map(|s| s.to_ascii_uppercase()).collect();
+    let targets: Vec<String> = instance_ids
+        .iter()
+        .map(|s| s.to_ascii_uppercase())
+        .collect();
     unsafe {
         let info = SetupDiGetClassDevsW(
             class_guid,
@@ -540,19 +559,21 @@ fn interface_paths(instance_ids: &[String], class_guid: *const windows_sys::core
         loop {
             let mut ifdata: SP_DEVICE_INTERFACE_DATA = std::mem::zeroed();
             ifdata.cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DATA>() as u32;
-            if SetupDiEnumDeviceInterfaces(
-                info,
-                std::ptr::null_mut(),
-                class_guid,
-                idx,
-                &mut ifdata,
-            ) == 0
+            if SetupDiEnumDeviceInterfaces(info, std::ptr::null_mut(), class_guid, idx, &mut ifdata)
+                == 0
             {
                 break;
             }
             idx += 1;
             let mut needed: u32 = 0;
-            SetupDiGetDeviceInterfaceDetailW(info, &mut ifdata, std::ptr::null_mut(), 0, &mut needed, std::ptr::null_mut());
+            SetupDiGetDeviceInterfaceDetailW(
+                info,
+                &mut ifdata,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+                std::ptr::null_mut(),
+            );
             if needed == 0 {
                 continue;
             }
@@ -583,7 +604,8 @@ fn interface_paths(instance_ids: &[String], class_guid: *const windows_sys::core
         SetupDiDestroyDeviceInfoList(info);
     }
     paths
-}fn wide_len(mut p: *const u16) -> usize {
+}
+fn wide_len(mut p: *const u16) -> usize {
     unsafe {
         let mut n = 0;
         while *p != 0 {
@@ -610,30 +632,78 @@ fn device_classes_paths(instance_ids: &[String]) -> Vec<String> {
         .iter()
         .map(|id| id.to_ascii_uppercase().replace(char::from(92), "#"))
         .collect();
-    let base_wide: Vec<u16> = OsString::from("SYSTEM").as_os_str().encode_wide().chain(once(92u16)).chain(OsString::from("CurrentControlSet").as_os_str().encode_wide()).chain(once(92u16)).chain(OsString::from("Control").as_os_str().encode_wide()).chain(once(92u16)).chain(OsString::from("DeviceClasses").as_os_str().encode_wide()).chain(once(0u16)).collect();
+    let base_wide: Vec<u16> = OsString::from("SYSTEM")
+        .as_os_str()
+        .encode_wide()
+        .chain(once(92u16))
+        .chain(
+            OsString::from("CurrentControlSet")
+                .as_os_str()
+                .encode_wide(),
+        )
+        .chain(once(92u16))
+        .chain(OsString::from("Control").as_os_str().encode_wide())
+        .chain(once(92u16))
+        .chain(OsString::from("DeviceClasses").as_os_str().encode_wide())
+        .chain(once(0u16))
+        .collect();
     unsafe {
         let mut classes: *mut core::ffi::c_void = std::ptr::null_mut();
-        if RegOpenKeyExW(HKEY_LOCAL_MACHINE, base_wide.as_ptr(), 0, KEY_READ | KEY_ENUMERATE_SUB_KEYS, &mut classes) != 0 {
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            base_wide.as_ptr(),
+            0,
+            KEY_READ | KEY_ENUMERATE_SUB_KEYS,
+            &mut classes,
+        ) != 0
+        {
             return paths;
         }
         let mut gidx = 0u32;
         loop {
             let mut gname = vec![0u16; 128];
             let mut glen = gname.len() as u32;
-            if RegEnumKeyExW(classes, gidx, gname.as_mut_ptr(), &mut glen, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) != 0 {
+            if RegEnumKeyExW(
+                classes,
+                gidx,
+                gname.as_mut_ptr(),
+                &mut glen,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) != 0
+            {
                 break;
             }
             gidx += 1;
             gname.truncate(glen as usize);
             let mut cls_key: *mut core::ffi::c_void = std::ptr::null_mut();
-            if RegOpenKeyExW(classes, gname.as_ptr(), 0, KEY_READ | KEY_ENUMERATE_SUB_KEYS, &mut cls_key) != 0 {
+            if RegOpenKeyExW(
+                classes,
+                gname.as_ptr(),
+                0,
+                KEY_READ | KEY_ENUMERATE_SUB_KEYS,
+                &mut cls_key,
+            ) != 0
+            {
                 continue;
             }
             let mut sidx = 0u32;
             loop {
                 let mut sname = vec![0u16; 512];
                 let mut slen = sname.len() as u32;
-                if RegEnumKeyExW(cls_key, sidx, sname.as_mut_ptr(), &mut slen, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) != 0 {
+                if RegEnumKeyExW(
+                    cls_key,
+                    sidx,
+                    sname.as_mut_ptr(),
+                    &mut slen,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                ) != 0
+                {
                     break;
                 }
                 sidx += 1;
@@ -750,10 +820,13 @@ fn read_identity_from_handle(winusb: WINUSB_INTERFACE_HANDLE) -> GentlResult<Dev
             id.manufacturer = string_descriptor(winusb, info.i_vendor_name).unwrap_or_default();
             id.model = string_descriptor(winusb, info.i_model_name).unwrap_or_default();
             id.family = string_descriptor(winusb, info.i_family_name).unwrap_or_default();
-            id.device_version = string_descriptor(winusb, info.i_device_version).unwrap_or_default();
-            id.manufacturer_info = string_descriptor(winusb, info.i_manufacturer_info).unwrap_or_default();
+            id.device_version =
+                string_descriptor(winusb, info.i_device_version).unwrap_or_default();
+            id.manufacturer_info =
+                string_descriptor(winusb, info.i_manufacturer_info).unwrap_or_default();
             id.serial_number = string_descriptor(winusb, info.i_serial_number).unwrap_or_default();
-            id.user_defined_name = string_descriptor(winusb, info.i_user_defined_name).unwrap_or_default();
+            id.user_defined_name =
+                string_descriptor(winusb, info.i_user_defined_name).unwrap_or_default();
             Ok(id)
         }
         None => {
@@ -764,8 +837,8 @@ fn read_identity_from_handle(winusb: WINUSB_INTERFACE_HANDLE) -> GentlResult<Dev
             // HID/CCID/DFU whitelist), so the Device Info CS is never in
             // this blob. Fall back to the §3.2 interface shape: a U3V
             // camera exposes control/event/streaming interfaces EF/05.
-            let parsed = crate::descriptors::parse_config_descriptor(&cfg)
-                .ok_or(GentlError::InvalidId)?;
+            let parsed =
+                crate::descriptors::parse_config_descriptor(&cfg).ok_or(GentlError::InvalidId)?;
             let is_u3v = parsed
                 .interfaces
                 .iter()
@@ -803,7 +876,15 @@ fn configuration_descriptor(winusb: WINUSB_INTERFACE_HANDLE) -> GentlResult<Vec<
     let mut buf = vec![0u8; total];
     let mut n: u32 = 0;
     let ok = unsafe {
-        WinUsb_GetDescriptor(winusb, DESC_CONFIGURATION, 0, 0, buf.as_mut_ptr(), total as u32, &mut n)
+        WinUsb_GetDescriptor(
+            winusb,
+            DESC_CONFIGURATION,
+            0,
+            0,
+            buf.as_mut_ptr(),
+            total as u32,
+            &mut n,
+        )
     };
     if ok == 0 || n < 9 {
         return Err(GentlError::Io("configuration descriptor".into()));
@@ -821,7 +902,10 @@ mod tests {
             parse_vid_pid(r"USB\VID_04B4&PID_1234\ABC123"),
             Some((0x04B4, 0x1234))
         );
-        assert_eq!(instance_serial(r"USB\VID_04B4&PID_1234\ABC123"), Some("ABC123".into()));
+        assert_eq!(
+            instance_serial(r"USB\VID_04B4&PID_1234\ABC123"),
+            Some("ABC123".into())
+        );
         assert!(parse_vid_pid(r"USB\ROOT_HUB30\1&2").is_none());
         assert_eq!(instance_serial(r"USB\VID_04B4&PID_1234"), None);
     }

@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # A panic that reaches a GenTL extern "C" boundary can only abort the
+  # process ("thread caused non-unwinding panic. aborting."), so keep the
+  # full backtrace in the log: without it the aborted run is undiagnosable.
+  RUST_BACKTRACE: 1
+
 jobs:
   test:
     strategy:
@@ -19,3 +25,12 @@ jobs:
         run: cargo build --workspace --release
       - name: Test
         run: cargo test --workspace
+      - name: Test against the system libusb
+        # The default run links rusb's vendored libusb, which is built
+        # without libudev; installing the dev package makes rusb link the
+        # distro libusb instead, so both discovery paths get exercised.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0-dev
+          cargo test -p gentl-u3v --lib

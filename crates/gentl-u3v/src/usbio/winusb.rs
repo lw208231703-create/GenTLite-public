@@ -10,15 +10,14 @@ use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
 use windows_sys::Win32::Devices::Usb::{
-    WinUsb_AbortPipe, WinUsb_FlushPipe,
-    WinUsb_GetOverlappedResult, WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_ReadPipe,
-    WinUsb_WritePipe, WinUsb_ResetPipe, WinUsb_SetPipePolicy,
-    WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION, USB_INTERFACE_DESCRIPTOR,
-    UsbdPipeTypeBulk, RAW_IO,
+    UsbdPipeTypeBulk, WinUsb_AbortPipe, WinUsb_FlushPipe, WinUsb_GetOverlappedResult,
+    WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_ReadPipe, WinUsb_ResetPipe,
+    WinUsb_SetPipePolicy, WinUsb_WritePipe, RAW_IO, USB_INTERFACE_DESCRIPTOR,
+    WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION,
 };
 use windows_sys::Win32::Foundation::{GetLastError, HANDLE, WAIT_OBJECT_0, WIN32_ERROR};
-use windows_sys::Win32::System::IO::OVERLAPPED;
 use windows_sys::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use windows_sys::Win32::System::IO::OVERLAPPED;
 
 use crate::descriptors::{
     USB_CLASS_MISC, USB_INTERFACE_SUBCLASS_U3V, USB_PROTOCOL_CONTROL, USB_PROTOCOL_EVENT,
@@ -74,9 +73,7 @@ impl Overlapped {
     /// context, not a kernel HANDLE).
     pub fn result(&mut self, winusb: WINUSB_INTERFACE_HANDLE) -> std::io::Result<u32> {
         let mut transferred: u32 = 0;
-        let ok = unsafe {
-            WinUsb_GetOverlappedResult(winusb, &self.inner, &mut transferred, 1)
-        };
+        let ok = unsafe { WinUsb_GetOverlappedResult(winusb, &self.inner, &mut transferred, 1) };
         if ok == 0 {
             Err(std::io::Error::last_os_error())
         } else {
@@ -128,7 +125,10 @@ fn write_pipe(
             .result(winusb)
             .map_err(|e| GentlError::Io(format!("WritePipe overlapped: {e}")))?;
         if n as usize != buf.len() {
-            return Err(GentlError::Io(format!("WritePipe short: {n}/{}", buf.len())));
+            return Err(GentlError::Io(format!(
+                "WritePipe short: {n}/{}",
+                buf.len()
+            )));
         }
     }
     Ok(())
@@ -205,7 +205,8 @@ fn cancel_pending(winusb: WINUSB_INTERFACE_HANDLE, pipe: u8, event: HANDLE) {
 /// keep their meaning via `actual_length`.
 fn set_raw_io(handle: WINUSB_INTERFACE_HANDLE, pipe: u8) -> GentlResult<()> {
     let value: u8 = 1; // TRUE
-    let ok = unsafe { WinUsb_SetPipePolicy(handle, pipe, RAW_IO, 1, &value as *const u8 as *const _) };
+    let ok =
+        unsafe { WinUsb_SetPipePolicy(handle, pipe, RAW_IO, 1, &value as *const u8 as *const _) };
     if ok == 0 {
         return Err(GentlError::Io(format!(
             "WinUsb_SetPipePolicy(RAW_IO) pipe 0x{pipe:02x}: {}",
@@ -392,7 +393,14 @@ impl UsbPipe for WinUsbPipe {
                 )
             };
             let last: WIN32_ERROR = unsafe { GetLastError() };
-            eprintln!("[rd2] submit pipe={:02x} len={} ok={} last={} inline={}", self.pipe, buf.len(), ok, last, read);
+            eprintln!(
+                "[rd2] submit pipe={:02x} len={} ok={} last={} inline={}",
+                self.pipe,
+                buf.len(),
+                ok,
+                last,
+                read
+            );
             if ok != 0 {
                 // Inline completion (only realistic for zero-length reads).
                 let n = read.min(buf.len() as u32);
@@ -416,7 +424,12 @@ impl UsbPipe for WinUsbPipe {
             .result(self.handle)
             .map_err(|e| GentlError::Io(format!("ReadPipe overlapped: {e}")))?;
         let n = n.min(buf.len() as u32);
-        eprintln!("[rd2] done pipe={:02x} n={} head={:02x?}", self.pipe, n, &p.buf[..n.min(12) as usize]);
+        eprintln!(
+            "[rd2] done pipe={:02x} n={} head={:02x?}",
+            self.pipe,
+            n,
+            &p.buf[..n.min(12) as usize]
+        );
         buf[..n as usize].copy_from_slice(&p.buf[..n as usize]);
         *pending = None;
         Ok(n)
