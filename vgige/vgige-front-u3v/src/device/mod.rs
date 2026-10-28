@@ -13,6 +13,7 @@ use vgige_core::{CanonicalFrame, FrameSession, SharedBack};
 pub mod desc;
 pub mod emit;
 pub mod regs;
+pub mod sha1;
 pub mod server;
 
 pub use regs::RegisterFile;

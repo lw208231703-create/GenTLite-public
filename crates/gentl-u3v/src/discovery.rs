@@ -42,7 +42,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 
 use crate::descriptors::{
     device_info_descriptor, DESC_CONFIGURATION, DESC_STRING, USB_CLASS_MISC,
-    USB_DEVICE_SUBCLASS_U3V,
+    USB_DEVICE_SUBCLASS_U3V, USB_INTERFACE_SUBCLASS_U3V,
 };
 use crate::types::{DeviceIdentity, Enumeration, FoundDevice, RootHubInfo};
 use crate::usbio;
@@ -440,6 +440,17 @@ impl Drop for OpenedDevice {
 unsafe impl Send for OpenedDevice {}
 unsafe impl Sync for OpenedDevice {}
 
+/// Open EVERY device interface path of the instance (one per MI_xN child
+/// of a composite device). Zadig-style per-interface WinUSB bindings are
+/// independent device nodes: WinUsb_GetAssociatedInterface sees none of
+/// them, so each interface needs its own CreateFile+WinUSB handle.
+pub fn open_device_all(instance_id: &str) -> Vec<OpenedDevice> {
+    device_interface_paths(instance_id)
+        .iter()
+        .filter_map(|path| open_path(path).ok())
+        .collect()
+}
+
 /// Open a USB device instance for overlapped I/O and initialize WinUSB
 /// (interface 0 = default control interface, R-10cd).
 pub fn open_device(instance_id: &str) -> GentlResult<OpenedDevice> {
@@ -724,27 +735,47 @@ fn string_descriptor(winusb: WINUSB_INTERFACE_HANDLE, index: u8) -> Option<Strin
 
 fn read_identity_from_handle(winusb: WINUSB_INTERFACE_HANDLE) -> GentlResult<DeviceIdentity> {
     let cfg = configuration_descriptor(winusb)?;
-    let info = device_info_descriptor(&cfg)
-        .ok_or_else(|| GentlError::InvalidId)?; // opened, but not U3V
-    let mut id = DeviceIdentity {
-        guid: string_descriptor(winusb, info.i_device_guid),
-        gen_cp_version: info.gen_cp_version,
-        u3v_version: info.u3v_version,
-        ..DeviceIdentity::default()
-    };
-    // The GUID is the device identity (R-1cd); without it the device
-    // cannot be told apart from siblings reliably.
-    if id.guid.is_none() {
-        return Err(GentlError::InvalidId);
+    match device_info_descriptor(&cfg) {
+        Some(info) => {
+            let mut id = DeviceIdentity {
+                guid: string_descriptor(winusb, info.i_device_guid),
+                gen_cp_version: info.gen_cp_version,
+                u3v_version: info.u3v_version,
+                ..DeviceIdentity::default()
+            };
+            // The CS descriptor confirms U3V; a missing GUID string only
+            // downgrades the device ID to the vid:pid:serial fallback
+            // (filled by the caller), it must not unlist the device.
+            let _ = id.guid.is_none();
+            id.manufacturer = string_descriptor(winusb, info.i_vendor_name).unwrap_or_default();
+            id.model = string_descriptor(winusb, info.i_model_name).unwrap_or_default();
+            id.family = string_descriptor(winusb, info.i_family_name).unwrap_or_default();
+            id.device_version = string_descriptor(winusb, info.i_device_version).unwrap_or_default();
+            id.manufacturer_info = string_descriptor(winusb, info.i_manufacturer_info).unwrap_or_default();
+            id.serial_number = string_descriptor(winusb, info.i_serial_number).unwrap_or_default();
+            id.user_defined_name = string_descriptor(winusb, info.i_user_defined_name).unwrap_or_default();
+            Ok(id)
+        }
+        None => {
+            // Composite-gadget path (observed on the vgige FunctionFS
+            // device): WinUsb_GetDescriptor serves the kernel-composed
+            // per-interface configuration, which carries NO class-specific
+            // descriptors (f_fs.c rejects CS_INTERFACE outside the
+            // HID/CCID/DFU whitelist), so the Device Info CS is never in
+            // this blob. Fall back to the §3.2 interface shape: a U3V
+            // camera exposes control/event/streaming interfaces EF/05.
+            let parsed = crate::descriptors::parse_config_descriptor(&cfg)
+                .ok_or(GentlError::InvalidId)?;
+            let is_u3v = parsed
+                .interfaces
+                .iter()
+                .any(|i| i.class == USB_CLASS_MISC && i.sub_class == USB_INTERFACE_SUBCLASS_U3V);
+            if !is_u3v {
+                return Err(GentlError::InvalidId);
+            }
+            Ok(DeviceIdentity::default())
+        }
     }
-    id.manufacturer = string_descriptor(winusb, info.i_vendor_name).unwrap_or_default();
-    id.model = string_descriptor(winusb, info.i_model_name).unwrap_or_default();
-    id.family = string_descriptor(winusb, info.i_family_name).unwrap_or_default();
-    id.device_version = string_descriptor(winusb, info.i_device_version).unwrap_or_default();
-    id.manufacturer_info = string_descriptor(winusb, info.i_manufacturer_info).unwrap_or_default();
-    id.serial_number = string_descriptor(winusb, info.i_serial_number).unwrap_or_default();
-    id.user_defined_name = string_descriptor(winusb, info.i_user_defined_name).unwrap_or_default();
-    Ok(id)
 }
 
 fn configuration_descriptor(winusb: WINUSB_INTERFACE_HANDLE) -> GentlResult<Vec<u8>> {

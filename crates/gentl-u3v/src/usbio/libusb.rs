@@ -77,7 +77,13 @@ pub struct InterfaceSet {
 }
 
 impl InterfaceSet {
-    pub fn collect(opened: OpenedDevice) -> GentlResult<Self> {
+    pub fn collect(owners: Vec<OpenedDevice>) -> GentlResult<Self> {
+        // libusb: one handle owns all interfaces; extra entries would be
+        // duplicate opens of the same device (Windows opens one handle
+        // per MI interface instead).
+        let opened = owners.into_iter().next().ok_or_else(|| {
+            GentlError::Io("device has no openable interface".into())
+        })?;
         let device = opened.into_libusb();
         let cfg = active_config(&device)?;
         let mut set = Self {

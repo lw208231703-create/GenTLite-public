@@ -39,11 +39,15 @@ use vgige_core::BackIdentity;
 
 /// Device-side address map (QoI — the device owns its layout; the Step-2
 /// test fake uses the same shape, so the two protocol peers agree).
+/// §4.2.2: the SBRM MUST start on a free manufacturer-specific space AFTER
+/// address 0xFFFF — the whole map below (ABRM excepted, fixed by Table 4-6)
+/// lives above 0x0001_0000 (spec-audit §4.2, fixed 2026-10-28; the earlier
+/// 0x1000..0x4000 layout violated the clause).
 pub(crate) const ABRM_BASE: u64 = 0x0000;
-pub(crate) const MANIFEST_BASE: u64 = 0x1000;
-pub(crate) const SBRM_BASE: u64 = 0x2000;
-pub(crate) const XML_BASE: u64 = 0x3000;
-pub(crate) const SIRM_BASE: u64 = 0x4000;
+pub(crate) const MANIFEST_BASE: u64 = 0x0001_0000;
+pub(crate) const SBRM_BASE: u64 = 0x0001_1000;
+pub(crate) const XML_BASE: u64 = 0x0002_0000;
+pub(crate) const SIRM_BASE: u64 = 0x0003_0000;
 /// SIRM transfer limit advertised to the host (SBRM 0x14/0x18): bounds
 /// the GenCP chunk envelopes; 1 KiB is the common U3V minimum.
 pub(crate) const MAX_TRANSFER: u32 = 1024;

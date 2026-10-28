@@ -68,6 +68,10 @@ pub struct U3vCamera {
     client: Arc<Mutex<GenCpClient>>,
     bootstrap: Bootstrap,
     stream_in: Vec<Arc<dyn UsbPipe>>,
+    event_in: Option<Arc<dyn UsbPipe>>,
+    /// Live DEI pump, if any (§5.4.2). Drop order: receiver first, then
+    /// the pump thread observes `stop` and exits before the pipes.
+    events: Mutex<Option<EventPump>>,
 }
 
 impl U3vCamera {
@@ -80,7 +84,7 @@ impl U3vCamera {
     /// Linux: `<bus>:<address>`), claim the U3V interfaces, and walk the
     /// ABRM/SBRM bootstrap (§4.2).
     pub fn open(instance_id: &str) -> GentlResult<Self> {
-        let opened = crate::discovery::open_device(instance_id)?;
+        let opened = crate::discovery::open_device_all(instance_id);
         let ifaces = crate::usbio::InterfaceSet::collect(opened)?;
         let control_out = ifaces.control_out.clone().ok_or_else(|| {
             GentlError::Io("device lacks a bulk OUT control endpoint (R-11cd)".into())
@@ -90,7 +94,12 @@ impl U3vCamera {
         })?;
         // Clone the pipe handles (cheap Arc clones; InterfaceSet is not
         // consumed because it implements Drop on the Windows backend).
-        Self::from_parts(control_out, control_in, ifaces.stream_in.clone())
+        Self::from_parts_full(
+            control_out,
+            control_in,
+            ifaces.stream_in.clone(),
+            ifaces.event_in.clone(),
+        )
     }
 
     /// Build a camera from pre-opened endpoint pipes (test fakes, embedded
@@ -101,13 +110,14 @@ impl U3vCamera {
         control_in: Arc<dyn UsbPipe>,
         stream_in: Vec<Arc<dyn UsbPipe>>,
     ) -> GentlResult<Self> {
-        Self::from_parts(control_out, control_in, stream_in)
+        Self::from_parts_full(control_out, control_in, stream_in, None)
     }
 
-    fn from_parts(
+    fn from_parts_full(
         control_out: Arc<dyn UsbPipe>,
         control_in: Arc<dyn UsbPipe>,
         stream_in: Vec<Arc<dyn UsbPipe>>,
+        event_in: Option<Arc<dyn UsbPipe>>,
     ) -> GentlResult<Self> {
         let mut client = GenCpClient::new(control_out, control_in);
         let bootstrap = read_bootstrap(&mut client)?;
@@ -115,6 +125,8 @@ impl U3vCamera {
             client: Arc::new(Mutex::new(client)),
             bootstrap,
             stream_in,
+            event_in,
+            events: Mutex::new(None),
         })
     }
 
@@ -187,6 +199,106 @@ impl U3vCamera {
             sirm,
             geometry: Mutex::new(None),
         })
+    }
+}
+
+impl U3vCamera {
+    /// Start receiving device events (§4.1.3.3): raises the EIRM Event
+    /// Enable bit when the SBRM reports an event interface (§5.4.2) and
+    /// pumps the event bulk IN endpoint into a queue until
+    /// [`Self::stop_events`]. One live pump per camera; a second call
+    /// returns the existing receiver's queue endpoint is NOT shared —
+    /// returns ResourceInUse so consumers stay independent.
+    pub fn start_events(&self) -> Result<EventReceiver, U3vError> {
+        let mut guard = self
+            .events
+            .lock()
+            .map_err(|_| U3vError::Transport("events lock poisoned".into()))?;
+        if guard.is_some() {
+            return Err(U3vError::Transport(
+                "device events already being received".into(),
+            ));
+        }
+        let pipe = self
+            .event_in
+            .clone()
+            .ok_or_else(|| U3vError::Transport("device has no event endpoint".into()))?;
+        // §5.4.2 EI_CONTROL bit 0: enable event generation in the device.
+        if let Some(eirm) = self.bootstrap.eirm_address {
+            self.locked_client()?
+                .write_reg(eirm + packets::eirm::EI_CONTROL, 1)
+                .map_err(U3vError::from)?;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel::<packets::EventPacket>();
+        let pump_stop = Arc::clone(&stop);
+        let pump = std::thread::Builder::new()
+            .name("u3v-events".into())
+            .spawn(move || {
+                let mut buf = vec![0u8; 4096];
+                while !pump_stop.load(Ordering::Relaxed) {
+                    match pipe.read_bulk(&mut buf, EVENTS_POLL) {
+                        Ok(0) | Err(_) => continue,
+                        Ok(n) => {
+                            // §4.1.3.3.2: one transfer carries one event;
+                            // the SCD may be padded to the endpoint MPS —
+                            // decode_event bounds-checks the true length.
+                            if let Some(ev) = packets::decode_event(&buf[..n as usize]) {
+                                if tx.send(ev).is_err() {
+                                    break; // receiver gone
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+            .map_err(|e| U3vError::Transport(format!("spawn event pump: {e}")))?;
+        *guard = Some(EventPump {
+            stop,
+            thread: Some(pump),
+        });
+        Ok(EventReceiver { rx })
+    }
+
+    /// Stop the event pump and lower the EIRM Event Enable bit.
+    pub fn stop_events(&self) -> Result<(), U3vError> {
+        let mut guard = self
+            .events
+            .lock()
+            .map_err(|_| U3vError::Transport("events lock poisoned".into()))?;
+        if let Some(mut pump) = guard.take() {
+            pump.stop.store(true, Ordering::Relaxed);
+            if let Some(t) = pump.thread.take() {
+                let _ = t.join();
+            }
+            if let Some(eirm) = self.bootstrap.eirm_address {
+                self.locked_client()?
+                    .write_reg(eirm + packets::eirm::EI_CONTROL, 0)
+                    .map_err(U3vError::from)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+const EVENTS_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Live pump behind [`U3vCamera::start_events`].
+struct EventPump {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+/// Decoded device events (§4.1.3.3.2), until the camera is dropped or
+/// [`U3vCamera::stop_events`] is called.
+pub struct EventReceiver {
+    rx: std::sync::mpsc::Receiver<packets::EventPacket>,
+}
+
+impl EventReceiver {
+    /// The next device event, or None when the pump has stopped.
+    pub fn next(&self, timeout: std::time::Duration) -> Option<packets::EventPacket> {
+        self.rx.recv_timeout(timeout).ok()
     }
 }
 

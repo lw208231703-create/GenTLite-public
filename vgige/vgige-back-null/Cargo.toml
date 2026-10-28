@@ -1,0 +1,9 @@
+[package]
+name = "vgige-back-null"
+description = "vgige CameraBack/FrameSource null adapter: camera-less synthetic mode (built-in minimal GenICam XML + 30fps Mono8 test-pattern frame source) for gateway demos without a camera"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+vgige-core = { path = "../vgige-core" }

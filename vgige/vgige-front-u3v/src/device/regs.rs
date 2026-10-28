@@ -18,11 +18,16 @@ use std::sync::{Arc, Mutex};
 use gentl_u3v::packets;
 use vgige_core::{slot, SharedBack, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION};
 
+use crate::device::sha1;
 use crate::{DeviceConfig, MANIFEST_BASE, SBRM_BASE, SIRM_BASE, XML_BASE};
 
 /// The XML blob size cap (mirrors the host-side sanity bound,
 /// control.rs read_device_xml).
 const XML_MAX: usize = 32 << 20;
+
+/// Demo acquisition block (SFNC level, see build_regions): Start/Stop
+/// pokes at +0x00/+0x04, PayloadSize (u64) at +0x08.
+const ACQ_BASE: u64 = 0x0004_0000;
 
 struct Region {
     base: u64,
@@ -76,6 +81,31 @@ impl RegisterFile {
     /// SI_CONTROL write path.
     pub fn set_stream_watcher(&self, watcher: impl Fn(bool) + Send + 'static) {
         *self.watcher.lock().expect("watcher lock") = Some(Box::new(watcher));
+    }
+
+    /// Emitter-fatal recovery: the stream transport died mid-block (e.g.
+    /// a host-side pipe reset surfaces as EPIPE) — clear Stream Enable in
+    /// the SIRM register and internally, and fire the watcher's close, so
+    /// the next host enable is a real 0→1 transition with the relay and
+    /// emitter restarted. Without this a crashed consumer leaves the
+    /// virtual camera streaming into the void and every later acquisition
+    /// joins mid-frame (observed 2026-10-27).
+    pub fn abort_stream(&self) {
+        let si_lo = SIRM_BASE + packets::sirm::SI_CONTROL;
+        {
+            let mut guard = self.sirm_control.lock().expect("sirm control lock");
+            *guard &= !packets::sirm::CONTROL_STREAM_ENABLE;
+        }
+        if let Some(r) = self.region(SIRM_BASE) {
+            let mut m = r.mem.lock().expect("region lock");
+            let off = (si_lo - r.base) as usize;
+            let v = u32::from_le_bytes(m[off..off + 4].try_into().expect("u32"))
+                & !packets::sirm::CONTROL_STREAM_ENABLE;
+            m[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        if let Some(w) = &*self.watcher.lock().expect("watcher lock") {
+            w(false);
+        }
     }
 
     pub fn set_ai_result(&self, v: u32) {
@@ -270,12 +300,17 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     abrm.resize(0x400, 0);
 
     // Manifest (GenCP §5.5): one entry, raw XML, pointing at the blob.
+    // R-50cd: the entry MUST carry a valid SHA1 of the file — at
+    // offset 24, 20 bytes (field layout matches the host-side parser in
+    // gentl-u3v packets::decode_manifest_entry, bytes 24..44 were
+    // previously zero = deviation, fixed 2026-10-28).
     let mut manifest = Vec::new();
     manifest.extend_from_slice(&1u64.to_le_bytes());
     let mut entry = vec![0u8; packets::MANIFEST_ENTRY_LEN];
     entry[4..8].copy_from_slice(&packets::FILE_FORMAT_RAW_XML.to_le_bytes()); // raw, device XML
     entry[8..16].copy_from_slice(&XML_BASE.to_le_bytes());
     entry[16..24].copy_from_slice(&(config.xml.len() as u64).to_le_bytes());
+    entry[24..44].copy_from_slice(&sha1::sha1(&config.xml));
     manifest.extend_from_slice(&entry);
 
     // SBRM (U3V Table 4-7): one streaming channel, 1 KiB transfers.
@@ -295,12 +330,24 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     sirm[0x10..0x14].copy_from_slice(&(packets::IMAGE_LEADER_LEN as u32).to_le_bytes());
     sirm[0x14..0x18].copy_from_slice(&(packets::IMAGE_TRAILER_LEN as u32).to_le_bytes());
 
+    // Demo acquisition block (SFNC level): AcquisitionStart/Stop pokes
+    // plus the frame PayloadSize the host sizes its buffers against.
+    // The U3V stream itself is gated by SIRM Stream Enable (§5.4.1.2);
+    // these are served locally so a camera-less (null-back) device still
+    // completes a standard GenApi acquisition sequence. Real backends
+    // advertise their own acquisition nodes, forwarded 1:1.
+    let mut acq = vec![0u8; 0x10];
+    acq[0x08..0x10].copy_from_slice(&config.payload_size.to_le_bytes());
+
+    // Regions MUST be listed in ascending base order: the lookup takes
+    // the last region with base <= addr.
     vec![
         Region { base: crate::ABRM_BASE, mem: Mutex::new(abrm), writable: false },
         Region { base: MANIFEST_BASE, mem: Mutex::new(manifest), writable: false },
         Region { base: SBRM_BASE, mem: Mutex::new(sbrm), writable: false },
         Region { base: XML_BASE, mem: Mutex::new(config.xml.clone()), writable: false },
         Region { base: SIRM_BASE, mem: Mutex::new(sirm), writable: true },
+        Region { base: ACQ_BASE, mem: Mutex::new(acq), writable: true },
     ]
 }
 

@@ -911,7 +911,7 @@ fn open_u3v_device(
     entry: &types::FoundDevice,
     access: DeviceAccess,
 ) -> GentlResult<Arc<U3vDevice>> {
-    let opened = discovery::open_device(&entry.instance_id)?;
+    let opened = discovery::open_device_all(&entry.instance_id);
     let ifaces = usbio::InterfaceSet::collect(opened)?;
     let out_pipe = ifaces.control_out.clone().ok_or(GentlError::Io(
         "no Device Control Interface bulk OUT endpoint".into(),

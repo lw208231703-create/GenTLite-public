@@ -40,8 +40,10 @@ use vgige_core::{Relay, SharedBack, XmlMerger};
 #[cfg(feature = "front-gige")]
 use vgige_front_gige::{assemble_identity, GigEFront, GvspSession, UpIdentity};
 
-#[cfg(all(not(feature = "back-gige"), not(feature = "back-u3v")))]
-compile_error!("vgige-cli needs a camera backend: default (back-gige) or --no-default-features --features back-u3v");
+#[cfg(all(not(feature = "back-gige"), not(feature = "back-null"), not(feature = "back-u3v")))]
+compile_error!(
+    "vgige-cli needs a camera backend: default (back-gige), back-null, or --no-default-features --features back-u3v"
+);
 #[cfg(all(not(feature = "front-gige"), not(feature = "front-u3v")))]
 compile_error!("vgige-cli needs a front: default (front-gige) or --no-default-features --features front-u3v");
 #[cfg(all(feature = "back-gige", feature = "front-u3v"))]
@@ -68,6 +70,9 @@ enum BackKind {
     /// `--down` is the camera's IPv4 address.
     #[cfg(feature = "back-gige")]
     Gige,
+    /// No camera: the built-in synthetic camera (demo mode).
+    #[cfg(feature = "back-null")]
+    Null,
     /// `--down` is the U3V backend instance ID (Windows: CM device
     /// instance path; Linux: `<bus>:<address>`).
     #[cfg(feature = "back-u3v")]
@@ -79,6 +84,8 @@ impl BackKind {
         match name {
             #[cfg(feature = "back-gige")]
             "gige" => Some(Self::Gige),
+            #[cfg(feature = "back-null")]
+            "null" => Some(Self::Null),
             #[cfg(feature = "back-u3v")]
             "u3v" => Some(Self::U3v),
             _ => None,
@@ -155,8 +162,13 @@ fn parse_port(flag: &str, value: &str) -> u16 {
 
 fn parse_args() -> Args {
     let mut up = None;
-    let mut back = BackKind::compiled("gige").expect("at least one backend is compiled");
-    let mut front = FrontKind::compiled("gige").expect("at least one front is compiled");
+    let mut back = BackKind::compiled("gige")
+        .or_else(|| BackKind::compiled("null"))
+        .or_else(|| BackKind::compiled("u3v"))
+        .expect("at least one backend is compiled");
+    let mut front = FrontKind::compiled("gige")
+        .or_else(|| FrontKind::compiled("u3v"))
+        .expect("at least one front is compiled");
     let mut down = None;
     let mut down_port = DEFAULT_GVCP_PORT;
     let mut port = DEFAULT_GVCP_PORT;
@@ -221,10 +233,15 @@ fn parse_args() -> Args {
             }
         }
     }
-    let (Some(up), Some(down)) = (up, down) else {
-        eprintln!("--up and --down are both required\n{}", usage());
+    // `--up` (up-facing IP) only matters for the GigE front; the U3V
+    // gadget front's upstream is the USB cable, no IP involved.
+    #[cfg(feature = "front-gige")]
+    if front == FrontKind::Gige && up.is_none() {
+        eprintln!("--up is required with --front gige\n{}", usage());
         std::process::exit(2);
-    };
+    }
+    let up = up.unwrap_or(Ipv4Addr::LOCALHOST);
+    let down = down.unwrap_or_else(|| require_down(back));
     #[cfg(feature = "back-gige")]
     if back == BackKind::Gige {
         // Validate eagerly so a typo fails before any connection attempt.
@@ -241,6 +258,17 @@ fn parse_args() -> Args {
         ext_nodes,
         no_stream,
     }
+}
+
+/// `--down` default when the backend needs no camera target.
+fn require_down(back: BackKind) -> String {
+    #[cfg(feature = "back-null")]
+    if back == BackKind::Null {
+        return "null".to_owned();
+    }
+    let _ = back;
+    eprintln!("--down is required with a real camera backend (--back null needs none)");
+    std::process::exit(2);
 }
 
 fn main() {
@@ -266,6 +294,8 @@ fn main() {
             }
             Arc::new(Mutex::new(back))
         }
+        #[cfg(feature = "back-null")]
+        BackKind::Null => Arc::new(Mutex::new(vgige_back_null::NullBack::new())),
         #[cfg(feature = "back-u3v")]
         BackKind::U3v => Arc::new(Mutex::new(U3vBack::open(&args.down).unwrap_or_else(|e| {
             eprintln!("vgige: opening the U3V camera {}: {e}", args.down);
@@ -299,6 +329,8 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(1000));
             Some(DownGuard(Arc::clone(&back)))
         }
+        #[cfg(feature = "back-null")]
+        BackKind::Null => None,
         #[cfg(feature = "back-u3v")]
         BackKind::U3v => None,
     };
@@ -380,6 +412,8 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
     let down_desc = match args.back {
         #[cfg(feature = "back-gige")]
         BackKind::Gige => format!("{}:{}", args.down, args.down_port),
+        #[cfg(feature = "back-null")]
+        BackKind::Null => args.down.clone(),
         #[cfg(feature = "back-u3v")]
         BackKind::U3v => args.down.clone(),
     };

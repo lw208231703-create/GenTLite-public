@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
 use windows_sys::Win32::Devices::Usb::{
-    WinUsb_AbortPipe, WinUsb_Free, WinUsb_FlushPipe, WinUsb_GetAssociatedInterface,
+    WinUsb_AbortPipe, WinUsb_FlushPipe,
     WinUsb_GetOverlappedResult, WinUsb_QueryInterfaceSettings, WinUsb_QueryPipe, WinUsb_ReadPipe,
     WinUsb_WritePipe, WinUsb_ResetPipe, WinUsb_SetPipePolicy,
     WINUSB_INTERFACE_HANDLE, WINUSB_PIPE_INFORMATION, USB_INTERFACE_DESCRIPTOR,
@@ -134,9 +134,11 @@ fn write_pipe(
     Ok(())
 }
 
-/// Overlapped read into `buf`; returns the number of bytes transferred.
-/// A timeout cancels the transfer before returning GentlError::Timeout.
-fn read_pipe(
+/// Classic overlapped read into the caller's buffer; a timeout cancels
+/// the transfer (abort + reset, audit B11) before returning Timeout.
+/// Used for control/event pipes, whose callers abandon timed-out
+/// transactions; stream pipes keep the transfer outstanding instead.
+fn read_pipe_cancel_on_timeout(
     winusb: WINUSB_INTERFACE_HANDLE,
     pipe: u8,
     buf: &mut [u8],
@@ -171,7 +173,8 @@ fn read_pipe(
     Ok(n)
 }
 
-/// Cancel a stuck transfer so the pipe stays usable after a timeout.
+/// Cancel a stuck WRITE so the pipe stays usable after a timeout (read
+/// timeouts keep the transfer outstanding instead — see WinUsbPipe).
 fn cancel_pending(winusb: WINUSB_INTERFACE_HANDLE, pipe: u8, event: HANDLE) {
     unsafe {
         let _ = WinUsb_AbortPipe(winusb, pipe);
@@ -231,11 +234,10 @@ pub struct PipeInfo {
 /// be `Send + Sync` (GenTL handles cross threads; gige's `GevDevice`
 /// wraps the same kind of resource).
 pub struct InterfaceSet {
-    /// Default interface + file handle ownership (lives exactly as long
-    /// as any pipe referencing its handle).
-    _owner: OpenedDevice,
-    /// Associated interfaces obtained via WinUsb_GetAssociatedInterface.
-    associated: Vec<WINUSB_INTERFACE_HANDLE>,
+    /// All opened interface devices (one per MI_xN child of a composite
+    /// device); every pipe borrows its handle, so the set must outlive
+    /// the pipes.
+    owners: Vec<OpenedDevice>,
     pub control_out: Option<Arc<dyn UsbPipe>>,
     pub control_in: Option<Arc<dyn UsbPipe>>,
     pub event_in: Option<Arc<dyn UsbPipe>>,
@@ -243,31 +245,25 @@ pub struct InterfaceSet {
 }
 
 impl InterfaceSet {
-    /// Walk interface 0 and its associated interfaces, classifying bulk
-    /// pipes by U3V interface protocol (§3.2.4/3.2.6/3.2.7). Stream
-    /// interfaces keep descriptor order (CR-123st: stream index = SIRM
-    /// order).
-    pub fn collect(owner: OpenedDevice) -> GentlResult<Self> {
+    /// Classify the bulk pipes of EVERY interface device by the U3V
+    /// interface protocol (§3.2.4/3.2.6/3.2.7). One WinUSB handle per
+    /// MI_xN interface: per-interface driver bindings (Zadig style) are
+    /// independent device nodes, so WinUsb_GetAssociatedInterface sees
+    /// none of them and each interface needs its own CreateFile+WinUSB.
+    /// Stream interfaces keep descriptor order (CR-123st: stream index =
+    /// SIRM order).
+    pub fn collect(owners: Vec<OpenedDevice>) -> GentlResult<Self> {
+        if owners.is_empty() {
+            return Err(GentlError::Io("device has no openable interface".into()));
+        }
         let mut set = Self {
-            _owner: owner,
-            associated: Vec::new(),
             control_out: None,
             control_in: None,
             event_in: None,
             stream_in: Vec::new(),
+            owners,
         };
-        let default = set._owner.winusb;
-        let mut handles = vec![default];
-        for i in 0..16u8 {
-            let mut h: WINUSB_INTERFACE_HANDLE = std::ptr::null_mut();
-            let ok = unsafe { WinUsb_GetAssociatedInterface(default, i, &mut h) };
-            if ok == 0 || h.is_null() {
-                break;
-            }
-            set.associated.push(h);
-            handles.push(h);
-        }
-        for h in handles.iter().copied() {
+        for h in set.owners.iter().map(|o| o.winusb) {
             let Some((iface_desc, pipes)) = interface_pipes(h) else {
                 continue;
             };
@@ -283,6 +279,8 @@ impl InterfaceSet {
                             handle: h,
                             pipe: p.pipe_id,
                             mps: p.max_packet,
+                            keep_pending: false,
+                            pending: std::sync::Mutex::new(None),
                         });
                         if p.is_in {
                             set.control_in.get_or_insert(pipe);
@@ -298,6 +296,8 @@ impl InterfaceSet {
                                 handle: h,
                                 pipe: p.pipe_id,
                                 mps: p.max_packet,
+                                keep_pending: false,
+                                pending: std::sync::Mutex::new(None),
                             }));
                         }
                     }
@@ -309,6 +309,8 @@ impl InterfaceSet {
                                 handle: h,
                                 pipe: p.pipe_id,
                                 mps: p.max_packet,
+                                keep_pending: false,
+                                pending: std::sync::Mutex::new(None),
                             }));
                         }
                     }
@@ -326,16 +328,6 @@ impl InterfaceSet {
     }
 }
 
-impl Drop for InterfaceSet {
-    fn drop(&mut self) {
-        for h in self.associated.drain(..) {
-            unsafe {
-                let _ = WinUsb_Free(h);
-            }
-        }
-    }
-}
-
 unsafe impl Send for InterfaceSet {}
 unsafe impl Sync for InterfaceSet {}
 
@@ -346,11 +338,106 @@ struct WinUsbPipe {
     handle: WINUSB_INTERFACE_HANDLE,
     pipe: u8,
     mps: u16,
+    /// Stream pipes only: a read whose wait timed out stays outstanding
+    /// in WinUSB (the receiver's poll loop re-waits it), because aborting
+    /// it resets the endpoint (audit B11) and an endpoint reset shows up
+    /// on the device as EPIPE mid-write, killing an innocent stream
+    /// (vgige bring-up 2026-10-27 — the host pausing between frames is
+    /// normal, not an error). Control/event pipes cancel on timeout: the
+    /// GenCP client abandons timed-out transactions and moves on, so a
+    /// kept transfer would go stale against a differently-sized buffer.
+    keep_pending: bool,
+    pending: std::sync::Mutex<Option<PendingRead>>,
+}
+
+/// An outstanding WinUSB read: the staging buffer is owned here because
+/// the driver writes into it until completion.
+struct PendingRead {
+    overlapped: Overlapped,
+    buf: Vec<u8>,
 }
 
 impl UsbPipe for WinUsbPipe {
     fn read_bulk(&self, buf: &mut [u8], timeout: Duration) -> GentlResult<u32> {
-        read_pipe(self.handle, self.pipe, buf, timeout)
+        if !self.keep_pending {
+            // Classic path (control/event): submit into the caller's
+            // buffer; a timeout cancels + resets the pipe (audit B11)
+            // because the GenCP client abandons timed-out transactions.
+            return read_pipe_cancel_on_timeout(self.handle, self.pipe, buf, timeout);
+        }
+        // Stream path: a read whose wait timed out stays outstanding —
+        // aborting it resets the endpoint (audit B11) and an endpoint
+        // reset shows up on the device as EPIPE mid-write, killing an
+        // innocent stream (vgige bring-up 2026-10-27 — the host pausing
+        // between frames is normal, not an error). The receiver's poll
+        // loop re-waits; teardown cancels ([`UsbPipe::cancel_pending_read`]).
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| GentlError::Io("pipe pending lock poisoned".into()))?;
+        if pending.is_none() {
+            let mut p = PendingRead {
+                overlapped: Overlapped::new()?,
+                buf: vec![0u8; buf.len()],
+            };
+            let mut read: u32 = 0;
+            let ok = unsafe {
+                WinUsb_ReadPipe(
+                    self.handle,
+                    self.pipe,
+                    p.buf.as_mut_ptr(),
+                    p.buf.len() as u32,
+                    &mut read,
+                    p.overlapped.as_mut_ptr(),
+                )
+            };
+            let last: WIN32_ERROR = unsafe { GetLastError() };
+            eprintln!("[rd2] submit pipe={:02x} len={} ok={} last={} inline={}", self.pipe, buf.len(), ok, last, read);
+            if ok != 0 {
+                // Inline completion (only realistic for zero-length reads).
+                let n = read.min(buf.len() as u32);
+                buf[..n as usize].copy_from_slice(&p.buf[..n as usize]);
+                return Ok(n);
+            }
+            if last != 997 {
+                return Err(GentlError::Io(format!("WinUsb_ReadPipe: {last}")));
+            }
+            *pending = Some(p);
+        }
+        // Re-wait the outstanding transfer (possibly from a timed-out
+        // earlier call — its staging buffer and request length match the
+        // caller's window, which is stable across the poll loop).
+        let p = pending.as_mut().expect("pending read just ensured");
+        if !p.overlapped.wait(timeout) {
+            return Err(GentlError::Timeout); // transfer stays outstanding
+        }
+        let n = p
+            .overlapped
+            .result(self.handle)
+            .map_err(|e| GentlError::Io(format!("ReadPipe overlapped: {e}")))?;
+        let n = n.min(buf.len() as u32);
+        eprintln!("[rd2] done pipe={:02x} n={} head={:02x?}", self.pipe, n, &p.buf[..n.min(12) as usize]);
+        buf[..n as usize].copy_from_slice(&p.buf[..n as usize]);
+        *pending = None;
+        Ok(n)
+    }
+
+    fn cancel_pending_read(&self) {
+        let mut pending = match self.pending.lock() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        if let Some(p) = pending.take() {
+            unsafe {
+                let _ = WinUsb_AbortPipe(self.handle, self.pipe);
+                // The aborted read completes with ERROR_OPERATION_ABORTED;
+                // drain it so the pipe is quiescent before the reset.
+                let _ = WaitForSingleObject(p.overlapped.event(), 1000);
+                // Audit B11: AbortPipe leaves the pipe indeterminate;
+                // WinUSB requires a reset before reuse.
+                let _ = WinUsb_ResetPipe(self.handle, self.pipe);
+            }
+        }
     }
 
     fn write_bulk(&self, buf: &[u8], timeout: Duration) -> GentlResult<()> {

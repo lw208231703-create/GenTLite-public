@@ -15,8 +15,11 @@ edition.workspace = true
 #   U3V camera → GigE:   --no-default-features --features back-u3v,front-gige
 #   GigE camera → U3V:   impossible (the collision) — by design v1
 #   U3V camera → U3V:    --no-default-features --features back-u3v,front-u3v
+#   no camera → GigE:    --no-default-features --features back-null,front-gige
+#   no camera → U3V:     --no-default-features --features back-null,front-u3v
 default = ["back-gige", "front-gige"]
 back-gige = ["dep:vgige-back-gige"]
+back-null = ["dep:vgige-back-null"]
 back-u3v = ["dep:vgige-back-u3v"]
 front-gige = ["dep:vgige-front-gige"]
 front-u3v = ["dep:vgige-front-u3v"]
@@ -24,6 +27,7 @@ front-u3v = ["dep:vgige-front-u3v"]
 [dependencies]
 vgige-core = { path = "../vgige-core" }
 vgige-back-gige = { path = "../vgige-back-gige", optional = true }
+vgige-back-null = { path = "../vgige-back-null", optional = true }
 vgige-back-u3v = { path = "../vgige-back-u3v", optional = true }
 vgige-front-gige = { path = "../vgige-front-gige", optional = true }
 vgige-front-u3v = { path = "../vgige-front-u3v", optional = true }

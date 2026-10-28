@@ -32,7 +32,15 @@ pub fn stream_id(index: u32) -> String {
 /// Preferred size of one payload transfer (§5.2.1.3 "equal sized
 /// blocks"). Well inside every USB limit (WinUSB RAW_IO and usbfs alike)
 /// and a 1 KB multiple.
-const PAYLOAD_TRANSFER: u64 = 1 << 20;
+/// Preferred size of one payload transfer (§5.2.1.3 "equal sized
+/// blocks"). A 1 KiB multiple and well inside every USB limit — EXCEPT
+/// the one found the hard way (vgige bring-up 2026-10-27): a 1 MiB
+/// piece makes WinUSB/xHCI halt the bulk-IN endpoint on the very first
+/// piece (the device sees EPIPE after the leader); 512 KiB pieces
+/// stream indefinitely (500/500 frames verified). The precise
+/// driver-level mechanism is an open question (Q39); 512 KiB is the
+/// empirical safe value.
+const PAYLOAD_TRANSFER: u64 = 1 << 19;
 
 /// SIRM snapshot of one stream channel, taken at `DevOpenDataStream`.
 #[derive(Debug, Clone)]
@@ -256,6 +264,7 @@ impl U3vDataStream {
             .get(channel_index as usize)
             .cloned()
             .ok_or(GentlError::InvalidId)?; // channel without an endpoint
+
         let sirm_info = {
             let c = device
                 .client
@@ -314,6 +323,12 @@ impl U3vDataStream {
         // on the libusb backend — usbfs has no such policy and the UQ16
         // accumulation layer is OS-independent.
         self.pipe.set_raw_io()?;
+
+        // Backend pipe policy on the stream pipe: RAW_IO on Windows
+        // (bypass WinUSB queuing gaps, UQ16); the receiver honors the
+        // MPS-aligned-request contract via `usbio::align_request`. No-op
+        // on the libusb backend — usbfs has no such policy and the UQ16
+        // accumulation layer is OS-independent.
         let pipe = self.pipe.clone();
         let sink = self.core.clone();
         let stop = self.stop_receiver.clone();
@@ -343,6 +358,7 @@ impl U3vDataStream {
     /// forever on a dead stream (audit C16).
     pub fn on_receiver_fatal(self: &Arc<Self>) {
         self.core.abort_engine();
+        self.pipe.cancel_pending_read();
         if let Ok(events) = self.events.lock() {
             for ev in events.values() {
                 ev.queue.kill_one();
@@ -359,6 +375,9 @@ impl U3vDataStream {
         if let Some(h) = self.receiver.lock().expect("receiver lock").take() {
             let _ = h.join();
         }
+        // The receiver may have left a timed-out read outstanding; drop it
+        // so a later DSStartAcquisition starts from a clean pipe.
+        self.pipe.cancel_pending_read();
         *self.geometry.lock().expect("geometry lock") = None;
         if let Some(device) = self.parent.upgrade() {
             if device.access != DeviceAccess::Monitor {
@@ -821,8 +840,8 @@ mod tests {
         assert_eq!(g.final2, 0);
 
         let g = plan_geometry(3 << 20, 52, 32, 1);
-        assert_eq!(g.transfer_size, 1 << 20);
-        assert_eq!(g.transfer_count, 3);
+        assert_eq!(g.transfer_size, 1 << 19); // the empirical cap (Q39)
+        assert_eq!(g.transfer_count, 6);
         assert_eq!(g.final1, 0);
 
         // Alignment 4: every programmed value is a multiple of 4.

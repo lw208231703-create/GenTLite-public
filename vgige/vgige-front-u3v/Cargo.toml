@@ -12,3 +12,8 @@ vgige-core = { path = "../vgige-core" }
 # (packets/descriptors went pub in gentl-u3v for exactly this — Step 3).
 gentl-u3v = { path = "../../crates/gentl-u3v" }
 gentl-core = { path = "../../crates/gentl-core" }
+
+[target.'cfg(unix)'.dependencies]
+# mount(2) for the FunctionFS instance (see gadget::mount_functionfs: the
+# syscall, not mount(8) — util-linux rewrites relative sources).
+libc = "0.2"

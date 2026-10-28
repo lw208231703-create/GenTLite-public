@@ -151,6 +151,14 @@ impl OpenedDevice {
     }
 }
 
+/// Open every interface path of the instance. libusb opens the whole
+/// device in one handle (interfaces are claimed per-interface inside
+/// [`crate::usbio::InterfaceSet::collect`]), so this is a single-element
+/// vec kept for API symmetry with the Windows backend (per-MI handles).
+pub fn open_device_all(instance_id: &str) -> Vec<OpenedDevice> {
+    open_device(instance_id).into_iter().collect()
+}
+
 /// Open the device identified by the `<bus>:<address>` instance ID.
 pub fn open_device(instance_id: &str) -> GentlResult<OpenedDevice> {
     let (bus, addr) = parse_bus_addr(instance_id).ok_or(GentlError::InvalidId)?;

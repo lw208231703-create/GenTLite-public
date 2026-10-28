@@ -164,9 +164,17 @@ fn main() {
     std::fs::write("u3v_camera_dump.xml", &xml).ok();
 
     // Resolve registers from the XML (U3V control channel is little-endian).
-    let acq_addr = resolve_addr(&xml, "AcquisitionStart_Reg", 0).expect("AcquisitionStart reg in XML");
-    let acq_stop_addr = resolve_addr(&xml, "AcquisitionStop_Reg", 0).expect("AcquisitionStop reg in XML");
-    let payload_addr = resolve_addr(&xml, "PayloadSize_Reg", 0).expect("PayloadSize reg in XML");
+    // Both GenApi conventions are accepted: `AcquisitionStart_Reg` (the
+    // `<Command>`'s IntReg named with a _Reg suffix) and `AcquisitionStartReg`.
+    let acq_addr = resolve_addr(&xml, "AcquisitionStart_Reg", 0)
+        .or_else(|| resolve_addr(&xml, "AcquisitionStartReg", 0))
+        .expect("AcquisitionStart reg in XML");
+    let acq_stop_addr = resolve_addr(&xml, "AcquisitionStop_Reg", 0)
+        .or_else(|| resolve_addr(&xml, "AcquisitionStopReg", 0))
+        .expect("AcquisitionStop reg in XML");
+    let payload_addr = resolve_addr(&xml, "PayloadSize_Reg", 0)
+        .or_else(|| resolve_addr(&xml, "PayloadSizeReg", 0))
+        .expect("PayloadSize reg in XML");
     let mut ps = [0u8; 8];
     assert_eq!(read_port(port, payload_addr, &mut ps), GC_ERR_SUCCESS);
     let payload_size = u64::from_le_bytes(ps) as usize;

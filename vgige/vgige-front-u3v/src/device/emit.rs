@@ -36,12 +36,25 @@ pub(crate) fn emitter_loop(rx: Receiver<CanonicalFrame>, inner: &Arc<DeviceInner
             None => match rx.recv_timeout(POLL) {
                 Ok(f) => f,
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                // All senders dropped (relay closed = stream disabled):
+                // the channel outlives them — the next enable clones a
+                // fresh sender into it — so wait instead of dying.
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    std::thread::sleep(POLL);
+                    continue;
+                }
             },
         };
         if let Err(e) = emit_block(&*inner.stream_in, &inner.regs, block_id, &frame) {
             eprintln!("vgige: u3v stream emit failed: {e}");
-            break;
+            // Mid-block writes cannot be retried safely (a partial piece
+            // plus a re-sent leader desyncs the host) — abort the stream
+            // instead: clear Stream Enable so the next host enable is a
+            // clean 0→1 transition. The emitter itself never exits: the
+            // channel outlives the relay's sessions, so after the abort
+            // it waits for the next enable instead of dying silently
+            // (a dead emitter needs a daemon restart, observed 2026-10-27).
+            inner.regs.abort_stream();
         }
         block_id = block_id.wrapping_add(1);
     }

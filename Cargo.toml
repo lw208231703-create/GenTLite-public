@@ -9,6 +9,7 @@ members = [
     "crates/gentl-packager",
     "vgige/vgige-core",
     "vgige/vgige-back-gige",
+    "vgige/vgige-back-null",
     "vgige/vgige-back-u3v",
     "vgige/vgige-front-gige",
     "vgige/vgige-front-u3v",

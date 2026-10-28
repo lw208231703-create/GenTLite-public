@@ -29,7 +29,9 @@ pub use winusb::InterfaceSet;
 pub use libusb::InterfaceSet;
 
 /// Pipe poll cadence for the receiver stop flags.
-pub(crate) const POLL: Duration = Duration::from_millis(100);
+/// Stream receiver poll cadence: one read_bulk may block this long before
+/// the stop flag is re-checked (a stop/join reacts within one STREAM_POLL).
+pub(crate) const STREAM_POLL: Duration = Duration::from_millis(100);
 /// Grace period waiting for the in-flight block's trailer after a
 /// graceful stop request (U3V has no block-cancel; §5.4.1.2 abort is the
 /// kill path).
@@ -71,6 +73,12 @@ pub trait UsbPipe: Send + Sync {
     /// request-queuing bypass policy; the sync transfer already is the
     /// unqueued path, and the UQ16 accumulation layer (necessary and
     /// sufficient for correct framing) is OS-independent.
+    /// Teardown: cancel any read left outstanding by a timed-out poll
+    /// (Windows keeps those transfers alive; without a cancel a stream
+    /// restart would resume a stale wait). Default no-op where the
+    /// backend has no persistent transfer.
+    fn cancel_pending_read(&self) {}
+
     fn set_raw_io(&self) -> GentlResult<()>;
 
     /// Endpoint wMaxPacketSize — feeds the aligned-request contract.
@@ -127,7 +135,7 @@ pub(crate) fn poll_read(
                 }
             }
         }
-        match pipe.read_bulk(buf, POLL) {
+        match pipe.read_bulk(buf, STREAM_POLL) {
             Ok(n) => return Ok(n),
             Err(GentlError::Timeout) => {
                 if Instant::now() > deadline {
