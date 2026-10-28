@@ -24,9 +24,15 @@ fn install_impl() {
     }
 
     unsafe {
+        // `sighandler_t` is `size_t`, so the handler has to cross the FFI
+        // boundary as an address. Go through `*const ()` instead of casting
+        // the function item straight to an integer: the direct cast is what
+        // `function_casts_as_integer` warns about, and it also loses the
+        // fact that this is a code pointer.
+        let handler = on_signal as *const () as libc::sighandler_t;
         // SIGINT (Ctrl+C) and SIGTERM (service managers / docker stop).
-        libc::signal(libc::SIGINT, on_signal as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, on_signal as libc::sighandler_t);
+        libc::signal(libc::SIGINT, handler);
+        libc::signal(libc::SIGTERM, handler);
     }
 }
 
