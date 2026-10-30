@@ -320,7 +320,7 @@ fn require_initialized() -> Result<(), GCError> {
 
 // Library functions -----------------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCGetLastError(
     pi_error_code: *mut GCError,
     s_err_text: *mut c_char,
@@ -351,7 +351,7 @@ pub extern "C" fn GCGetLastError(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCInitLib() -> GCError {
     // GenTL 1.6 §6.3.1.4: double GCInitLib without an intervening
     // GCCloseLib returns GC_ERR_RESOURCE_IN_USE (no reference counting).
@@ -361,7 +361,7 @@ pub extern "C" fn GCInitLib() -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCCloseLib() -> GCError {
     LIB_INITIALIZED.store(false, Ordering::SeqCst);
     GC_ERR_SUCCESS
@@ -369,7 +369,7 @@ pub extern "C" fn GCCloseLib() -> GCError {
 
 // System (TL) functions -------------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLOpen(ph_tl: *mut TLHandle) -> GCError {
     if ph_tl.is_null() {
         return fail(GentlError::InvalidParameter("phTL"));
@@ -394,7 +394,7 @@ pub extern "C" fn TLOpen(ph_tl: *mut TLHandle) -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLClose(h_tl: TLHandle) -> GCError {
     let system = module!(h_tl, TlSystem);
     TL_OPENED.store(false, Ordering::SeqCst);
@@ -403,7 +403,7 @@ pub extern "C" fn TLClose(h_tl: TLHandle) -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLGetInfo(
     h_tl: TLHandle,
     i_info_cmd: TlInfoCmd,
@@ -444,7 +444,7 @@ pub extern "C" fn TLGetInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLGetNumInterfaces(h_tl: TLHandle, pi_num_ifaces: *mut u32) -> GCError {
     if pi_num_ifaces.is_null() {
         return fail(GentlError::InvalidParameter("piNumIfaces"));
@@ -458,7 +458,7 @@ pub extern "C" fn TLGetNumInterfaces(h_tl: TLHandle, pi_num_ifaces: *mut u32) ->
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLGetInterfaceID(
     h_tl: TLHandle,
     i_index: u32,
@@ -480,7 +480,7 @@ pub extern "C" fn TLGetInterfaceID(
     unsafe { write_string(s_id, pi_size, GevInterface::ID) }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLGetInterfaceInfo(
     h_tl: TLHandle,
     s_iface_id: *const c_char,
@@ -516,7 +516,7 @@ pub extern "C" fn TLGetInterfaceInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLOpenInterface(
     h_tl: TLHandle,
     s_iface_id: *const c_char,
@@ -555,7 +555,7 @@ pub extern "C" fn TLOpenInterface(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLUpdateInterfaceList(
     h_tl: TLHandle,
     pb_changed: *mut u8,
@@ -594,7 +594,7 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, GCEr
     m.lock().map_err(|e| fail(GentlError::Io(e.to_string())))
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFClose(h_iface: IFHandle) -> GCError {
     let iface = module!(h_iface, GevInterface);
     if let Some(tl) = iface.parent.upgrade() {
@@ -607,7 +607,7 @@ pub extern "C" fn IFClose(h_iface: IFHandle) -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFGetInfo(
     h_iface: IFHandle,
     i_info_cmd: InterfaceInfoCmd,
@@ -646,7 +646,7 @@ fn update_timeout(i_timeout: u64) -> Duration {
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFUpdateDeviceList(
     h_iface: IFHandle,
     pb_changed: *mut u8,
@@ -688,7 +688,7 @@ pub extern "C" fn IFUpdateDeviceList(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFGetNumDevices(h_iface: IFHandle, pi_num_devices: *mut u32) -> GCError {
     if pi_num_devices.is_null() {
         return fail(GentlError::InvalidParameter("piNumDevices"));
@@ -705,7 +705,7 @@ pub extern "C" fn IFGetNumDevices(h_iface: IFHandle, pi_num_devices: *mut u32) -
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFGetDeviceID(
     h_iface: IFHandle,
     i_index: u32,
@@ -737,7 +737,7 @@ fn find_device(iface: &GevInterface, id: &str) -> Result<Option<DeviceEntry>, GC
     }))
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFGetDeviceInfo(
     h_iface: IFHandle,
     s_device_id: *const c_char,
@@ -800,7 +800,7 @@ pub extern "C" fn IFGetDeviceInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFOpenDevice(
     h_iface: IFHandle,
     s_device_id: *const c_char,
@@ -935,7 +935,7 @@ fn device_info(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevGetPort(h_device: DevHandle, ph_remote_device: *mut PortHandle) -> GCError {
     if ph_remote_device.is_null() {
         return fail(GentlError::InvalidParameter("phRemoteDevice"));
@@ -952,7 +952,7 @@ pub extern "C" fn DevGetPort(h_device: DevHandle, ph_remote_device: *mut PortHan
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevGetInfo(
     h_device: DevHandle,
     i_info_cmd: DeviceInfoCmd,
@@ -971,7 +971,7 @@ pub extern "C" fn DevGetInfo(
     device_info(&device, i_info_cmd, pi_type, p_buffer, pi_size)
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevClose(h_device: DevHandle) -> GCError {
     let device = module!(h_device, GevDevice);
     device.close();
@@ -1016,7 +1016,7 @@ fn aborted() -> GCError {
 
 // Data stream functions (GenTL 1.6 §6.3.4.5, §6.3.5) -------------------------
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevGetNumDataStreams(
     h_device: DevHandle,
     pi_num_data_streams: *mut u32,
@@ -1042,7 +1042,7 @@ pub extern "C" fn DevGetNumDataStreams(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevGetDataStreamID(
     h_device: DevHandle,
     i_index: u32,
@@ -1063,7 +1063,7 @@ pub extern "C" fn DevGetDataStreamID(
     unsafe { write_string(s_data_stream_id, pi_size, STREAM_ID) }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevOpenDataStream(
     h_device: DevHandle,
     s_data_stream_id: *const c_char,
@@ -1101,7 +1101,7 @@ pub extern "C" fn DevOpenDataStream(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSClose(h_ds: DSHandle) -> GCError {
     let ds = module!(h_ds, GevDataStream);
     ds.close();
@@ -1115,7 +1115,7 @@ pub extern "C" fn DSClose(h_ds: DSHandle) -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSGetInfo(
     h_ds: DSHandle,
     i_info_cmd: StreamInfoCmd,
@@ -1190,7 +1190,7 @@ pub extern "C" fn DSGetInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSAnnounceBuffer(
     h_ds: DSHandle,
     p_buffer: *mut core::ffi::c_void,
@@ -1223,7 +1223,7 @@ pub extern "C" fn DSAnnounceBuffer(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSAllocAndAnnounceBuffer(
     h_ds: DSHandle,
     i_size: usize,
@@ -1252,7 +1252,7 @@ pub extern "C" fn DSAllocAndAnnounceBuffer(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSQueueBuffer(h_ds: DSHandle, h_buffer: BufferHandle) -> GCError {
     let ds = match ds_from(h_ds) {
         Ok(d) => d,
@@ -1268,7 +1268,7 @@ pub extern "C" fn DSQueueBuffer(h_ds: DSHandle, h_buffer: BufferHandle) -> GCErr
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSRevokeBuffer(
     h_ds: DSHandle,
     h_buffer: BufferHandle,
@@ -1307,7 +1307,7 @@ pub extern "C" fn DSRevokeBuffer(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSFlushQueue(h_ds: DSHandle, i_operation: AcqQueueType) -> GCError {
     let ds = match ds_from(h_ds) {
         Ok(d) => d,
@@ -1327,7 +1327,7 @@ pub extern "C" fn DSFlushQueue(h_ds: DSHandle, i_operation: AcqQueueType) -> GCE
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSStartAcquisition(
     h_ds: DSHandle,
     i_start_flags: AcqStartFlags,
@@ -1351,7 +1351,7 @@ pub extern "C" fn DSStartAcquisition(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSStopAcquisition(h_ds: DSHandle, i_stop_flags: AcqStopFlags) -> GCError {
     let kill = match i_stop_flags {
         0 => false,
@@ -1369,7 +1369,7 @@ pub extern "C" fn DSStopAcquisition(h_ds: DSHandle, i_stop_flags: AcqStopFlags) 
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSGetBufferID(
     h_ds: DSHandle,
     i_index: u32,
@@ -1406,7 +1406,7 @@ struct BufferSnapshot {
     block_id: u64,
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSGetBufferInfo(
     h_ds: DSHandle,
     h_buffer: BufferHandle,
@@ -1612,7 +1612,7 @@ pub extern "C" fn DSGetBufferInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DSGetParentDev(h_ds: DSHandle, ph_device: *mut DevHandle) -> GCError {
     if ph_device.is_null() {
         return fail(GentlError::InvalidParameter("phDevice"));
@@ -1628,7 +1628,7 @@ pub extern "C" fn DSGetParentDev(h_ds: DSHandle, ph_device: *mut DevHandle) -> G
 
 // Signaling functions (GenTL 1.6 §6.3.7) --------------------------------------
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCRegisterEvent(
     h_event_src: EventSrcHandle,
     i_event_id: EventType,
@@ -1659,7 +1659,7 @@ pub extern "C" fn GCRegisterEvent(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCUnregisterEvent(h_event_src: EventSrcHandle, i_event_id: EventType) -> GCError {
     let ds = match unsafe { from_handle::<GevDataStream>(h_event_src) } {
         Ok(d) => d,
@@ -1674,7 +1674,7 @@ pub extern "C" fn GCUnregisterEvent(h_event_src: EventSrcHandle, i_event_id: Eve
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn EventGetData(
     h_event: EventHandle,
     p_buffer: *mut core::ffi::c_void,
@@ -1745,7 +1745,7 @@ pub extern "C" fn EventGetData(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn EventGetInfo(
     h_event: EventHandle,
     i_info_cmd: EventInfoCmd,
@@ -1786,7 +1786,7 @@ pub extern "C" fn EventGetInfo(
     }
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
     let ev = module!(h_event, EventModule);
     // Flushing the New Buffer event discards the output buffer queue, too.
@@ -1800,7 +1800,7 @@ pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn EventKill(h_event: EventHandle) -> GCError {
     let ev = module!(h_event, EventModule);
     ev.queue.kill_one();
@@ -1816,7 +1816,7 @@ fn port_device(h_port: PortHandle) -> Result<Arc<GevDevice>, GCError> {
         .ok_or_else(|| fail(GentlError::InvalidHandle))
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCReadPort(
     h_port: PortHandle,
     i_address: u64,
@@ -1845,7 +1845,7 @@ pub extern "C" fn GCReadPort(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCWritePort(
     h_port: PortHandle,
     i_address: u64,
@@ -1873,7 +1873,7 @@ pub extern "C" fn GCWritePort(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCGetPortURL(
     h_port: PortHandle,
     s_url: *mut c_char,
@@ -1910,7 +1910,7 @@ pub extern "C" fn GCGetPortURL(
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCGetPortInfo(
     h_port: PortHandle,
     i_info_cmd: PortInfoCmd,
@@ -1962,7 +1962,7 @@ pub extern "C" fn GCGetPortInfo(
 
 // Parent queries (GenTL v1.4) -------------------------------------------------
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn IFGetParentTL(h_iface: IFHandle, ph_tl: *mut TLHandle) -> GCError {
     if ph_tl.is_null() {
         return fail(GentlError::InvalidParameter("phTL"));
@@ -1976,7 +1976,7 @@ pub extern "C" fn IFGetParentTL(h_iface: IFHandle, ph_tl: *mut TLHandle) -> GCEr
     GC_ERR_SUCCESS
 }
 
-#[no_mangle]
+#[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn DevGetParentIF(h_device: DevHandle, ph_iface: *mut IFHandle) -> GCError {
     if ph_iface.is_null() {
         return fail(GentlError::InvalidParameter("phIface"));
@@ -1994,7 +1994,7 @@ pub extern "C" fn DevGetParentIF(h_device: DevHandle, ph_iface: *mut IFHandle) -
 
 macro_rules! stub {
     ($name:ident($($arg:ident: $ty:ty),* $(,)?)) => {
-        #[no_mangle]
+        #[cfg_attr(feature = "cti-exports", no_mangle)]
         pub extern "C" fn $name($($arg: $ty),*) -> GCError {
             $(let _ = $arg;)*
             not_implemented(stringify!($name))

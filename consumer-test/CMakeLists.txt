@@ -61,3 +61,35 @@ if(MSVC)
     # Sources are UTF-8 regardless of the system code page.
     target_compile_options(test_genapi PRIVATE /utf-8)
 endif()
+
+set(PYLON_ROOT "" CACHE PATH "Basler pylon SDK root (contains Development/include and Development/lib/x64)")
+if(PYLON_ROOT)
+    add_executable(pylon_grab pylon_grab.cpp)
+    target_include_directories(pylon_grab PRIVATE "${PYLON_ROOT}/Development/include")
+    target_link_directories(pylon_grab PRIVATE "${PYLON_ROOT}/Development/lib/x64")
+    target_link_libraries(pylon_grab PRIVATE PylonBase_v12 PylonUtility_v12)
+    target_compile_features(pylon_grab PRIVATE cxx_std_17)
+    set_target_properties(pylon_grab PROPERTIES
+        CXX_EXTENSIONS OFF
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    if(MSVC)
+        target_compile_definitions(pylon_grab PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(pylon_grab PRIVATE /utf-8)
+    endif()
+endif()
+
+set(MVS_ROOT "" CACHE PATH "Hikrobot MVS SDK root (contains Development/Includes and Development/Libraries)")
+if(MVS_ROOT)
+    add_executable(mvs_grab mvs_grab.cpp)
+    target_include_directories(mvs_grab PRIVATE "${MVS_ROOT}/Development/Includes")
+    target_link_directories(mvs_grab PRIVATE "${MVS_ROOT}/Development/Libraries/win64")
+    target_link_libraries(mvs_grab PRIVATE MvCameraControl)
+    target_compile_features(mvs_grab PRIVATE cxx_std_17)
+    set_target_properties(mvs_grab PROPERTIES
+        CXX_EXTENSIONS OFF
+        MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+    if(MSVC)
+        target_compile_definitions(mvs_grab PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
+        target_compile_options(mvs_grab PRIVATE /utf-8)
+    endif()
+endif()

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, Weak};
 use gentl_core::{Module, ModuleType};
 
 use crate::control::{Bootstrap, GenCpClient};
+use crate::device_events::DeviceEvents;
 use crate::stream::{EventModule, U3vBuffer, U3vDataStream};
 use crate::types::{DeviceIdentity, FoundDevice};
 use crate::usbio::InterfaceSet;
@@ -93,11 +94,13 @@ pub struct U3vDevice {
     pub bootstrap: Bootstrap,
     /// Stream IDs with a live `DS_HANDLE`.
     pub opened_streams: Mutex<HashSet<String>>,
+    pub events: DeviceEvents,
     pub parent: Weak<U3vInterface>,
 }
 
 impl U3vDevice {
     pub fn close(&self) {
+        self.events.close(self);
         // U3V has no channel-release register to write back; closing the
         // handles is the whole teardown.
     }

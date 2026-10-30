@@ -20,16 +20,18 @@
 
 | 宿主 | 发现 | 打开 | 采图 | 备注 |
 |---|---|---|---|---|
+| 官方 GenApi C++ consumer | ✅ | ✅ | ✅（参数读写） | 39 节点；ExposureTimeAbs 写读通过 |
 | ld | ✅ | ⬜ | ⬜ | 发现已通（加载我方 cti）；打开失败→Port 节点已修，待复测 |
-| pylon | ⬜ | ⬜ | ⬜ | |
+| pylon | ❌ | ⬜ | ⬜ | CInstantCamera 未发现设备；与 Device Info CS/第三方发现限制一致 |
+| MVS | ❌ | ⬜ | ⬜ | MV_CC_EnumDevices=0；与 Device Info CS/第三方发现限制一致 |
 | Aravis | ⬜ | ⬜ | ⬜ | |
 
 ## 维度 3：第三方 producer + 我们的虚拟相机（最严格，多半卡在 Device Info CS）
 
 | producer | 发现 | 打开 | 备注 |
 |---|---|---|---|
-| pylon 自带 | ⬜ | ⬜ | 若拒认→A1 内核补丁立项证据 |
-| MVS 自带 | ⬜ | ⬜ | |
+| pylon 自带 | ❌ | ⬜ | 未发现设备；A1 的已知范围外项 |
+| MVS 自带 | ❌ | ⬜ | 未发现设备；A1 的已知范围外项 |
 | Aravis 自带 | ⬜ | ⬜ | arv-tool-0.8 |
 
 ## 测试规程（统一步骤，保证可复现）

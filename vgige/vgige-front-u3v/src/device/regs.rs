@@ -49,6 +49,8 @@ pub struct RegisterFile {
     config: DeviceConfig,
     back: SharedBack,
     sirm_control: Mutex<u32>,
+    eirm_control: Mutex<u32>,
+    event_in: Mutex<Option<Arc<dyn super::DeviceTransfers>>>,
     watcher: Mutex<Option<Box<dyn Fn(bool) + Send>>>,
     general_slots: Mutex<[u32; CUSTOM_SLOTS]>,
     ai_result: AtomicU32,
@@ -66,6 +68,8 @@ impl RegisterFile {
             config,
             back,
             sirm_control: Mutex::new(0),
+            eirm_control: Mutex::new(0),
+            event_in: Mutex::new(None),
             watcher: Mutex::new(None),
             general_slots: Mutex::new([0; CUSTOM_SLOTS]),
             ai_result: AtomicU32::new(0),
@@ -76,6 +80,10 @@ impl RegisterFile {
 
     pub(crate) fn config_ref(&self) -> &DeviceConfig {
         &self.config
+    }
+
+    pub fn set_event_in(&self, stream: Arc<dyn super::DeviceTransfers>) {
+        *self.event_in.lock().expect("event-in lock") = Some(stream);
     }
 
     /// Watch Stream Enable transitions (§5.4.1.2): fired from the
@@ -149,6 +157,13 @@ impl RegisterFile {
     /// One register/block read; Err is a GenCP status code (§4.3.2.1).
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), u16> {
         let len = buf.len() as u64;
+        if addr == ACQ_BASE + 0x08 && (len == 4 || len == 8) {
+            if let Ok(size) = self.back.lock().map_err(|_| packets::GENCP_ERROR)?.payload_size() {
+                let bytes = size.to_le_bytes();
+                buf.copy_from_slice(&bytes[..len as usize]);
+                return Ok(());
+            }
+        }
         // Custom window first (it overlaps no device region, but the
         // dispatch is clearest ordered: device → window → camera).
         if addr >= u64::from(CUSTOM_BASE)
@@ -218,6 +233,45 @@ impl RegisterFile {
                     if let Some(w) = &*self.watcher.lock().expect("watcher lock") {
                         w(enabled);
                     }
+                }
+            }
+            let ei_lo = crate::EIRM_BASE + packets::eirm::EI_CONTROL;
+            if addr <= ei_lo && addr + len > ei_lo {
+                let v = {
+                    let m = r.mem.lock().expect("region lock");
+                    let off = (ei_lo - r.base) as usize;
+                    u32::from_le_bytes(m[off..off + 4].try_into().expect("u32"))
+                };
+                *self.eirm_control.lock().expect("eirm control lock") = v;
+            }
+            let test_lo = crate::EIRM_BASE + packets::eirm::EVENT_TEST_CONTROL;
+            if addr <= test_lo && addr + len > test_lo {
+                let v = {
+                    let m = r.mem.lock().expect("region lock");
+                    let off = (test_lo - r.base) as usize;
+                    u32::from_le_bytes(m[off..off + 4].try_into().expect("u32"))
+                };
+                if v != 0 {
+                    let enabled = *self.eirm_control.lock().expect("eirm control lock") & 1 != 0;
+                    if enabled {
+                        let stream = self.event_in.lock().expect("event-in lock").clone();
+                        if let Some(stream) = stream {
+                            let timestamp = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64;
+                            stream
+                                .send(&packets::encode_event(&packets::EventPacket {
+                                    event_id: 0x4FFF,
+                                    timestamp,
+                                    data: Vec::new(),
+                                }))
+                                .map_err(|_| packets::GENCP_ERROR)?;
+                        }
+                    }
+                    let mut m = r.mem.lock().expect("region lock");
+                    let off = (test_lo - r.base) as usize;
+                    m[off..off + 4].copy_from_slice(&0u32.to_le_bytes());
                 }
             }
             return Ok(());
@@ -322,12 +376,14 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     // SBRM (U3V Table 4-7): one streaming channel, 1 KiB transfers.
     let mut sbrm = vec![0u8; 0x44];
     sbrm[0..4].copy_from_slice(&0x0001_0002u32.to_le_bytes()); // U3V 1.2
-    sbrm[0x04..0x0C].copy_from_slice(&(packets::sbrm::CAP_SIRM as u64).to_le_bytes());
+    sbrm[0x04..0x0C].copy_from_slice(&((packets::sbrm::CAP_SIRM | packets::sbrm::CAP_EIRM) as u64).to_le_bytes());
     sbrm[0x14..0x18].copy_from_slice(&crate::MAX_TRANSFER.to_le_bytes());
     sbrm[0x18..0x1C].copy_from_slice(&crate::MAX_TRANSFER.to_le_bytes());
     sbrm[0x1C..0x20].copy_from_slice(&1u32.to_le_bytes()); // channels
     sbrm[0x20..0x28].copy_from_slice(&SIRM_BASE.to_le_bytes());
     sbrm[0x28..0x2C].copy_from_slice(&0x48u32.to_le_bytes());
+    sbrm[0x2C..0x34].copy_from_slice(&crate::EIRM_BASE.to_le_bytes());
+    sbrm[0x34..0x38].copy_from_slice(&0x0Cu32.to_le_bytes());
 
     // SIRM (Table 5-1/5-2): alignment 1 (SI_INFO=0), standard mode;
     // RW transfer sizes zeroed (host programs at Stream Enable).
@@ -336,13 +392,16 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     sirm[0x10..0x14].copy_from_slice(&(packets::IMAGE_LEADER_LEN as u32).to_le_bytes());
     sirm[0x14..0x18].copy_from_slice(&(packets::IMAGE_TRAILER_LEN as u32).to_le_bytes());
 
+    let mut eirm = vec![0u8; 0x0C];
+    eirm[0x04..0x08].copy_from_slice(&4096u32.to_le_bytes());
+
     // Demo acquisition block (SFNC level): AcquisitionStart/Stop pokes
     // plus the frame PayloadSize the host sizes its buffers against.
     // The U3V stream itself is gated by SIRM Stream Enable (§5.4.1.2);
     // these are served locally so a camera-less (null-back) device still
     // completes a standard GenApi acquisition sequence. Real backends
     // advertise their own acquisition nodes, forwarded 1:1.
-    let mut acq = vec![0u8; 0x10];
+    let mut acq = vec![0u8; 0x14];
     acq[0x08..0x10].copy_from_slice(&config.payload_size.to_le_bytes());
 
     // Regions MUST be listed in ascending base order: the lookup takes
@@ -374,6 +433,11 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
             writable: true,
         },
         Region {
+            base: crate::EIRM_BASE,
+            mem: Mutex::new(eirm),
+            writable: true,
+        },
+        Region {
             base: ACQ_BASE,
             mem: Mutex::new(acq),
             writable: true,
@@ -385,7 +449,7 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
 mod tests {
     use super::*;
     use crate::synthesize_guid;
-    use vgige_core::BackIdentity;
+    use vgige_core::{BackIdentity, CameraBack};
 
     struct NullBack;
     impl vgige_core::CameraBack for NullBack {
@@ -503,5 +567,34 @@ mod tests {
         assert_eq!(read_str(0x0044), "Modl");
         assert_eq!(read_str(0x00C4), "9.9.9");
         assert_eq!(read_str(0x0144), "SER-77");
+    }
+
+    #[test]
+    fn payload_size_tracks_backend_roi_for_32_and_64_bit_reads() {
+        let back = std::sync::Arc::new(std::sync::Mutex::new(vgige_back_null::NullBack::new()));
+        let cfg = DeviceConfig::from_parts(
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
+            b"<x/>",
+            1280 * 1024,
+            synthesize_guid("s"),
+        );
+        let rf = RegisterFile::new(cfg, back.clone());
+        back.lock().unwrap().write_reg(vgige_back_null::REG_WIDTH, 640).unwrap();
+        back.lock().unwrap().write_reg(vgige_back_null::REG_HEIGHT, 512).unwrap();
+
+        let mut b32 = [0u8; 4];
+        rf.read(ACQ_BASE + 0x08, &mut b32).unwrap();
+        assert_eq!(u32::from_le_bytes(b32), 640 * 512);
+        let mut b64 = [0u8; 8];
+        rf.read(ACQ_BASE + 0x08, &mut b64).unwrap();
+        assert_eq!(u64::from_le_bytes(b64), 640 * 512);
     }
 }

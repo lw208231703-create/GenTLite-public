@@ -28,6 +28,7 @@ fn start() -> Pair {
     let cmd_q = Arc::new(ByteQueue::default());
     let ack_q = Arc::new(ByteQueue::default());
     let data_q = Arc::new(ByteQueue::default());
+    let event_q = Arc::new(ByteQueue::default());
 
     let back = Arc::new(Mutex::new(StubBack::new()));
     let raw = back.lock().unwrap().xml();
@@ -45,11 +46,13 @@ fn start() -> Pair {
         Arc::new(DevCommands(Arc::clone(&cmd_q))),
         Arc::new(DevTransfers(Arc::clone(&ack_q), MPS as u16)),
         Arc::new(DevTransfers(Arc::clone(&data_q), MPS as u16)),
+        Arc::new(DevTransfers(Arc::clone(&event_q), MPS as u16)),
     );
-    let client = U3vCamera::from_pipes(
+    let client = U3vCamera::from_pipes_with_events(
         Arc::new(ClientOut(cmd_q)),
         Arc::new(ClientIn(ack_q)),
         vec![Arc::new(ClientIn(data_q))],
+        Some(Arc::new(ClientIn(event_q))),
     )
     .expect("host client bootstrap over the device");
     Pair { device, client, back }
@@ -171,4 +174,18 @@ fn stream_blocks_roundtrip_byte_exact() {
         p.client.read_reg(u64::from(CUSTOM_BASE) + 12).unwrap(),
         2
     );
+}
+
+#[test]
+fn eirm_test_event_reaches_host() {
+    let p = start();
+    let events = p.client.start_events().expect("start DEI pump");
+    p.client
+        .write_reg(0x0003_1008, 1)
+        .expect("fire Event Test Control");
+    let event = events.next(Duration::from_secs(1)).expect("test event");
+    assert_eq!(event.event_id, 0x4FFF);
+    assert!(event.timestamp > 0);
+    assert!(event.data.is_empty());
+    p.client.stop_events().expect("stop DEI pump");
 }

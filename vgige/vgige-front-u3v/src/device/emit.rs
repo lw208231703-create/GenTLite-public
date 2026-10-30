@@ -20,9 +20,10 @@ use super::{DeviceInner, StreamError, POLL};
 /// arriving while the stream is off are dropped (the device advertises
 /// no buffer model in v1 — same simplification class as the simulator,
 /// Q15).
-pub(crate) fn emitter_loop(rx: Receiver<CanonicalFrame>, inner: &Arc<DeviceInner>) {
+pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<DeviceInner>) {
     let mut block_id = 1u64; // R-77st-class per-channel sequence from 1
-    let mut pending: Option<CanonicalFrame> = None;
+    let mut generation = 0u64;
+    let mut pending: Option<super::SessionFrame> = None;
     while !inner.stop.load(std::sync::atomic::Ordering::Relaxed) {
         if !inner.regs.stream_enabled() {
             // Not streaming: drain silently and wait.
@@ -45,7 +46,15 @@ pub(crate) fn emitter_loop(rx: Receiver<CanonicalFrame>, inner: &Arc<DeviceInner
                 }
             },
         };
-        if let Err(e) = emit_block(&*inner.stream_in, &inner.regs, block_id, &frame) {
+        if frame.generation < generation {
+            continue;
+        }
+        if frame.generation > generation {
+            generation = frame.generation;
+            pending = None;
+            block_id = 1;
+        }
+        if let Err(e) = emit_block(&*inner.stream_in, &inner.regs, block_id, &frame.frame) {
             eprintln!("vgige: u3v stream emit failed: {e}");
             // Mid-block writes cannot be retried safely (a partial piece
             // plus a re-sent leader desyncs the host) — abort the stream
@@ -84,11 +93,14 @@ fn emit_block(
         // padding); the relay's padded-row bytes ride in the payload.
         padding_x: frame.padding_x as u16,
     };
+    if !regs.stream_enabled() {
+        return Err(StreamError::Closed);
+    }
     stream.send(&packets::encode_image_leader(&leader))?;
 
     let payload = &frame.payload;
     let (ts, count, f1, f2) = regs.programmed_geometry();
-    emit_payload(stream, payload, ts, count, f1, f2)?;
+    emit_payload(stream, payload, ts, count, f1, f2, || regs.stream_enabled())?;
 
     let trailer = packets::encode_image_trailer(
         block_id,
@@ -106,11 +118,15 @@ fn emit_payload(
     count: u32,
     f1: u32,
     f2: u32,
+    enabled: impl Fn() -> bool,
 ) -> Result<(), StreamError> {
     if ts == 0 && count == 0 && f1 == 0 && f2 == 0 {
         // Host enabled without programming: emit the payload as one
         // piece (QoI — a standards-strict device would reject at Stream
         // Enable with SI_REGISTERS_INCONSISTENT; Q39).
+        if !enabled() {
+            return Err(StreamError::Closed);
+        }
         return stream.send(payload);
     }
     let planned: Vec<u32> = (0..count)
@@ -120,6 +136,9 @@ fn emit_payload(
         .collect();
     let mut offset = 0usize;
     for size in planned {
+        if !enabled() {
+            return Err(StreamError::Closed);
+        }
         let n = size as usize;
         let end = (offset + n).min(payload.len());
         let mut piece = Vec::with_capacity(n);
@@ -157,7 +176,7 @@ mod tests {
     #[test]
     fn short_frame_still_emits_every_programmed_piece() {
         let stream = RecordingTransfers::default();
-        emit_payload(&stream, &[1, 2], 4, 2, 3, 0).unwrap();
+        emit_payload(&stream, &[1, 2], 4, 2, 3, 0, || true).unwrap();
         let pieces = stream.pieces.lock().unwrap();
         assert_eq!(pieces.as_slice(), &[
             vec![1, 2, 0, 0],

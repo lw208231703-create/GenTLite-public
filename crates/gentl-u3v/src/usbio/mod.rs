@@ -108,6 +108,18 @@ pub(crate) enum ReadAbort {
     Io(#[allow(dead_code)] String), // detail for the stats/log follow-up
 }
 
+/// Discard stale transfers from a previous acquisition before Stream Enable
+/// is raised again. The stream is disabled at this point, so a short timeout
+/// is enough to drain data already queued by the old session.
+pub(crate) fn drain_stale(pipe: &dyn UsbPipe) {
+    let mut buf = vec![0u8; 64 * 1024];
+    for _ in 0..32 {
+        if pipe.read_bulk(&mut buf, Duration::from_millis(1)).is_err() {
+            break;
+        }
+    }
+}
+
 /// One read with stop-flag polling. `in_block` controls the grace: a
 /// graceful stop lets the in-flight block finish within [`STOP_GRACE`]
 /// while an idle pipe (between blocks) exits immediately. Data starvation

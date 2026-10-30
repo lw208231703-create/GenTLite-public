@@ -3,7 +3,7 @@
 //! tests bind them to in-memory queues and drive the device with the
 //! real host-side client (`gentl_u3v::client::U3vCamera`).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -89,8 +89,9 @@ pub(crate) struct DeviceInner {
     control_in: Arc<dyn DeviceTransfers>,
     pub stream_in: Arc<dyn DeviceTransfers>,
     stop: AtomicBool,
-    session_tx: SyncSender<CanonicalFrame>,
-    session_rx: Mutex<Option<Receiver<CanonicalFrame>>>,
+    session_tx: SyncSender<SessionFrame>,
+    session_rx: Mutex<Option<Receiver<SessionFrame>>>,
+    session_generation: Arc<AtomicU64>,
     server: Mutex<Option<std::thread::JoinHandle<()>>>,
     emitter: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
@@ -106,8 +107,10 @@ impl U3vDevice {
         control_out: Arc<dyn HostCommands>,
         control_in: Arc<dyn DeviceTransfers>,
         stream_in: Arc<dyn DeviceTransfers>,
+        event_in: Arc<dyn DeviceTransfers>,
     ) -> Self {
         let regs = Arc::new(RegisterFile::new(config, back));
+        regs.set_event_in(event_in);
         let (session_tx, session_rx) = sync_channel(4);
         let device = Self {
             inner: Arc::new(DeviceInner {
@@ -117,6 +120,7 @@ impl U3vDevice {
                 stop: AtomicBool::new(false),
                 session_tx,
                 session_rx: Mutex::new(Some(session_rx)),
+                session_generation: Arc::new(AtomicU64::new(0)),
                 server: Mutex::new(None),
                 emitter: Mutex::new(None),
             }),
@@ -154,6 +158,8 @@ impl U3vDevice {
         U3vStreamSession {
             tx: self.inner.session_tx.clone(),
             frames_relayed: Arc::clone(&self.inner.regs.frames),
+            generation: Arc::clone(&self.inner.session_generation),
+            current: 0,
         }
     }
 
@@ -213,19 +219,23 @@ impl Drop for U3vDevice {
     }
 }
 
-/// The emitter's intake: the relay's driver thread calls `send_frame`
-/// for every forwarded frame.
+pub(crate) struct SessionFrame {
+    generation: u64,
+    frame: CanonicalFrame,
+}
+
+/// The emitter's intake: each open gets a new generation, so frames from
+/// an older acquisition can be discarded without draining the new one.
 pub struct U3vStreamSession {
-    tx: SyncSender<CanonicalFrame>,
+    tx: SyncSender<SessionFrame>,
     frames_relayed: Arc<AtomicU32>,
+    generation: Arc<AtomicU64>,
+    current: u64,
 }
 
 impl FrameSession for U3vStreamSession {
     fn open(&mut self, _payload_hint: usize) -> Result<(), String> {
-        // Readiness is the host's Stream Enable plus its programmed
-        // geometry (regs); nothing to bind here — the emitter owns the
-        // endpoint. The hint (GigE virtual-SCPS derived) has no U3V
-        // meaning: piece sizes come from the host's SIRM programming.
+        self.current = self.generation.fetch_add(1, Ordering::Relaxed) + 1;
         Ok(())
     }
 
@@ -234,16 +244,19 @@ impl FrameSession for U3vStreamSession {
         // Bounded queue: a slow/absent U3V host must not backpressure
         // the relay; drop-newest at this boundary (the relay's own ring
         // already absorbed upstream loss accounting).
-        let _ = self.tx.try_send(CanonicalFrame {
-            timestamp: frame.timestamp,
-            pixel_format: frame.pixel_format,
-            width: frame.width,
-            height: frame.height,
-            offset_x: frame.offset_x,
-            offset_y: frame.offset_y,
-            padding_x: frame.padding_x,
-            padding_y: frame.padding_y,
-            payload: frame.payload.clone(),
+        let _ = self.tx.try_send(SessionFrame {
+            generation: self.current,
+            frame: CanonicalFrame {
+                timestamp: frame.timestamp,
+                pixel_format: frame.pixel_format,
+                width: frame.width,
+                height: frame.height,
+                offset_x: frame.offset_x,
+                offset_y: frame.offset_y,
+                padding_x: frame.padding_x,
+                padding_y: frame.padding_y,
+                payload: frame.payload.clone(),
+            },
         });
     }
 

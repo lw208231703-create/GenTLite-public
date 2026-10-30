@@ -48,6 +48,7 @@ pub(crate) const MANIFEST_BASE: u64 = 0x0001_0000;
 pub(crate) const SBRM_BASE: u64 = 0x0001_1000;
 pub(crate) const XML_BASE: u64 = 0x0002_0000;
 pub(crate) const SIRM_BASE: u64 = 0x0003_0000;
+pub(crate) const EIRM_BASE: u64 = 0x0003_1000;
 /// SIRM transfer limit advertised to the host (SBRM 0x14/0x18): bounds
 /// the GenCP chunk envelopes; 1 KiB is the common U3V minimum.
 pub(crate) const MAX_TRANSFER: u32 = 1024;

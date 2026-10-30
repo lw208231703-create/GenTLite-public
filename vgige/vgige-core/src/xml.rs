@@ -109,7 +109,7 @@ fn smart_camera_fragment() -> String {
          \x20     <pFeature>UserCommand</pFeature>\n\
          \x20   </Category>\n",
     );
-    int_feature(&mut x, "VgigeVersion", "vgige Version", "Gateway semantic version (major<<16 | minor<<8 | patch).", "VgigeVersionReg");
+    int_feature(&mut x, "VgigeVersion", "vgige Version", "Gateway semantic version (major&lt;&lt;16 | minor&lt;&lt;8 | patch).", "VgigeVersionReg");
     int_reg(&mut x, "VgigeVersionReg", B, "RO");
     int_feature(&mut x, "AIResult", "AI Result", "Inspection result: 0 = not inspected, 1 = OK, 2 = NG.", "AIResultReg");
     int_reg(&mut x, "AIResultReg", B + 4, "RO");

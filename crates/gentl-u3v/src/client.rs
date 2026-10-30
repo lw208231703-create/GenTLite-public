@@ -113,6 +113,16 @@ impl U3vCamera {
         Self::from_parts_full(control_out, control_in, stream_in, None)
     }
 
+    /// Build a camera with an optional Device Event Interface endpoint.
+    pub fn from_pipes_with_events(
+        control_out: Arc<dyn UsbPipe>,
+        control_in: Arc<dyn UsbPipe>,
+        stream_in: Vec<Arc<dyn UsbPipe>>,
+        event_in: Option<Arc<dyn UsbPipe>>,
+    ) -> GentlResult<Self> {
+        Self::from_parts_full(control_out, control_in, stream_in, event_in)
+    }
+
     fn from_parts_full(
         control_out: Arc<dyn UsbPipe>,
         control_in: Arc<dyn UsbPipe>,
@@ -363,6 +373,7 @@ impl U3vStream {
     /// policy (RAW_IO on Windows, a no-op on usbfs — UQ16).
     pub fn start(&self) -> Result<(), U3vError> {
         self.pipe.set_raw_io().map_err(U3vError::from)?;
+        crate::usbio::drain_stale(&*self.pipe);
         let c = self
             .client
             .lock()

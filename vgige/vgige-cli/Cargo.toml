@@ -6,14 +6,12 @@ license.workspace = true
 edition.workspace = true
 
 [features]
-# The binary links one camera backend AND one front. The one forbidden
-# combination is back-gige + front-u3v: gentl-gige and gentl-u3v export
-# the same #[no_mangle] GenTL symbols, so both in one image collide
-# (MSVC LNK2005 / GNU ld). Everything else links; the compile_error
-# below turns the forbidden pair into a clean build failure. Deployments:
+# The binary links one camera backend AND one front. Producer CTI exports
+# are disabled in this dependency graph, so back-gige + front-u3v links too.
+# Deployments:
 #   GigE gateway:        default
 #   U3V camera → GigE:   --no-default-features --features back-u3v,front-gige
-#   GigE camera → U3V:   impossible (the collision) — by design v1
+#   GigE camera → U3V:   --no-default-features --features back-gige,front-u3v
 #   U3V camera → U3V:    --no-default-features --features back-u3v,front-u3v
 #   no camera → GigE:    --no-default-features --features back-null,front-gige
 #   no camera → U3V:     --no-default-features --features back-null,front-u3v
@@ -59,7 +57,7 @@ gentl-simulator = { path = "../../crates/gentl-simulator" }
 # back-gige — neither links both GenTL producers into one image (see
 # [features]). Both fronts/backs are listed here so every test builds
 # under any feature combination of the library itself.
-gentl-u3v = { path = "../../crates/gentl-u3v" }
+gentl-u3v = { path = "../../crates/gentl-u3v", default-features = false }
 vgige-back-gige = { path = "../vgige-back-gige" }
 vgige-back-u3v = { path = "../vgige-back-u3v" }
 vgige-front-gige = { path = "../vgige-front-gige" }

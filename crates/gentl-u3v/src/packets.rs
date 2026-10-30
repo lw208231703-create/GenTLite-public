@@ -647,6 +647,26 @@ pub fn decode_event(buf: &[u8]) -> Option<EventPacket> {
     })
 }
 
+/// Encode one event transfer (§4.1.3.3.2): a single event has event_size=0.
+pub fn encode_event(event: &EventPacket) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CMD_OVERHEAD + 12 + event.data.len());
+    out.extend_from_slice(&PREFIX_EVENT.to_le_bytes());
+    let mut ccd = [0u8; CCD_LEN];
+    CommandCcd {
+        flags: 0,
+        command_id: EVENT_CMD,
+        length: (12 + event.data.len()) as u16,
+        request_id: 0,
+    }
+    .encode(&mut ccd);
+    out.extend_from_slice(&ccd);
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&event.event_id.to_le_bytes());
+    out.extend_from_slice(&event.timestamp.to_le_bytes());
+    out.extend_from_slice(&event.data);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -832,6 +852,7 @@ mod tests {
         assert_eq!(ev.event_id, 0x4FFF);
         assert_eq!(ev.timestamp, 777);
         assert_eq!(ev.data, vec![0x5A; 4]);
+        assert_eq!(decode_event(&encode_event(&ev)), Some(ev));
     }
 
     #[test]

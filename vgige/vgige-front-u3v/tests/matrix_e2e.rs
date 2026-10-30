@@ -50,6 +50,7 @@ fn start(n_frames: usize) -> Cell {
         Arc::new(DevCommands(Arc::clone(&cmd_q))),
         Arc::new(DevTransfers(Arc::clone(&ack_q), MPS as u16)),
         Arc::new(dev_stream),
+        Arc::new(DevTransfers(Arc::clone(&data_q), MPS as u16)),
     );
 
     // Relay: back → device session. The host's Stream Enable opens the

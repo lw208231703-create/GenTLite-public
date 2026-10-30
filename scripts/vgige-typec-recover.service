@@ -1,0 +1,8 @@
+[Unit]
+Description=Reinitialize DWC3 after Type-C reverse orientation
+After=vgige.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/typec-ss-recover.sh
+TimeoutStartSec=45

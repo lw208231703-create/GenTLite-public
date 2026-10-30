@@ -46,13 +46,8 @@ compile_error!(
 );
 #[cfg(all(not(feature = "front-gige"), not(feature = "front-u3v")))]
 compile_error!("vgige-cli needs a front: default (front-gige) or --no-default-features --features front-u3v");
-#[cfg(all(feature = "back-gige", feature = "front-u3v"))]
-compile_error!(
-    "back-gige + front-u3v cannot link into one binary: gentl-gige and gentl-u3v export the same \
-     #[no_mangle] GenTL symbols (Q38-7). The 'GigE camera as a U3V device' cell runs split in v1: \
-     build the U3V device front with a U3V camera back (--no-default-features --features back-u3v,front-u3v), \
-     or keep the GigE front for GigE cameras."
-);
+// All back/front combinations link. The producer crates only export their
+// GenTL entry points with their `cti-exports` feature; vgige disables it.
 
 const DEFAULT_GVCP_PORT: u16 = GVCP_PORT;
 /// Gadget identity for `--front u3v` (QoI, Q39: a pid.codes private
@@ -506,6 +501,7 @@ fn run_u3v_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
         gadget.streams.control_out.clone(),
         gadget.streams.control_in.clone(),
         gadget.streams.stream_in.clone(),
+        gadget.streams.event_in.clone(),
     );
     *slot.lock().expect("device slot poisoned") = Some(device.clone());
     device.set_stream_watcher({

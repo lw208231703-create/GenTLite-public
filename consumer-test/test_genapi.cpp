@@ -173,9 +173,11 @@ int run() {
     });
     std::printf("TL: id=%s vendor=%s tltype=%s\n", tl_id.c_str(), tl_vendor.c_str(),
                 tl_type.c_str());
-    if (tl_type != "GEV") {
-        throw std::runtime_error("TLTYPE is not GEV");
+    const bool is_u3v = tl_type == "U3V";
+    if (tl_type != "GEV" && !is_u3v) {
+        throw std::runtime_error("unsupported TLTYPE: " + tl_type);
     }
+    std::string device_id = kSimDeviceId;
 
     uint32_t num_ifaces = 0;
     gc_check(g_api.TLGetNumInterfaces(tl, &num_ifaces), "TLGetNumInterfaces");
@@ -200,7 +202,8 @@ int run() {
                 return g_api.IFGetDeviceID(h, d, s, n);
             });
             std::printf("  iface %s device[%u] = %s\n", iid.c_str(), d, did.c_str());
-            if (did == kSimDeviceId) {
+            if (did == kSimDeviceId || is_u3v) {
+                device_id = did;
                 iface = h;
                 break;
             }
@@ -216,9 +219,9 @@ int run() {
     }
 
     GenTL::DEV_HANDLE dev = nullptr;
-    gc_check(g_api.IFOpenDevice(iface, kSimDeviceId, GenTL::DEVICE_ACCESS_EXCLUSIVE, &dev),
+    gc_check(g_api.IFOpenDevice(iface, device_id.c_str(), GenTL::DEVICE_ACCESS_EXCLUSIVE, &dev),
              "IFOpenDevice");
-    std::printf("device %s opened (exclusive)\n", kSimDeviceId);
+    std::printf("device %s opened (exclusive)\n", device_id.c_str());
 
     std::string dev_vendor = gc_string("DevGetInfo VENDOR", [&](char* s, size_t* n) {
         GenTL::INFO_DATATYPE t;
@@ -231,11 +234,13 @@ int run() {
     GenTL::PORT_HANDLE port = nullptr;
     gc_check(g_api.DevGetPort(dev, &port), "DevGetPort");
 
-    // Bootstrap sanity: version register 0x00020002 (BE).
-    unsigned char ver[4] = {0};
-    gc_read_port(port, 0x0000, ver, sizeof(ver));
-    if (!(ver[0] == 0x00 && ver[1] == 0x02 && ver[2] == 0x00 && ver[3] == 0x02)) {
-        throw std::runtime_error("version register is not 0x00020002");
+    if (!is_u3v) {
+        // GigE bootstrap sanity: version register 0x00020002 (BE).
+        unsigned char ver[4] = {0};
+        gc_read_port(port, 0x0000, ver, sizeof(ver));
+        if (!(ver[0] == 0x00 && ver[1] == 0x02 && ver[2] == 0x00 && ver[3] == 0x02)) {
+            throw std::runtime_error("version register is not 0x00020002");
+        }
     }
 
     // Pull the device description the way every GenTL consumer must for
@@ -282,24 +287,40 @@ int run() {
         throw std::runtime_error("unexpected DeviceVendorName");
     }
 
-    // ExposureTime: read the default through the port, write 12345.0, then
-    // read back ignoring the cache (a real GCReadPort round-trip).
-    GenApi::CFloatPtr exposure(node_map->GetNode("ExposureTime"));
-    if (!exposure.IsValid()) {
-        throw std::runtime_error("node ExposureTime missing");
-    }
-    double def = exposure->GetValue(false, true);
-    std::printf("ExposureTime default: %g us (min %g, max %g)\n", def, exposure->GetMin(),
-                exposure->GetMax());
-    if (std::fabs(def - 10000.0) > 0.5) {
-        throw std::runtime_error("unexpected ExposureTime default");
-    }
-
-    exposure->SetValue(12345.0);
-    double back = exposure->GetValue(false, true);
-    std::printf("ExposureTime readback: %g us\n", back);
-    if (std::fabs(back - 12345.0) > 0.001) {
-        throw std::runtime_error("ExposureTime round-trip mismatch");
+    if (is_u3v) {
+        GenApi::CIntegerPtr exposure(node_map->GetNode("ExposureTimeAbs"));
+        if (!exposure.IsValid()) {
+            throw std::runtime_error("node ExposureTimeAbs missing");
+        }
+        double def = static_cast<double>(exposure->GetValue(false, true));
+        std::printf("ExposureTimeAbs default: %g us (min %g, max %g)\n", def,
+                    static_cast<double>(exposure->GetMin()), static_cast<double>(exposure->GetMax()));
+        if (std::fabs(def - 10000.0) > 0.5) {
+            throw std::runtime_error("unexpected ExposureTimeAbs default");
+        }
+        exposure->SetValue(12345);
+        double back = static_cast<double>(exposure->GetValue(false, true));
+        std::printf("ExposureTimeAbs readback: %g us\n", back);
+        if (std::fabs(back - 12345.0) > 0.001) {
+            throw std::runtime_error("ExposureTimeAbs round-trip mismatch");
+        }
+    } else {
+        GenApi::CFloatPtr exposure(node_map->GetNode("ExposureTime"));
+        if (!exposure.IsValid()) {
+            throw std::runtime_error("node ExposureTime missing");
+        }
+        double def = exposure->GetValue(false, true);
+        std::printf("ExposureTime default: %g us (min %g, max %g)\n", def, exposure->GetMin(),
+                    exposure->GetMax());
+        if (std::fabs(def - 10000.0) > 0.5) {
+            throw std::runtime_error("unexpected ExposureTime default");
+        }
+        exposure->SetValue(12345.0);
+        double back = exposure->GetValue(false, true);
+        std::printf("ExposureTime readback: %g us\n", back);
+        if (std::fabs(back - 12345.0) > 0.001) {
+            throw std::runtime_error("ExposureTime round-trip mismatch");
+        }
     }
 
     GenApi::CastToIDestroy(node_map)->Destroy();

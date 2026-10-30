@@ -11,6 +11,10 @@ edition.workspace = true
 crate-type = ["cdylib", "rlib"]
 name = "gentl_gige"
 
+[features]
+default = ["cti-exports"]
+cti-exports = []
+
 [dependencies]
 gentl-core = { path = "../gentl-core" }
 gentl-gvcp = { path = "../gentl-gvcp" }

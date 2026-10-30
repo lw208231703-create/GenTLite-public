@@ -322,6 +322,7 @@ impl U3vDataStream {
         // Apply the backend policy before enabling the device, so a policy
         // failure cannot leave SIRM streaming without a receiver.
         self.pipe.set_raw_io()?;
+        usbio::drain_stale(&*self.pipe);
         let geometry = {
             let c = device
                 .client

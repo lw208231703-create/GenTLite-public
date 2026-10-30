@@ -63,6 +63,8 @@ pub type BufferHandle = *mut c_void;
 pub const EVENT_ERROR: EventType = 0;
 pub const EVENT_NEW_BUFFER: EventType = 1;
 pub const EVENT_FEATURE_INVALIDATE: EventType = 2;
+pub const EVENT_FEATURE_CHANGE: EventType = 3;
+pub const EVENT_REMOTE_DEVICE: EventType = 4;
 
 #[repr(C)]
 pub struct EventNewBufferData {

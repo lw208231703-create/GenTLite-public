@@ -1,0 +1,1 @@
+ACTION=="change", SUBSYSTEM=="typec", KERNEL=="port0", ATTR{orientation}=="reverse", ENV{SYSTEMD_WANTS}="vgige-typec-recover.service"

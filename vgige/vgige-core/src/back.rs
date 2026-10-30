@@ -27,6 +27,11 @@ pub trait CameraBack: Send {
     /// in v1); block writes exist in the seam because U3V register access
     /// is block-shaped (Step 2).
     fn write_block(&mut self, addr: u32, data: &[u8]) -> Result<(), u16>;
+    /// Current image payload size in bytes, when the backend has a writable
+    /// geometry. Backends without this model answer NOT_IMPLEMENTED.
+    fn payload_size(&mut self) -> Result<u64, u16> {
+        Err(0x8001)
+    }
     /// Fetch the camera's GenICam XML (spec §14.1.1): First URL bootstrap
     /// register, `local:` blob read, zip transparently decompressed. Err =
     /// GEV status.

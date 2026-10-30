@@ -10,8 +10,11 @@ vgige-core = { path = "../vgige-core" }
 # Device-side wire codec (transmitters) + descriptor layouts + device-info
 # parser: shared with the host-side producer instead of re-transcribed
 # (packets/descriptors went pub in gentl-u3v for exactly this — Step 3).
-gentl-u3v = { path = "../../crates/gentl-u3v" }
+gentl-u3v = { path = "../../crates/gentl-u3v", default-features = false }
 gentl-core = { path = "../../crates/gentl-core" }
+
+[dev-dependencies]
+vgige-back-null = { path = "../vgige-back-null" }
 
 [target.'cfg(unix)'.dependencies]
 # mount(2) for the FunctionFS instance (see gadget::mount_functionfs: the

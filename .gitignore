@@ -14,8 +14,12 @@ Cargo.lock
 /camera_dump.xml
 /u3v_camera_dump.xml
 
-# consumer-test build output
-consumer-test/build/
+# consumer-test CMake build output, including custom BUILD_DIR variants
+/consumer-test/build*/
+
+# Python
+__pycache__/
+*.py[cod]
 
 # IDE / OS
 .vs/

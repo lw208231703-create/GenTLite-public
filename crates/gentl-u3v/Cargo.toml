@@ -9,6 +9,10 @@ edition.workspace = true
 crate-type = ["cdylib", "rlib"]
 name = "gentl_u3v"
 
+[features]
+default = ["cti-exports"]
+cti-exports = []
+
 [dependencies]
 gentl-core = { path = "../gentl-core" }
 # ZIPped camera XML (manifest file format 1, GenCP §5.5.1.2)

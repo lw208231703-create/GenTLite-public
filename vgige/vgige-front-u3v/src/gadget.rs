@@ -72,14 +72,13 @@ fn provision_impl(config: &GadgetConfig) -> std::io::Result<GadgetPaths> {
     // was rejected; kernel-composed config also lacks the Device Info CS
     // — see A1).
     write_file(root.join("bcdDevice"), "0x0100")?;
-    // High-speed bring-up profile (USB 2.0 §9.6.1): the gadget serves
-    // the matching device descriptor over ep0; the composite's own copy
-    // must agree on the USB version. The SS profile (0x0320) lands with
-    // the SS descriptor set (Q39).
-    write_file(root.join("bcdUSB"), "0x0210")?;
-    // The dwc3 runs with the usb2 phy only at bring-up — pin the
-    // composite's max speed so it cannot advertise super-speed.
-    write_file(root.join("max_speed"), "high-speed")?;
+    // U3V Table 3-1's SuperSpeed profile. The composite framework answers
+    // standard descriptor requests from this attribute, so it must match
+    // the device descriptor served by our ep0 path.
+    write_file(root.join("bcdUSB"), "0x0320")?;
+    // Allow the UDC and link partner to negotiate SuperSpeed. The earlier
+    // high-speed bring-up cap prevented SS training even with a working PHY.
+    write_file(root.join("max_speed"), "super-speed")?;
     let strings = root.join("strings/0x409");
     std::fs::create_dir_all(&strings)?;
     write_file(strings.join("manufacturer"), &config.device.manufacturer)?;
@@ -267,6 +266,7 @@ pub struct GadgetStreams {
     pub control_out: Arc<dyn HostCommands>,
     pub control_in: Arc<dyn DeviceTransfers>,
     pub stream_in: Arc<dyn DeviceTransfers>,
+    pub event_in: Arc<dyn DeviceTransfers>,
 }
 
 /// The integration entry (CLI `--front u3v` on Linux), split in two so
@@ -359,8 +359,9 @@ pub fn open(config: &GadgetConfig) -> std::io::Result<OpenGadget> {
         control_out: Arc::new(QueueCommands { rx: Mutex::new(cmd_rx) }),
         control_in: Arc::new(FileTransfers { file: cin }),
         stream_in: Arc::new(FileTransfers { file: sin }),
+        event_in: Arc::new(FileTransfers { file: ein }),
     };
-    Ok(OpenGadget { streams, ep0, set, paths, _event_ep: ein })
+    Ok(OpenGadget { streams, ep0, set, paths })
 }
 
 /// A provisioned gadget ready to serve once the device exists.
@@ -369,9 +370,6 @@ pub struct OpenGadget {
     ep0: File,
     set: DescriptorSet,
     paths: GadgetPaths,
-    /// The event IN endpoint: v1 serves no events, the fd stays open so
-    /// the endpoint does not stall when the host claims the interface.
-    _event_ep: File,
 }
 
 impl OpenGadget {

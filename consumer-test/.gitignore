@@ -1,2 +1,2 @@
-# CMake build tree of build-and-run.sh
-/build/
+# CMake build trees, including custom BUILD_DIR variants
+/build*/

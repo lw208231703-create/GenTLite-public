@@ -8,7 +8,7 @@ edition.workspace = true
 [dependencies]
 vgige-core = { path = "../vgige-core" }
 gentl-core = { path = "../../crates/gentl-core" }
-gentl-gige = { path = "../../crates/gentl-gige" }
+gentl-gige = { path = "../../crates/gentl-gige", default-features = false }
 gentl-gvcp = { path = "../../crates/gentl-gvcp" }
 # Zipped camera XML (spec §14.1.1 manifest format 1): transparently unzipped
 # at startup (same crate/features as gentl-gige's example tooling).

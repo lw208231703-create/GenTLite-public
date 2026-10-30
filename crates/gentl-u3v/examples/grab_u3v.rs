@@ -73,6 +73,9 @@ fn resolve_addr(xml: &str, name: &str, depth: u32) -> Option<u64> {
             if let Some(reference) = tag_text(block, "pAddress") {
                 return resolve_addr(xml, &reference, depth + 1);
             }
+            if let Some(reference) = tag_text(block, "pValue") {
+                return resolve_addr(xml, &reference, depth + 1);
+            }
             return None;
         }
     }
@@ -164,16 +167,19 @@ fn main() {
     std::fs::write("u3v_camera_dump.xml", &xml).ok();
 
     // Resolve registers from the XML (U3V control channel is little-endian).
-    // Both GenApi conventions are accepted: `AcquisitionStart_Reg` (the
-    // `<Command>`'s IntReg named with a _Reg suffix) and `AcquisitionStartReg`.
+    // Accept direct feature nodes and the common `*_Reg` / `*Reg` helper
+    // naming conventions, following `<pValue>` references when present.
     let acq_addr = resolve_addr(&xml, "AcquisitionStart_Reg", 0)
         .or_else(|| resolve_addr(&xml, "AcquisitionStartReg", 0))
+        .or_else(|| resolve_addr(&xml, "AcquisitionStart", 0))
         .expect("AcquisitionStart reg in XML");
     let acq_stop_addr = resolve_addr(&xml, "AcquisitionStop_Reg", 0)
         .or_else(|| resolve_addr(&xml, "AcquisitionStopReg", 0))
+        .or_else(|| resolve_addr(&xml, "AcquisitionStop", 0))
         .expect("AcquisitionStop reg in XML");
     let payload_addr = resolve_addr(&xml, "PayloadSize_Reg", 0)
         .or_else(|| resolve_addr(&xml, "PayloadSizeReg", 0))
+        .or_else(|| resolve_addr(&xml, "PayloadSize", 0))
         .expect("PayloadSize reg in XML");
     let mut ps = [0u8; 8];
     assert_eq!(read_port(port, payload_addr, &mut ps), GC_ERR_SUCCESS);

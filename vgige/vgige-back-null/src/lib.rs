@@ -5,11 +5,11 @@
 //! verify byte-for-byte (`(byte_index + block_id) mod 256`, the
 //! simulator's pattern).
 //!
-//! v1 demo scope (design note §5):
-//! - Register reads return 0 except the three registers the built-in
-//!   XML advertises (Width/Height/PixelFormat, seeded with the stream
-//!   geometry so a GenApi client's static view matches the stream);
-//!   writes are accepted as no-ops.
+//! Parameter model:
+//! - Width/Height/OffsetX/OffsetY, ExposureTimeAbs, Gain and FrameRate
+//!   are writable and clamped to the XML ranges; unknown writes are no-ops.
+//! - The frame source crops the test pattern from the current ROI and
+//!   reports the corresponding payload size.
 //! - The built-in XML is little-endian: the null demo targets the U3V
 //!   device front (R-30cd wire). Served through the GigE front the
 //!   numeric register reads byte-swap (pass-through transcoding) — a
@@ -22,23 +22,30 @@ use std::time::{Duration, Instant};
 
 use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FrameSource};
 
-/// Synthetic stream geometry: 1280x1024 Mono8 (the sim's production
-/// size, 1.25 MB per frame — a comfortable USB3/gigE demo load).
+/// Default synthetic stream geometry: 1280x1024 Mono8. Width, height,
+/// offsets, exposure, gain and frame rate remain writable through GenCP.
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 1024;
 pub const PAYLOAD: usize = (WIDTH * HEIGHT) as usize;
 pub const PFNC_MONO8: u32 = 0x0108_0001;
+pub const EXPOSURE_US: u32 = 10_000;
+pub const GAIN: u32 = 0;
+pub const FRAME_RATE: u32 = 30;
 
-/// Frame period for the ~30 fps synthetic source.
-pub const FRAME_PERIOD: Duration = Duration::from_micros(1_000_000 / 30);
+fn frame_period(fps: u32) -> Duration {
+    Duration::from_micros(1_000_000 / u64::from(fps.max(1)))
+}
 
-/// The XML-advertised registers (little-endian GenCP-shaped addresses,
-/// forwarded nowhere — served from the seed map). NOTE: the acquisition
-/// block addresses MUST mirror vgige-front-u3v's ACQ_BASE (§4.2.2
-/// relocation, 2026-10-28) — the XML is the host's map to the wire.
-pub const REG_WIDTH: u32 = 0x0001_0000;
-pub const REG_HEIGHT: u32 = 0x0001_0004;
-pub const REG_PIXEL_FORMAT: u32 = 0x0001_0008;
+/// XML-advertised little-endian registers. The acquisition block addresses
+/// mirror vgige-front-u3v's ACQ_BASE.
+pub const REG_WIDTH: u32 = 0x0004_1000;
+pub const REG_HEIGHT: u32 = 0x0004_1004;
+pub const REG_PIXEL_FORMAT: u32 = 0x0004_1008;
+pub const REG_OFFSET_X: u32 = 0x0004_100C;
+pub const REG_OFFSET_Y: u32 = 0x0004_1010;
+pub const REG_EXPOSURE_US: u32 = 0x0004_1014;
+pub const REG_GAIN: u32 = 0x0004_1018;
+pub const REG_FRAME_RATE: u32 = 0x0004_101C;
 
 /// Minimal but GenApi-legal device description (v1 demo — placeholder
 /// GUIDs in the simulator's style; SmartCamera nodes come from the
@@ -55,103 +62,115 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20 <Port Name=\"Device\" NameSpace=\"Standard\">\n\
 \x20   <ToolTip>The GenCP device port (implemented by the GenTL producer).</ToolTip>\n\
 \x20 </Port>\n\
+\x20 <String Name=\"DeviceVendorName\" NameSpace=\"Standard\"><Value>GenTLite</Value></String>\n\
+\x20 <String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual</Value></String>\n\
+\x20 <String Name=\"DeviceVersion\" NameSpace=\"Standard\"><Value>1.0.0</Value></String>\n\
+\x20 <String Name=\"DeviceFirmwareVersion\" NameSpace=\"Standard\"><Value>1.0.0</Value></String>\n\
 \n\x20 <Group Comment=\"ImageFormat\">\n\
 \x20   <Integer Name=\"Width\" NameSpace=\"Standard\">\n\
-\x20     <ToolTip>Image width in pixels.</ToolTip>\n\
-\x20     <DisplayName>Width</DisplayName>\n\
-\x20     <Visibility>Beginner</Visibility>\n\
-\x20     <pValue>WidthReg</pValue>\n\
-\x20     <Min>1</Min>\n\
-\x20     <Max>4096</Max>\n\
+\x20     <DisplayName>Width</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>Width_Reg</pValue><Min>1</Min><Max>4096</Max><Inc>1</Inc>\n\
 \x20   </Integer>\n\
-\x20   <IntReg Name=\"WidthReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00010000</Address>\n\
-\x20     <Length>4</Length>\n\
-\x20     <AccessMode>RO</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20   <IntReg Name=\"Width_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041000</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Integer Name=\"Height\" NameSpace=\"Standard\">\n\
-\x20     <ToolTip>Image height in pixels.</ToolTip>\n\
-\x20     <DisplayName>Height</DisplayName>\n\
-\x20     <Visibility>Beginner</Visibility>\n\
-\x20     <pValue>HeightReg</pValue>\n\
-\x20     <Min>1</Min>\n\
-\x20     <Max>4096</Max>\n\
+\x20     <DisplayName>Height</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>Height_Reg</pValue><Min>1</Min><Max>4096</Max><Inc>1</Inc>\n\
 \x20   </Integer>\n\
-\x20   <IntReg Name=\"HeightReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00010004</Address>\n\
-\x20     <Length>4</Length>\n\
-\x20     <AccessMode>RO</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20   <IntReg Name=\"Height_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041004</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"OffsetX\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Offset X</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>OffsetX_Reg</pValue><Min>0</Min><Max>4095</Max><Inc>1</Inc>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"OffsetX_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004100C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"OffsetY\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Offset Y</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>OffsetY_Reg</pValue><Min>0</Min><Max>4095</Max><Inc>1</Inc>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"OffsetY_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041010</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"PixelFormat\" NameSpace=\"Standard\">\n\
-\x20     <ToolTip>Pixel format of the stream.</ToolTip>\n\
-\x20     <DisplayName>Pixel Format</DisplayName>\n\
-\x20     <Visibility>Beginner</Visibility>\n\
+\x20     <DisplayName>Pixel Format</DisplayName><Visibility>Beginner</Visibility>\n\
 \x20     <EnumEntry Name=\"Mono8\" NameSpace=\"Standard\">\n\
-\x20       <DisplayName>Mono8</DisplayName>\n\
-\x20       <Value>0x01080001</Value>\n\
+\x20       <DisplayName>Mono8</DisplayName><Value>0x01080001</Value>\n\
 \x20     </EnumEntry>\n\
 \x20     <pValue>PixelFormatReg</pValue>\n\
 \x20   </Enumeration>\n\
 \x20   <IntReg Name=\"PixelFormatReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00010008</Address>\n\
-\x20     <Length>4</Length>\n\
-\x20     <AccessMode>RO</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20     <Address>0x00041008</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
 \x20 <Group Comment=\"AcquisitionControl\">\n\
+\x20   <Integer Name=\"ExposureTimeAbs\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Inc>1</Inc>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"ExposureTimeAbs_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041014</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"Gain\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Gain</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>Gain_Reg</pValue><Min>0</Min><Max>100</Max><Inc>1</Inc>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"Gain_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041018</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"FrameRate\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Inc>1</Inc>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"FrameRate_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004101C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
 \x20   <Command Name=\"AcquisitionStart\" NameSpace=\"Standard\">\n\
-\x20     <pValue>AcquisitionStartReg</pValue>\n\
-\x20     <CommandValue>1</CommandValue>\n\
+\x20     <pValue>AcquisitionStart_Reg</pValue><CommandValue>1</CommandValue>\n\
 \x20   </Command>\n\
-\x20   <IntReg Name=\"AcquisitionStartReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00040000</Address>\n\
-\x20     <Length>4</Length>\n\
-\x20     <AccessMode>RW</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20   <IntReg Name=\"AcquisitionStart_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00040000</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Command Name=\"AcquisitionStop\" NameSpace=\"Standard\">\n\
-\x20     <pValue>AcquisitionStopReg</pValue>\n\
-\x20     <CommandValue>1</CommandValue>\n\
+\x20     <pValue>AcquisitionStop_Reg</pValue><CommandValue>1</CommandValue>\n\
 \x20   </Command>\n\
-\x20   <IntReg Name=\"AcquisitionStopReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00040004</Address>\n\
-\x20     <Length>4</Length>\n\
-\x20     <AccessMode>RW</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20   <IntReg Name=\"AcquisitionStop_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00040004</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Enumeration Name=\"AcquisitionMode\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Acquisition Mode</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <EnumEntry Name=\"Continuous\" NameSpace=\"Standard\"><DisplayName>Continuous</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <pValue>AcquisitionModeReg</pValue>\n\
+\x20   </Enumeration>\n\
+\x20   <IntReg Name=\"AcquisitionModeReg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004000C</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Integer Name=\"PayloadSize\" NameSpace=\"Standard\">\n\
-\x20     <ToolTip>Full padded frame payload in bytes.</ToolTip>\n\
-\x20     <DisplayName>Payload Size</DisplayName>\n\
-\x20     <Visibility>Beginner</Visibility>\n\
-\x20     <pValue>PayloadSizeReg</pValue>\n\
-\x20     <Min>1</Min>\n\
-\x20     <Max>1073741824</Max>\n\
+\x20     <DisplayName>Payload Size</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>PayloadSize_Reg</pValue><Min>1</Min><Max>1073741824</Max>\n\
 \x20   </Integer>\n\
-\x20   <IntReg Name=\"PayloadSizeReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00040008</Address>\n\
-\x20     <Length>8</Length>\n\
-\x20     <AccessMode>RO</AccessMode>\n\
-\x20     <pPort>Device</pPort>\n\
-\x20     <Sign>Unsigned</Sign>\n\
-\x20     <Endianess>LittleEndian</Endianess>\n\
+\x20   <IntReg Name=\"PayloadSize_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00040008</Address><Length>8</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
 </RegisterDescription>\n";
 
-/// The synthetic camera: seeded register view + pattern stream.
+/// The synthetic camera: a writable register view plus a pattern stream.
 pub struct NullBack {
     regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
 }
@@ -163,6 +182,11 @@ impl NullBack {
                 (REG_WIDTH, WIDTH),
                 (REG_HEIGHT, HEIGHT),
                 (REG_PIXEL_FORMAT, PFNC_MONO8),
+                (REG_OFFSET_X, 0),
+                (REG_OFFSET_Y, 0),
+                (REG_EXPOSURE_US, EXPOSURE_US),
+                (REG_GAIN, GAIN),
+                (REG_FRAME_RATE, FRAME_RATE),
             ]))),
         }
     }
@@ -179,8 +203,26 @@ impl CameraBack for NullBack {
         Ok(self.regs.lock().expect("null regs lock").get(&addr).copied().unwrap_or(0))
     }
 
-    fn write_reg(&mut self, _addr: u32, _value: u32) -> Result<(), u16> {
-        // Accepted, not stored (v1 demo: the register view is static).
+    fn write_reg(&mut self, addr: u32, value: u32) -> Result<(), u16> {
+        let mut regs = self.regs.lock().expect("null regs lock");
+        match addr {
+            REG_WIDTH | REG_HEIGHT => {
+                regs.insert(addr, value.clamp(1, 4096));
+            }
+            REG_OFFSET_X | REG_OFFSET_Y => {
+                regs.insert(addr, value.min(4095));
+            }
+            REG_EXPOSURE_US => {
+                regs.insert(addr, value.clamp(10, 100_000));
+            }
+            REG_GAIN => {
+                regs.insert(addr, value.min(100));
+            }
+            REG_FRAME_RATE => {
+                regs.insert(addr, value.clamp(1, 240));
+            }
+            _ => {}
+        }
         Ok(())
     }
 
@@ -191,8 +233,18 @@ impl CameraBack for NullBack {
         Ok(vec![0u8; len as usize])
     }
 
-    fn write_block(&mut self, _addr: u32, _data: &[u8]) -> Result<(), u16> {
+    fn write_block(&mut self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        if data.len() == 4 {
+            return self.write_reg(addr, u32::from_le_bytes(data[..4].try_into().expect("u32")));
+        }
         Ok(())
+    }
+
+    fn payload_size(&mut self) -> Result<u64, u16> {
+        let regs = self.regs.lock().expect("null regs lock");
+        let w = u64::from(regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH));
+        let h = u64::from(regs.get(&REG_HEIGHT).copied().unwrap_or(HEIGHT));
+        Ok(w * h)
     }
 
     fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> {
@@ -212,7 +264,7 @@ impl CameraBack for NullBack {
     }
 
     fn open_stream(&mut self) -> Result<Box<dyn FrameSource>, u16> {
-        Ok(Box::new(NullFrameSource::new()))
+        Ok(Box::new(NullFrameSource::new(self.regs.clone())))
     }
 
     fn close_stream(&mut self) -> Result<(), u16> {
@@ -220,17 +272,18 @@ impl CameraBack for NullBack {
     }
 }
 
-/// The ~30 fps test-pattern source: Mono8, byte `k` of block `b` is
-/// `(k + b) mod 256` — verifiable against the simulator's formula from
-/// any host consumer.
+/// Configurable test-pattern source. ROI pixels are sampled from the same
+/// full-frame `(source_byte_index + block_id) mod 256` pattern.
 pub struct NullFrameSource {
+    regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
     next_block: u64,
     next_at: Instant,
 }
 
 impl NullFrameSource {
-    pub fn new() -> Self {
+    pub fn new(regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>) -> Self {
         Self {
+            regs,
             next_block: 1,
             next_at: Instant::now(),
         }
@@ -239,7 +292,7 @@ impl NullFrameSource {
 
 impl Default for NullFrameSource {
     fn default() -> Self {
-        Self::new()
+        Self::new(NullBack::new().regs)
     }
 }
 
@@ -249,27 +302,41 @@ impl FrameSource for NullFrameSource {
         if now < self.next_at {
             let wait = self.next_at - now;
             if wait > timeout {
-                // No frame due inside the caller's window: honor the
-                // FrameSource contract by waiting the timeout out.
                 std::thread::sleep(timeout);
                 return None;
             }
             std::thread::sleep(wait);
         }
+        let (w, h, ox, oy, fps) = {
+            let regs = self.regs.lock().expect("null regs lock");
+            (
+                regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH),
+                regs.get(&REG_HEIGHT).copied().unwrap_or(HEIGHT),
+                regs.get(&REG_OFFSET_X).copied().unwrap_or(0),
+                regs.get(&REG_OFFSET_Y).copied().unwrap_or(0),
+                regs.get(&REG_FRAME_RATE).copied().unwrap_or(FRAME_RATE),
+            )
+        };
         let block = self.next_block;
         self.next_block += 1;
-        self.next_at = Instant::now() + FRAME_PERIOD;
+        self.next_at = Instant::now() + frame_period(fps);
+        let mut payload = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let source_index = u64::from(y + oy) * u64::from(WIDTH) + u64::from(x + ox);
+                payload.push((source_index + block) as u8);
+            }
+        }
         Some(CanonicalFrame {
-            // Synthetic timestamp: 1 MHz ticks, 33.333 ms per block.
-            timestamp: block * 33_333,
+            timestamp: block * (1_000_000 / u64::from(fps)),
             pixel_format: PFNC_MONO8,
-            width: WIDTH,
-            height: HEIGHT,
-            offset_x: 0,
-            offset_y: 0,
+            width: w,
+            height: h,
+            offset_x: ox,
+            offset_y: oy,
             padding_x: 0,
             padding_y: 0,
-            payload: (0..PAYLOAD).map(|k| (k as u64 + block) as u8).collect(),
+            payload,
         })
     }
 }
@@ -281,17 +348,30 @@ mod tests {
     #[test]
     fn register_semantics_and_identity() {
         let mut back = NullBack::new();
-        // Seeded registers advertise the stream geometry.
         assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
         assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), HEIGHT);
         assert_eq!(back.read_reg(REG_PIXEL_FORMAT).unwrap(), PFNC_MONO8);
-        // Everything else reads 0; every write is accepted.
         assert_eq!(back.read_reg(0x0FF0).unwrap(), 0);
         back.write_reg(0x0FF0, 42).unwrap();
-        assert_eq!(back.read_reg(0x0FF0).unwrap(), 0, "writes are no-ops");
+        assert_eq!(back.read_reg(0x0FF0).unwrap(), 0, "unknown writes are no-ops");
         let block = back.read_block(0x0FF0, 16).unwrap();
         assert_eq!(block, vec![0u8; 16]);
         back.write_block(0x0FF0, &[1, 2, 3, 4]).unwrap();
+
+        back.write_reg(REG_WIDTH, 640).unwrap();
+        back.write_reg(REG_HEIGHT, 480).unwrap();
+        back.write_reg(REG_OFFSET_X, 40).unwrap();
+        back.write_reg(REG_OFFSET_Y, 24).unwrap();
+        back.write_reg(REG_EXPOSURE_US, 20_000).unwrap();
+        back.write_reg(REG_GAIN, 8).unwrap();
+        back.write_reg(REG_FRAME_RATE, 60).unwrap();
+        assert_eq!(back.payload_size().unwrap(), 640 * 480);
+        assert_eq!(back.read_reg(REG_OFFSET_X).unwrap(), 40);
+        assert_eq!(back.read_reg(REG_OFFSET_Y).unwrap(), 24);
+        assert_eq!(back.read_reg(REG_EXPOSURE_US).unwrap(), 20_000);
+        assert_eq!(back.read_reg(REG_GAIN).unwrap(), 8);
+        assert_eq!(back.read_reg(REG_FRAME_RATE).unwrap(), 60);
+        assert_eq!(frame_period(60), Duration::from_micros(16_666));
 
         let id = back.fetch_identity().unwrap();
         assert_eq!(id.manufacturer, "GenTLite");
@@ -302,9 +382,9 @@ mod tests {
         let text = String::from_utf8(xml).unwrap();
         assert!(text.contains("</RegisterDescription>"));
         assert!(text.contains("ModelName=\"GenTLite Virtual\""));
-        assert!(text.contains("WidthReg"));
-        assert!(text.contains("HeightReg"));
-        assert!(text.contains("PixelFormatReg"));
+        for node in ["Width_Reg", "Height_Reg", "OffsetX_Reg", "OffsetY_Reg", "ExposureTimeAbs_Reg", "Gain_Reg", "FrameRate_Reg", "AcquisitionMode"] {
+            assert!(text.contains(node), "missing {node}");
+        }
     }
 
     #[test]
@@ -332,6 +412,20 @@ mod tests {
             "block 2 payload is (k + 2) mod 256, byte-exact"
         );
         assert!(f2.timestamp > f1.timestamp);
+    }
+
+    #[test]
+    fn roi_changes_geometry_payload_and_offsets() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_WIDTH, 2).unwrap();
+        back.write_reg(REG_HEIGHT, 2).unwrap();
+        back.write_reg(REG_OFFSET_X, 1).unwrap();
+        back.write_reg(REG_OFFSET_Y, 1).unwrap();
+        let mut src = back.open_stream().unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!((frame.width, frame.height), (2, 2));
+        assert_eq!((frame.offset_x, frame.offset_y), (1, 1));
+        assert_eq!(frame.payload, vec![2, 3, 2, 3]);
     }
 
     #[test]
