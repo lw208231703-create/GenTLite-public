@@ -46,6 +46,8 @@ pub const REG_OFFSET_Y: u32 = 0x0004_1010;
 pub const REG_EXPOSURE_US: u32 = 0x0004_1014;
 pub const REG_GAIN: u32 = 0x0004_1018;
 pub const REG_FRAME_RATE: u32 = 0x0004_101C;
+pub const REG_ACQUISITION_START: u32 = 0x0004_0000;
+pub const REG_ACQUISITION_STOP: u32 = 0x0004_0004;
 
 /// Minimal but GenApi-legal device description (v1 demo — placeholder
 /// GUIDs in the simulator's style; SmartCamera nodes come from the
@@ -66,6 +68,8 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20 <String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual</Value></String>\n\
 \x20 <String Name=\"DeviceVersion\" NameSpace=\"Standard\"><Value>1.0.0</Value></String>\n\
 \x20 <String Name=\"DeviceFirmwareVersion\" NameSpace=\"Standard\"><Value>1.0.0</Value></String>\n\
+\x20 <String Name=\"DeviceSerialNumber\" NameSpace=\"Standard\"><Value>NULL-0001</Value></String>\n\
+\x20 <String Name=\"DeviceUserID\" NameSpace=\"Standard\"><Value></Value></String>\n\
 \n\x20 <Group Comment=\"ImageFormat\">\n\
 \x20   <Integer Name=\"Width\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Width</DisplayName><Visibility>Beginner</Visibility>\n\
@@ -112,30 +116,34 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
 \x20 <Group Comment=\"AcquisitionControl\">\n\
-\x20   <Integer Name=\"ExposureTimeAbs\" NameSpace=\"Standard\">\n\
+\x20   <Float Name=\"ExposureTimeAbs\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Inc>1</Inc>\n\
-\x20   </Integer>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Unit>us</Unit>\n\
+\x20   </Float>\n\
 \x20   <IntReg Name=\"ExposureTimeAbs_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041014</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
-\x20   <Integer Name=\"Gain\" NameSpace=\"Standard\">\n\
+\x20   <Float Name=\"Gain\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Gain</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>Gain_Reg</pValue><Min>0</Min><Max>100</Max><Inc>1</Inc>\n\
-\x20   </Integer>\n\
+\x20     <pValue>Gain_Reg</pValue><Min>0</Min><Max>100</Max><Unit>dB</Unit>\n\
+\x20   </Float>\n\
 \x20   <IntReg Name=\"Gain_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041018</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
-\x20   <Integer Name=\"FrameRate\" NameSpace=\"Standard\">\n\
+\x20   <Float Name=\"FrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Inc>1</Inc>\n\
-\x20   </Integer>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20   </Float>\n\
 \x20   <IntReg Name=\"FrameRate_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x0004101C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
+\x20   <Float Name=\"AcquisitionFrameRate\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Acquisition Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20   </Float>\n\
 \x20   <Command Name=\"AcquisitionStart\" NameSpace=\"Standard\">\n\
 \x20     <pValue>AcquisitionStart_Reg</pValue><CommandValue>1</CommandValue>\n\
 \x20   </Command>\n\
@@ -159,6 +167,16 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20     <Address>0x0004000C</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
+\x20   <Enumeration Name=\"TriggerMode\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Trigger Mode</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <EnumEntry Name=\"Off\" NameSpace=\"Standard\"><DisplayName>Off</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"On\" NameSpace=\"Standard\"><DisplayName>On</DisplayName><Value>1</Value></EnumEntry>\n\
+\x20     <pValue>TriggerModeReg</pValue>\n\
+\x20   </Enumeration>\n\
+\x20   <IntReg Name=\"TriggerModeReg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00040010</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
 \x20   <Integer Name=\"PayloadSize\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Payload Size</DisplayName><Visibility>Beginner</Visibility>\n\
 \x20     <pValue>PayloadSize_Reg</pValue><Min>1</Min><Max>1073741824</Max>\n\
@@ -166,6 +184,31 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   <IntReg Name=\"PayloadSize_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00040008</Address><Length>8</Length><AccessMode>RO</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20 </Group>\n\
+\x20 <Group Comment=\"GigE Transport\">\n\
+\x20   <Integer Name=\"GevStreamChannelCount\" NameSpace=\"Standard\"><Value>1</Value></Integer>\n\
+\x20   <Integer Name=\"GevCurrentStreamChannel\" NameSpace=\"Standard\"><Value>0</Value></Integer>\n\
+\x20   <Integer Name=\"GevSCPSPacketSize\" NameSpace=\"Standard\">\n\
+\x20     <pValue>GevSCPSPacketSize_Reg</pValue><Min>576</Min><Max>9000</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"GevSCPSPacketSize_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00000D04</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"GevSCPD\" NameSpace=\"Standard\">\n\
+\x20     <pValue>GevSCPD_Reg</pValue><Min>0</Min><Max>4294967295</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"GevSCPD_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00000D08</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"GevSCDA\" NameSpace=\"Standard\">\n\
+\x20     <pValue>GevSCDA_Reg</pValue><Min>0</Min><Max>4294967295</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"GevSCDA_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00000D18</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
 </RegisterDescription>\n";
@@ -206,6 +249,12 @@ impl CameraBack for NullBack {
     fn write_reg(&mut self, addr: u32, value: u32) -> Result<(), u16> {
         let mut regs = self.regs.lock().expect("null regs lock");
         match addr {
+            REG_ACQUISITION_START => {
+                regs.insert(addr, u32::from(value != 0));
+            }
+            REG_ACQUISITION_STOP => {
+                regs.insert(REG_ACQUISITION_START, 0);
+            }
             REG_WIDTH | REG_HEIGHT => {
                 regs.insert(addr, value.clamp(1, 4096));
             }
@@ -227,6 +276,10 @@ impl CameraBack for NullBack {
     }
 
     fn read_block(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, u16> {
+        if addr == 0x0004_0008 && (len == 4 || len == 8) {
+            let payload = self.payload_size()?.to_le_bytes();
+            return Ok(payload[..len as usize].to_vec());
+        }
         if len == 4 {
             return self.read_reg(addr).map(|v| v.to_le_bytes().to_vec());
         }
@@ -268,6 +321,10 @@ impl CameraBack for NullBack {
     }
 
     fn close_stream(&mut self) -> Result<(), u16> {
+        self.regs
+            .lock()
+            .expect("null regs lock")
+            .insert(REG_ACQUISITION_START, 0);
         Ok(())
     }
 }
@@ -307,6 +364,20 @@ impl FrameSource for NullFrameSource {
             }
             std::thread::sleep(wait);
         }
+        if self
+            .regs
+            .lock()
+            .expect("null regs lock")
+            .get(&REG_ACQUISITION_START)
+            .copied()
+            .unwrap_or(0)
+            == 0
+        {
+            if !timeout.is_zero() {
+                std::thread::sleep(timeout);
+            }
+            return None;
+        }
         let (w, h, ox, oy, fps) = {
             let regs = self.regs.lock().expect("null regs lock");
             (
@@ -319,12 +390,18 @@ impl FrameSource for NullFrameSource {
         };
         let block = self.next_block;
         self.next_block += 1;
-        self.next_at = Instant::now() + frame_period(fps);
-        let mut payload = Vec::with_capacity((w * h) as usize);
-        for y in 0..h {
-            for x in 0..w {
-                let source_index = u64::from(y + oy) * u64::from(WIDTH) + u64::from(x + ox);
-                payload.push((source_index + block) as u8);
+        let period = frame_period(fps);
+        self.next_at += period;
+        let now = Instant::now();
+        if self.next_at < now {
+            self.next_at = now + period;
+        }
+        let mut payload = vec![0u8; (w * h) as usize];
+        for (y, row) in payload.chunks_exact_mut(w as usize).enumerate() {
+            let source_row = (y as u32 + oy) as u64;
+            let start = (source_row * u64::from(WIDTH) + u64::from(ox) + block) as u8;
+            for (x, byte) in row.iter_mut().enumerate() {
+                *byte = start.wrapping_add(x as u8);
             }
         }
         Some(CanonicalFrame {
@@ -372,6 +449,8 @@ mod tests {
         assert_eq!(back.read_reg(REG_GAIN).unwrap(), 8);
         assert_eq!(back.read_reg(REG_FRAME_RATE).unwrap(), 60);
         assert_eq!(frame_period(60), Duration::from_micros(16_666));
+        let payload = back.read_block(0x0004_0008, 8).unwrap();
+        assert_eq!(u64::from_le_bytes(payload.try_into().unwrap()), 640 * 480);
 
         let id = back.fetch_identity().unwrap();
         assert_eq!(id.manufacturer, "GenTLite");
@@ -382,14 +461,19 @@ mod tests {
         let text = String::from_utf8(xml).unwrap();
         assert!(text.contains("</RegisterDescription>"));
         assert!(text.contains("ModelName=\"GenTLite Virtual\""));
-        for node in ["Width_Reg", "Height_Reg", "OffsetX_Reg", "OffsetY_Reg", "ExposureTimeAbs_Reg", "Gain_Reg", "FrameRate_Reg", "AcquisitionMode"] {
+        for node in ["Width_Reg", "Height_Reg", "OffsetX_Reg", "OffsetY_Reg", "ExposureTimeAbs_Reg", "Gain_Reg", "FrameRate_Reg", "AcquisitionMode", "TriggerMode", "TriggerModeReg", "AcquisitionFrameRate"] {
             assert!(text.contains(node), "missing {node}");
+        }
+        for node in ["ExposureTimeAbs", "Gain", "FrameRate"] {
+            assert!(text.contains(&format!("<Float Name=\"{node}\"")), "{node} must be a GenApi Float");
+            assert!(text.contains(&format!("<IntReg Name=\"{node}_Reg\"")), "{node}_Reg must be a GenApi IntReg");
         }
     }
 
     #[test]
     fn frames_are_sized_and_patterned() {
         let mut back = NullBack::new();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
         let mut src = back.open_stream().unwrap();
         let f1 = src.next_frame(Duration::from_secs(2)).expect("frame 1");
         assert_eq!(f1.width, WIDTH);
@@ -421,6 +505,7 @@ mod tests {
         back.write_reg(REG_HEIGHT, 2).unwrap();
         back.write_reg(REG_OFFSET_X, 1).unwrap();
         back.write_reg(REG_OFFSET_Y, 1).unwrap();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
         let mut src = back.open_stream().unwrap();
         let frame = src.next_frame(Duration::from_secs(2)).unwrap();
         assert_eq!((frame.width, frame.height), (2, 2));
@@ -431,6 +516,7 @@ mod tests {
     #[test]
     fn next_frame_honors_the_timeout_contract() {
         let mut back = NullBack::new();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
         let mut src = back.open_stream().unwrap();
         // First frame is due immediately.
         let f1 = src.next_frame(Duration::from_secs(2)).expect("frame 1");
@@ -464,8 +550,11 @@ mod tests {
     #[test]
     fn close_stream_is_a_clean_noop() {
         let mut back = NullBack::new();
+        let mut src = back.open_stream().unwrap();
+        assert!(src.next_frame(Duration::from_millis(1)).is_none());
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
         back.close_stream().unwrap();
-        // The stream can still be (re)opened — null has no teardown.
+        assert_eq!(back.read_reg(REG_ACQUISITION_START).unwrap(), 0);
         assert!(back.open_stream().is_ok());
     }
 }

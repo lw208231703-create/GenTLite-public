@@ -27,6 +27,7 @@
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
@@ -36,13 +37,35 @@ use crate::relay::Relay;
 use crate::xml::XmlMerger;
 use crate::{slot, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION, XML_BASE_V};
 
-/// Simplified CCP state (spec §36.46), mirroring the simulator's regmap:
-/// `flags` is the granted privilege, `connection_count` the §36.46 bits
-/// 16-19 counter (never returns to 0).
-#[derive(Default)]
+/// Simplified single-host CCP state (spec §36.46): `flags` is the granted
+/// privilege, with connection_count always zero to the requesting host.
 struct CcpState {
     flags: u32,
-    connection_count: u32,
+    last_contact: Option<Instant>,
+    heartbeat_ms: u32,
+}
+
+impl Default for CcpState {
+    fn default() -> Self {
+        Self {
+            flags: 0,
+            last_contact: None,
+            heartbeat_ms: 3000,
+        }
+    }
+}
+
+impl CcpState {
+    fn expire_stale_grant(&mut self) -> bool {
+        let stale = self.last_contact.is_some_and(|last| {
+            last.elapsed().as_millis() > u128::from(self.heartbeat_ms)
+        });
+        if stale {
+            self.flags = 0;
+            self.last_contact = None;
+        }
+        stale
+    }
 }
 
 /// The virtual device's register space. Cloneable (Arcs inside) so a
@@ -148,14 +171,25 @@ impl RegisterSpace {
     }
 
     fn ccp_read(&self) -> u32 {
-        let c = self.ccp.lock().expect("vgige ccp poisoned");
-        c.flags | ((c.connection_count & 0xF) << reg::CCP_CONNECTION_COUNT_SHIFT)
+        let mut c = self.ccp.lock().expect("vgige ccp poisoned");
+        if c.expire_stale_grant() {
+            self.channel.close();
+        }
+        if c.flags != 0 {
+            c.last_contact = Some(Instant::now());
+        }
+        c.flags
     }
 
     fn ccp_write(&self, value: u32) -> Result<(), u16> {
         let mut c = self.ccp.lock().expect("vgige ccp poisoned");
+        if c.expire_stale_grant() {
+            self.channel.close();
+        }
         if value == 0 {
             c.flags = 0;
+            c.last_contact = None;
+            self.channel.close();
             return Ok(());
         }
         let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
@@ -170,11 +204,12 @@ impl RegisterSpace {
             } else {
                 reg::CCP_CONTROL_ACCESS
             };
-            c.connection_count = (c.connection_count + 1).min(0xF);
+            c.last_contact = Some(Instant::now());
             return Ok(());
         }
         // R-069cd: a repeated identical request refreshes the grant.
         if requested == c.flags {
+            c.last_contact = Some(Instant::now());
             Ok(())
         } else {
             Err(GEV_STATUS_ACCESS_DENIED)
@@ -227,6 +262,10 @@ impl RegisterSpace {
         // Virtualized bootstrap registers.
         match addr {
             reg::CCP => return Ok(self.ccp_read()),
+            reg::HEARTBEAT_TIMEOUT => {
+                return Ok(self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms)
+            }
+            reg::NUM_STREAM_CHANNELS => return Ok(1),
             reg::DEVICE_MAC_HIGH => {
                 return Ok(u16::from_be_bytes([self.up_mac[0], self.up_mac[1]]) as u32)
             }
@@ -282,6 +321,10 @@ impl RegisterSpace {
         if addr == reg::CCP {
             return self.ccp_write(value);
         }
+        if addr == reg::HEARTBEAT_TIMEOUT {
+            self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms = value.max(500);
+            return Ok(());
+        }
         self.back_write_reg(addr, value)
     }
 
@@ -320,9 +363,63 @@ impl RegisterSpace {
             // Inside the local area but past the blob: unmapped.
             return Err(GEV_STATUS_INVALID_ADDRESS);
         }
+        let virtual_reg = reg::stream_channel_addr(addr).is_some()
+            || matches!(
+                addr,
+                reg::CCP
+                    | reg::HEARTBEAT_TIMEOUT
+                    | reg::NUM_STREAM_CHANNELS
+                    | reg::DEVICE_MAC_HIGH
+                    | reg::DEVICE_MAC_LOW
+                    | reg::CURRENT_IP
+                    | reg::GVCP_CAPABILITY
+            );
+        if count == 4 && virtual_reg {
+            return self.read_reg(addr).map(|value| value.to_be_bytes().to_vec());
+        }
         // Pass through. Ranges overlapping the virtualized slots above
         // (First URL / custom window / blob) but not contained in them are
         // unusual; the camera's answer for the range is forwarded.
         self.back_read_block(addr, count)
+    }
+
+    /// Block write (`data.len()` bytes, a multiple of 4); Err is a GEV status code.
+    pub fn write_block(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        if data.is_empty() || data.len() % 4 != 0 {
+            return Err(GEV_STATUS_BAD_ALIGNMENT);
+        }
+        let len = data.len() as u32;
+        let end = addr.checked_add(len).ok_or(GEV_STATUS_INVALID_ADDRESS)?;
+        if addr >= reg::FIRST_URL && end <= reg::SECOND_URL {
+            return Err(GEV_STATUS_WRITE_PROTECT);
+        }
+        if addr >= CUSTOM_BASE && end <= CUSTOM_BASE + (CUSTOM_SLOTS as u32) * 4 {
+            for (index, chunk) in data.chunks_exact(4).enumerate() {
+                let slot = ((addr - CUSTOM_BASE) / 4) as usize + index;
+                self.slot_write(slot, u32::from_be_bytes(chunk.try_into().expect("u32")))?;
+            }
+            return Ok(());
+        }
+        if addr >= XML_BASE_V {
+            return Err(GEV_STATUS_WRITE_PROTECT);
+        }
+        let virtual_reg = reg::stream_channel_addr(addr).is_some()
+            || matches!(
+                addr,
+                reg::CCP
+                    | reg::HEARTBEAT_TIMEOUT
+                    | reg::NUM_STREAM_CHANNELS
+                    | reg::DEVICE_MAC_HIGH
+                    | reg::DEVICE_MAC_LOW
+                    | reg::CURRENT_IP
+                    | reg::GVCP_CAPABILITY
+            );
+        if data.len() == 4 && virtual_reg {
+            return self.write_reg(addr, u32::from_be_bytes(data[..4].try_into().expect("u32")));
+        }
+        self.back
+            .lock()
+            .map_err(|_| crate::GEV_STATUS_ERROR)?
+            .write_block(addr, data)
     }
 }

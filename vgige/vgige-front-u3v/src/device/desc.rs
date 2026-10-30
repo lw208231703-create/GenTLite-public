@@ -232,10 +232,10 @@ fn interfaces_and_eps_ss(with_devinfo: bool) -> Vec<u8> {
     b
 }
 
-/// SS endpoint companion descriptor (USB 3.2 §9.6.7): no bursting
-/// (bMaxBurst 0), bulk (no attributes), no periodic bytes.
+/// SS endpoint companion descriptor (USB 3.2 §9.6.7): up to 16 bulk
+/// packets per burst (bMaxBurst 15), no attributes or periodic bytes.
 fn ss_endpoint_companion() -> [u8; 6] {
-    [6, 0x30, 0, 0, 0, 0]
+    [6, 0x30, 15, 0, 0, 0]
 }
 
 /// Super-speed device descriptor (USB 3.2 §9.6.1, Table 3-1's profile):
@@ -482,6 +482,11 @@ mod tests {
         assert_eq!(info.i_vendor_name, STR_MANUFACTURER);
         assert_eq!(info.i_model_name, STR_PRODUCT);
         assert_eq!(info.i_serial_number, STR_SERIAL);
+    }
+
+    #[test]
+    fn ss_companion_allows_bulk_bursting() {
+        assert_eq!(ss_endpoint_companion()[2], 15);
     }
 
     /// The FunctionFS strings payload is the v2 format (uapi

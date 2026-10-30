@@ -49,6 +49,8 @@ def main():
     if_close = fn("IFClose", [P])
     dev_open_ds = fn("DevOpenDataStream", [P, C.c_char_p, C.POINTER(P)])
     dev_close = fn("DevClose", [P])
+    dev_port = fn("DevGetPort", [P, C.POINTER(P)])
+    write_port = fn("GCWritePort", [P, U64, P, C.POINTER(SZ)])
     register_event = fn("GCRegisterEvent", [P, I32, C.POINTER(P)])
     unregister_event = fn("GCUnregisterEvent", [P, I32])
     announce = fn("DSAnnounceBuffer", [P, P, SZ, P, C.POINTER(P)])
@@ -110,6 +112,10 @@ def main():
 
         t0 = time.perf_counter()
         check(start(ds, 0, U64(-1).value), "DSStartAcquisition")
+        port = P()
+        check(dev_port(dev, C.byref(port)), "DevGetPort")
+        size = SZ(4)
+        check(write_port(port, 0x0004_0000, (1).to_bytes(4, "little"), C.byref(size)), "AcquisitionStart")
         for index in range(args.frames):
             raw = C.create_string_buffer(C.sizeof(EventData))
             size = SZ(C.sizeof(EventData))
@@ -136,6 +142,8 @@ def main():
         elapsed = time.perf_counter() - t0
         print(f"GIGE GRAB OK: {args.frames}/{args.frames} frames, {elapsed:.3f}s, {args.frames/elapsed:.3f} fps")
         check(stop(ds, 0), "DSStopAcquisition")
+        size = SZ(4)
+        check(write_port(port, 0x0004_0000, (0).to_bytes(4, "little"), C.byref(size)), "AcquisitionStop")
     finally:
         if ev.value:
             event_kill(ev)

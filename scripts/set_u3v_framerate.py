@@ -7,11 +7,12 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument("fps", type=int)
+parser.add_argument("--dll", default="target/release/gentl_u3v.cti")
 args = parser.parse_args()
 if not 1 <= args.fps <= 240:
     parser.error("fps must be in 1..240")
 
-lib = C.CDLL(str(Path("target/debug/gentl_u3v.dll").resolve()))
+lib = C.CDLL(str(Path(args.dll).resolve()))
 P = C.c_void_p
 SZ = C.c_size_t
 U64 = C.c_uint64

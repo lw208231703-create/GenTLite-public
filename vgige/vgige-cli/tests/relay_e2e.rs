@@ -141,6 +141,10 @@ fn register_passthrough_and_virtualized_identity() {
         s.remote.read_reg(reg::DEVICE_MAC_LOW).unwrap(),
         u32::from_be_bytes([UP_MAC[2], UP_MAC[3], UP_MAC[4], UP_MAC[5]])
     );
+    assert_eq!(s.remote.read_reg(reg::NUM_STREAM_CHANNELS).unwrap(), 1);
+    let mut channel_count = [0u8; 4];
+    s.remote.read_mem(reg::NUM_STREAM_CHANNELS, &mut channel_count).unwrap();
+    assert_eq!(channel_count, 1u32.to_be_bytes());
 
     // GVCP capability passes through with the packet_resend bit masked
     // (the virtual server never serves PACKETRESEND_CMD, R-197ca).
@@ -159,12 +163,30 @@ fn register_passthrough_and_virtualized_identity() {
     s.remote
         .write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS)
         .unwrap();
-    assert_eq!(
-        s.remote.read_reg(reg::CCP).unwrap(),
-        reg::CCP_CONTROL_ACCESS | (1 << reg::CCP_CONNECTION_COUNT_SHIFT)
-    );
+    assert_eq!(s.remote.read_reg(reg::CCP).unwrap(), reg::CCP_CONTROL_ACCESS);
     s.remote.write_reg(reg::CCP, 0).unwrap();
-    assert_eq!(s.remote.read_reg(reg::CCP).unwrap(), 1 << reg::CCP_CONNECTION_COUNT_SHIFT);
+    assert_eq!(s.remote.read_reg(reg::CCP).unwrap(), 0);
+
+    s.remote.write_reg(reg::HEARTBEAT_TIMEOUT, 500).unwrap();
+    assert_eq!(s.remote.read_reg(reg::HEARTBEAT_TIMEOUT).unwrap(), 500);
+    s.remote.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(600));
+    s.remote.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
+}
+
+#[test]
+fn control_release_closes_stream_but_new_grant_does_not() {
+    let s = start(false);
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    s.remote.write_reg(reg::SCP0, reg::scp_make(12345)).unwrap();
+    assert_ne!(s.remote.read_reg(reg::SCP0).unwrap(), 0);
+
+    s.remote.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap();
+    assert_ne!(s.remote.read_reg(reg::SCP0).unwrap(), 0);
+    s.remote.write_reg(reg::CCP, 0).unwrap();
+    assert_eq!(s.remote.read_reg(reg::SCP0).unwrap(), 0);
 }
 
 #[test]
@@ -327,11 +349,9 @@ fn stream_relay_reemits_as_30_from_a_12_camera() {
         .unwrap();
     assert!(relayed >= 2, "FrameCountRelayed = {relayed}");
 
-    // R-586cd on the virtual channel: a non-zero SCP write while open.
-    assert_eq!(
-        gev(s.remote.write_reg(reg::SCP0, reg::scp_make(1)).unwrap_err()),
-        GEV_STATUS_BUSY
-    );
+    // A first Start may reopen the channel while it is already open.
+    s.remote.write_reg(reg::SCP0, reg::scp_make(1)).unwrap();
+    assert_eq!(s.remote.read_reg(reg::SCP0).unwrap(), reg::scp_make(1));
 
     // Close cascades: the real camera's channel is closed too (R-091ca).
     s.remote.write_reg(reg::SCP0, 0).unwrap();

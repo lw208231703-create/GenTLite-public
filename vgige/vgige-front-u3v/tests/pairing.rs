@@ -177,6 +177,48 @@ fn stream_blocks_roundtrip_byte_exact() {
 }
 
 #[test]
+fn variable_frame_sizes_do_not_desync_following_blocks() {
+    let p = start();
+    let stream = p.client.stream(0).expect("stream channel 0");
+    stream.start().expect("program SIRM + Stream Enable");
+    let mut session = p.device.frame_session();
+    session.open(0).expect("session open");
+
+    let mut small = mono8_frame(3, 333);
+    small.width = 2;
+    small.height = 1;
+    small.payload.truncate(2);
+    let mut medium = mono8_frame(4, 444);
+    medium.width = 2;
+    medium.height = 2;
+    medium.payload.truncate(4);
+    session.send_frame(&small);
+    session.send_frame(&medium);
+    session.send_frame(&mono8_frame(5, 555));
+
+    for (block_id, width, height, payload_len) in [(3, 2, 1, 2), (4, 2, 2, 4), (5, W, H, PAYLOAD)] {
+        let block = stream
+            .next_block(Duration::from_secs(5))
+            .expect("variable-size block")
+            .expect("variable-size block ok");
+        match block {
+            Block::Image {
+                leader,
+                payload,
+                trailer,
+            } => {
+                assert_eq!(leader.block_id, block_id - 2);
+                assert_eq!((leader.size_x, leader.size_y), (width, height));
+                assert_eq!(payload.len(), payload_len);
+                assert_eq!(trailer.status, 0);
+                assert_eq!(trailer.size_y, height);
+            }
+            other => panic!("expected an image block, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn eirm_test_event_reaches_host() {
     let p = start();
     let events = p.client.start_events().expect("start DEI pump");

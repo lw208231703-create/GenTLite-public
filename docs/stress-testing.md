@@ -295,7 +295,24 @@ target/release/examples/grab_u3v.exe 1209:7D01:NULL-0001 27000
 target/release/examples/grab_u3v.exe 1209:7D01:NULL-0001 216000
 ```
 
-**采集窗口要一直保持打开**，期间不要睡眠电脑、拔 Type-C 线或关闭板端服务。另开一个 Git Bash 窗口，按第 7 节查看日志和资源趋势；新窗口记得重新执行 `BOARD=root@192.168.137.55`。
+2 小时通过后，按同样方式跑 8 小时。默认约 30 fps 时为 864000 帧；若已设置 120 fps，则使用 3456000 帧：
+
+```bash
+# 约 30 fps × 8 小时
+target/release/examples/grab_u3v.exe 1209:7D01:NULL-0001 864000
+# 约 120 fps × 8 小时；与上一行二选一
+target/release/examples/grab_u3v.exe 1209:7D01:NULL-0001 3456000
+```
+
+**常规长稳的采集窗口要一直保持打开**，期间不要睡眠电脑、拔 Type-C 线或关闭板端服务。另开一个 Git Bash 窗口，按第 7 节查看日志和资源趋势；新窗口记得重新执行 `BOARD=root@192.168.137.55`。
+
+Windows 的 USB 选择性挂起可用下面命令检查（两个十六进制值均为 1 表示启用）：
+
+```bash
+powercfg /q SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226
+```
+
+常规长稳建议暂时记录并恢复原设置。选择性挂起专项应单独进行：让长稳保持运行，允许系统进入睡眠，唤醒后检查设备是否重新枚举，再采 50 帧确认恢复。不要为了该专项在无人值守时强制睡眠正在使用的电脑。
 
 如果人为按 Ctrl+C 中止，先执行下面的命令恢复干净状态，再重新开始：
 
@@ -343,7 +360,7 @@ GENTLITE_DISCOVERY_TARGETS=192.168.137.55:3956 \
 
 ### 4.3 采帧、启停和长跑
 
-`grab_camera` 写死了项目真实相机的寄存器，**不要用于 null 虚拟 GigE**。使用仓库提供的虚拟 GigE 压测脚本：
+`grab_camera` 写死了项目真实相机的寄存器，**不要用于 null 虚拟 GigE**。使用仓库提供的虚拟 GigE 压测脚本。打开设备/SCP 通道只表示连接成功，不会立即产生满速数据；脚本会执行 `AcquisitionStart` 后才开始收帧，并在结束时执行 `AcquisitionStop`。
 
 ```bash
 # 冒烟 / 基线
@@ -362,7 +379,32 @@ python scripts/stress_virtual_gige.py --frames 216000
 
 脚本只使用 Python 标准库和当前 GenTL DLL，输出总帧数、耗时与平均 fps。
 
-### 4.4 恢复虚拟 U3V
+### 4.4 用 Aravis 做 2 小时、8 小时长稳
+
+Aravis 自环使用普通 UDP socket，并由外部 `timeout` 控制测试窗口。下面的 `timeout` 到期返回 124 属于正常结束，最后会打印累计统计：
+
+```bash
+# 2 小时，60 fps（当前零丢包长稳基线）
+ssh "$BOARD" 'timeout 7200 arv-camera-test-0.8 --name=192.168.137.55 \
+  --no-packet-socket --features="FrameRate=60" --auto >/tmp/arv-gige-2h.log 2>&1; \
+  rc=$?; tail -35 /tmp/arv-gige-2h.log; [ "$rc" -eq 124 ] || [ "$rc" -eq 0 ]'
+
+# 8 小时；与上一行分开执行
+ssh "$BOARD" 'timeout 28800 arv-camera-test-0.8 --name=192.168.137.55 \
+  --no-packet-socket --features="FrameRate=60" --auto >/tmp/arv-gige-8h.log 2>&1; \
+  rc=$?; tail -35 /tmp/arv-gige-8h.log; [ "$rc" -eq 124 ] || [ "$rc" -eq 0 ]'
+```
+
+验收时检查 `n_completed_buffers` 持续增长，且 `n_failures`、`n_missing_packets`、`n_underruns` 符合本次测试目标。高帧率性能探测与零丢包长稳要分开记录：240 fps 设置下 GigE 稳定段曾达到约 236–239 fps，但仍出现 UDP 丢包，不能据此宣称零丢包通过。复测命令：
+
+```bash
+ssh "$BOARD" 'arv-camera-test-0.8 --name=192.168.137.55 --duration=10 \
+  --no-packet-socket --features="FrameRate=240" --auto'
+```
+
+Windows U3V 可先用 50 帧冒烟，再在 640×512 ROI、240 fps 设置下采 2400 帧。当前优化后实测为 238.830 fps、2400/2400 帧完整非零；1280×1024 大帧经 SS burst=15 和 256 KiB 分段优化后约 197–208 fps。改变 ROI 后必须重新开流，让宿主按新的 SIRM Required Payload Size 编程；设备端也应动态提供该值，不能只在 GenICam `PayloadSize` 节点上更新。
+
+### 4.5 恢复虚拟 U3V
 
 ```bash
 bash scripts/board-restart.sh "$BOARD"

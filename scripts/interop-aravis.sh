@@ -9,10 +9,14 @@
 #      between one of its own USB-A ports (host mode) and its Type-C
 #      (device mode) — no second machine needed.
 #
-# Usage: bash scripts/interop-aravis.sh [arv-tool-0.8 | arv-camera-test-0.8]
+# Usage: bash scripts/interop-aravis.sh [arv-tool-0.8 | arv-camera-test-0.8] [camera-id]
+# Environment: ARV_CAMERA=<id>, ARV_DURATION=5, ARV_NO_PACKET_SOCKET=1.
+# Use ARV_NO_PACKET_SOCKET=1 for a GigE self-loop on the same Linux host.
 set -euo pipefail
 
 ARV="${1:-}"
+CAMERA="${2:-${ARV_CAMERA:-}}"
+DURATION="${ARV_DURATION:-5}"
 if [ -z "$ARV" ]; then
     for c in arv-tool-0.8 arv-camera-test-0.8; do
         if command -v "$c" >/dev/null 2>&1; then ARV="$c"; break; fi
@@ -38,14 +42,21 @@ if [[ "$ARV" == *tool* ]]; then
         exit 1
     fi
 else
-    # arv-camera-test-0.8: discovers the first camera and grabs briefly —
-    # covers discovery + open + streaming in one shot.
-    echo "==> discovering + grabbing (5s) ..."
-    if timeout 20 "$ARV" --duration=5 2>&1 | tee /tmp/arv-run.log; then
-        if grep -qi "1209\|GenTLite\|Virtual\|frames" /tmp/arv-run.log; then
+    cmd=("$ARV" "--duration=$DURATION")
+    if [ -n "$CAMERA" ]; then
+        cmd+=(--name "$CAMERA")
+    fi
+    if [ "${ARV_NO_PACKET_SOCKET:-0}" = "1" ]; then
+        cmd+=(--no-packet-socket)
+    fi
+    echo "==> discovering + grabbing (${DURATION}s) ..."
+    if timeout 30 "${cmd[@]}" 2>&1 | tee /tmp/arv-run.log; then
+        if grep -Eq 'n_completed_buffers[[:space:]]*=[[:space:]]*[1-9][0-9]*' /tmp/arv-run.log \
+            && grep -Eq 'n_failures[[:space:]]*=[[:space:]]*0' /tmp/arv-run.log; then
             echo "PASS: aravis discovered, opened and streamed the virtual camera"
         else
-            echo "FAIL: ran but no camera output" >&2
+            echo "FAIL: no completed frames or acquisition failures were reported" >&2
+            echo "      GigE self-loop: retry with ARV_NO_PACKET_SOCKET=1" >&2
             exit 1
         fi
     else

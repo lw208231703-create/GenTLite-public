@@ -103,6 +103,10 @@ impl DeviceHandler for GigEFront {
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
         self.space.read_block(addr, count)
     }
+
+    fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.space.write_block(addr, data)
+    }
 }
 
 /// GVSP 3.0 encoding session: one UDP sender socket plus the virtual
@@ -188,7 +192,7 @@ fn send_block(
     if socket.send_to(&pkt, target).is_err() {
         return;
     }
-    let mut packet_id = 1u32; // R-264st: payload ids from 1.
+    let mut packet_id = 1u32;
     for data in frame.payload.chunks(chunk) {
         let mut pkt = Vec::with_capacity(GVSP_HEADER_LEN + data.len());
         push_header(&mut pkt, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);

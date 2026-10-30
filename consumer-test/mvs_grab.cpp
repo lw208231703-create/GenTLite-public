@@ -37,42 +37,44 @@ int main() {
         if (nRet != MV_OK) {
             throw std::runtime_error("TriggerMode failed");
         }
-        nRet = MV_CC_StartGrabbing(handle);
-        if (nRet != MV_OK) {
-            throw std::runtime_error("MV_CC_StartGrabbing failed");
-        }
+        for (unsigned round = 0; round < 2; ++round) {
+            nRet = MV_CC_StartGrabbing(handle);
+            if (nRet != MV_OK) {
+                throw std::runtime_error("MV_CC_StartGrabbing failed");
+            }
 
-        unsigned complete = 0;
-        for (unsigned i = 0; i < 100; ++i) {
-            MV_FRAME_OUT frame = {0};
-            nRet = MV_CC_GetImageBuffer(handle, &frame, 5000);
-            if (nRet != MV_OK) {
-                throw std::runtime_error("MV_CC_GetImageBuffer failed");
-            }
-            if (frame.stFrameInfo.nExtendWidth != 1280 ||
-                frame.stFrameInfo.nExtendHeight != 1024) {
-                throw std::runtime_error("unexpected frame geometry");
-            }
-            bool nonzero = false;
-            for (unsigned j = 0; j < frame.stFrameInfo.nFrameLen; ++j) {
-                if (frame.pBufAddr[j] != 0) {
-                    nonzero = true;
-                    break;
+            unsigned complete = 0;
+            for (unsigned i = 0; i < 100; ++i) {
+                MV_FRAME_OUT frame = {0};
+                nRet = MV_CC_GetImageBuffer(handle, &frame, 5000);
+                if (nRet != MV_OK) {
+                    throw std::runtime_error("MV_CC_GetImageBuffer failed");
                 }
+                if (frame.stFrameInfo.nExtendWidth != 1280 ||
+                    frame.stFrameInfo.nExtendHeight != 1024) {
+                    throw std::runtime_error("unexpected frame geometry");
+                }
+                bool nonzero = false;
+                for (unsigned j = 0; j < frame.stFrameInfo.nFrameLen; ++j) {
+                    if (frame.pBufAddr[j] != 0) {
+                        nonzero = true;
+                        break;
+                    }
+                }
+                if (!nonzero) {
+                    throw std::runtime_error("zero frame");
+                }
+                nRet = MV_CC_FreeImageBuffer(handle, &frame);
+                if (nRet != MV_OK) {
+                    throw std::runtime_error("MV_CC_FreeImageBuffer failed");
+                }
+                ++complete;
             }
-            if (!nonzero) {
-                throw std::runtime_error("zero frame");
-            }
-            nRet = MV_CC_FreeImageBuffer(handle, &frame);
+            std::printf("MVS OK: round %u, %u/100 frames\n", round, complete);
+            nRet = MV_CC_StopGrabbing(handle);
             if (nRet != MV_OK) {
-                throw std::runtime_error("MV_CC_FreeImageBuffer failed");
+                throw std::runtime_error("MV_CC_StopGrabbing failed");
             }
-            ++complete;
-        }
-        std::printf("MVS OK: %u/100 frames\n", complete);
-        nRet = MV_CC_StopGrabbing(handle);
-        if (nRet != MV_OK) {
-            throw std::runtime_error("MV_CC_StopGrabbing failed");
         }
         MV_CC_CloseDevice(handle);
         MV_CC_DestroyHandle(handle);

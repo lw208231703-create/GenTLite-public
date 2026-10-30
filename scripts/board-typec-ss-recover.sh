@@ -12,10 +12,24 @@ fi
 
 UDC=fc000000.usb
 DRIVER=/sys/bus/platform/drivers/dwc3
+LAST_ORIENTATION=/run/vgige-typec-last-orientation
+
+exec 9>/run/vgige-typec-recover.lock
+flock 9
 
 if [[ ! -e /sys/class/typec/port0/orientation ]]; then
     echo "Type-C port0 is unavailable" >&2
     exit 1
+fi
+
+orientation=$(cat /sys/class/typec/port0/orientation)
+if [[ $(cat "/sys/class/udc/$UDC/current_speed" 2>/dev/null || true) == super-speed ]]; then
+    echo "SuperSpeed is already active; recovery is not needed"
+    exit 0
+fi
+if [[ -f $LAST_ORIENTATION ]] && [[ $(cat "$LAST_ORIENTATION") == "$orientation" ]]; then
+    echo "Recovery was already attempted for $orientation; ignoring a duplicate event"
+    exit 0
 fi
 
 systemctl stop vgige.service 2>/dev/null || true
@@ -25,6 +39,7 @@ sleep 1
 echo "$UDC" > "$DRIVER/unbind"
 sleep 1
 echo "$UDC" > "$DRIVER/bind"
+printf '%s\n' "$orientation" > "$LAST_ORIENTATION"
 sleep 2
 
 systemctl start vgige.service

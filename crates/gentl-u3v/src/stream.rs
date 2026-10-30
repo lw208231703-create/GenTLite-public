@@ -36,8 +36,8 @@ pub fn stream_id(index: u32) -> String {
 /// piece (the device sees EPIPE after the leader); 512 KiB pieces
 /// stream indefinitely (500/500 frames verified). The precise
 /// driver-level mechanism is an open question (Q39); 512 KiB is the
-/// empirical safe value.
-const PAYLOAD_TRANSFER: u64 = 1 << 19;
+/// empirical safe value. 256 KiB measured best for large frames.
+const PAYLOAD_TRANSFER: u64 = 1 << 18;
 
 /// SIRM snapshot of one stream channel, taken at `DevOpenDataStream`.
 #[derive(Debug, Clone)]
@@ -873,15 +873,15 @@ mod tests {
         let g = plan_geometry(326_680, 52, 32, 1);
         assert_eq!(g.max_leader, 52);
         assert_eq!(g.max_trailer, 32);
-        // Smaller than the 1 MiB cap: one equal-sized transfer.
-        assert_eq!(g.transfer_size, 326_680);
+        // One full transfer plus the remaining tail.
+        assert_eq!(u64::from(g.transfer_size), PAYLOAD_TRANSFER);
         assert_eq!(g.transfer_count, 1);
-        assert_eq!(g.final1, 0);
+        assert_eq!(g.final1, 326_680 - 262_144);
         assert_eq!(g.final2, 0);
 
         let g = plan_geometry(3 << 20, 52, 32, 1);
-        assert_eq!(g.transfer_size, 1 << 19); // the empirical cap (Q39)
-        assert_eq!(g.transfer_count, 6);
+        assert_eq!(u64::from(g.transfer_size), PAYLOAD_TRANSFER);
+        assert_eq!(g.transfer_count, 12);
         assert_eq!(g.final1, 0);
 
         // Alignment 4: every programmed value is a multiple of 4.
@@ -894,7 +894,7 @@ mod tests {
             g.transfer_size as u64 * g.transfer_count as u64 + g.final1 as u64 + g.final2 as u64;
         assert!(total >= 1000);
 
-        // Alignment larger than the 1 MiB cap: TS falls back to the
+        // Alignment larger than the 256 KiB cap: TS falls back to the
         // alignment itself.
         let g = plan_geometry(1 << 22, 64, 32, 1 << 22);
         assert_eq!(g.transfer_size as u64, 1 << 22);

@@ -396,9 +396,9 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
     });
     let front = GigEFront::new(identity, space);
 
-    // Bind the up-facing address explicitly: the device must not answer
-    // on the camera-facing network.
-    let server = GvcpServer::start_bound(args.up, args.port, front.clone()).unwrap_or_else(|e| {
+    // Standard GigE discovery uses limited/subnet broadcast, which a socket
+    // bound to one unicast address does not receive.
+    let server = GvcpServer::start(args.port, front.clone()).unwrap_or_else(|e| {
         eprintln!("vgige: starting the GVCP server: {e}");
         std::process::exit(1);
     });

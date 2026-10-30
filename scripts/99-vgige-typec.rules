@@ -1,1 +1,2 @@
-ACTION=="change", SUBSYSTEM=="typec", KERNEL=="port0", ATTR{orientation}=="reverse", ENV{SYSTEMD_WANTS}="vgige-typec-recover.service"
+ACTION=="change", SUBSYSTEM=="typec", KERNEL=="port0", ATTR{orientation}=="normal", RUN+="/root/typec-ss-recover.sh"
+ACTION=="change", SUBSYSTEM=="typec", KERNEL=="port0", ATTR{orientation}=="reverse", RUN+="/root/typec-ss-recover.sh"

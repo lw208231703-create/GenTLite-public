@@ -1,5 +1,5 @@
 [Unit]
-Description=Reinitialize DWC3 after Type-C reverse orientation
+Description=Reinitialize DWC3 after Type-C orientation changes
 After=vgige.service
 
 [Service]

@@ -1,5 +1,5 @@
-//! GVCP server: answers DISCOVERY / READREG / WRITEREG / READMEM for a
-//! simulated (or test) device. One thread per server instance.
+//! GVCP server: answers DISCOVERY / READREG / WRITEREG / READMEM / WRITEMEM
+//! for a simulated (or test) device. One thread per server instance.
 
 use std::net::{Ipv4Addr, UdpSocket};
 use std::sync::Arc;
@@ -25,6 +25,12 @@ pub trait DeviceHandler: Send + 'static {
     /// Read `count` bytes at `addr` from device memory. Err(status) is a
     /// GEV status code. Must succeed atomically (all bytes or error).
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16>;
+
+    /// Write bytes at `addr` to device memory. Devices without WRITEMEM
+    /// support keep the default NOT_IMPLEMENTED response.
+    fn write_mem(&self, _addr: u32, _data: &[u8]) -> Result<(), u16> {
+        Err(GEV_STATUS_NOT_IMPLEMENTED)
+    }
 
     /// PACKETRESEND_CMD (§16.7): retransmit the given packet-id range of
     /// the cached block. Fire-and-forget — no ack exists (CR-201cd), so
@@ -154,6 +160,7 @@ fn serve_loop<H: DeviceHandler>(
             }
             WRITEREG_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
+                let mut written = 0u32;
                 if payload_in.is_empty() || payload_in.len() % 8 != 0 {
                     status = GEV_STATUS_INVALID_PARAMETER;
                 } else {
@@ -164,10 +171,12 @@ fn serve_loop<H: DeviceHandler>(
                             status = s;
                             break;
                         }
+                        written += 1;
                     }
                 }
-                AckHeader::new(status, WRITEREG_ACK, 0, cmd.req_id).encode(&mut ack);
+                AckHeader::new(status, WRITEREG_ACK, 4, cmd.req_id).encode(&mut ack);
                 out.extend_from_slice(&ack);
+                out.extend_from_slice(&written.to_be_bytes());
             }
             READMEM_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
@@ -193,6 +202,24 @@ fn serve_loop<H: DeviceHandler>(
                 AckHeader::new(status, READMEM_ACK, len as u16, cmd.req_id).encode(&mut ack);
                 out.extend_from_slice(&ack);
                 out.extend_from_slice(&data);
+            }
+            WRITEMEM_CMD => {
+                let mut status = GEV_STATUS_SUCCESS;
+                let mut addr = 0u32;
+                if payload_in.len() < 8 || (payload_in.len() - 4) % 4 != 0 {
+                    status = GEV_STATUS_INVALID_PARAMETER;
+                } else {
+                    addr = u32::from_be_bytes([payload_in[0], payload_in[1], payload_in[2], payload_in[3]]);
+                    if let Err(s) = handler.write_mem(addr, &payload_in[4..]) {
+                        status = s;
+                    }
+                }
+                let len = if status == GEV_STATUS_SUCCESS { 4 } else { 0 };
+                AckHeader::new(status, WRITEMEM_ACK, len, cmd.req_id).encode(&mut ack);
+                out.extend_from_slice(&ack);
+                if status == GEV_STATUS_SUCCESS {
+                    out.extend_from_slice(&addr.to_be_bytes());
+                }
             }
             // PACKETRESEND (§16.7): fire-and-forget — CR-198ca forbids the
             // ACKNOWLEDGE flag and CR-201cd defines no PACKETRESEND_ACK,

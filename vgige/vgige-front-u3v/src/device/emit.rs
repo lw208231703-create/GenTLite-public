@@ -143,8 +143,6 @@ fn emit_payload(
         let end = (offset + n).min(payload.len());
         let mut piece = Vec::with_capacity(n);
         piece.extend_from_slice(&payload[offset..end]);
-        // Every programmed piece must be present, including zero-filled
-        // pieces after a short frame's real payload has been exhausted.
         piece.resize(n, 0);
         stream.send(&piece)?;
         offset = end;

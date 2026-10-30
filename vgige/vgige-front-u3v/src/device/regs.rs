@@ -157,7 +157,9 @@ impl RegisterFile {
     /// One register/block read; Err is a GenCP status code (§4.3.2.1).
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), u16> {
         let len = buf.len() as u64;
-        if addr == ACQ_BASE + 0x08 && (len == 4 || len == 8) {
+        if (addr == ACQ_BASE + 0x08 || addr == SIRM_BASE + packets::sirm::SI_REQUIRED_PAYLOAD_SIZE)
+            && (len == 4 || len == 8)
+        {
             if let Ok(size) = self.back.lock().map_err(|_| packets::GENCP_ERROR)?.payload_size() {
                 let bytes = size.to_le_bytes();
                 buf.copy_from_slice(&bytes[..len as usize]);
@@ -196,6 +198,9 @@ impl RegisterFile {
     /// One register/block write; Err is a GenCP status code.
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<(), u16> {
         let len = data.len() as u64;
+        if (addr == ACQ_BASE || addr == ACQ_BASE + 4) && len == 4 {
+            self.back_write(addr, data)?;
+        }
         if addr >= u64::from(CUSTOM_BASE)
             && addr + len <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
         {
@@ -596,5 +601,12 @@ mod tests {
         let mut b64 = [0u8; 8];
         rf.read(ACQ_BASE + 0x08, &mut b64).unwrap();
         assert_eq!(u64::from_le_bytes(b64), 640 * 512);
+        rf.read(SIRM_BASE + packets::sirm::SI_REQUIRED_PAYLOAD_SIZE, &mut b64)
+            .unwrap();
+        assert_eq!(u64::from_le_bytes(b64), 640 * 512);
+        rf.write(ACQ_BASE, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(back.lock().unwrap().read_reg(ACQ_BASE as u32).unwrap(), 1);
+        rf.write(ACQ_BASE + 4, &0u32.to_le_bytes()).unwrap();
+        assert_eq!(back.lock().unwrap().read_reg(ACQ_BASE as u32).unwrap(), 0);
     }
 }

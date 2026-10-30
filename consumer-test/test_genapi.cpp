@@ -288,7 +288,7 @@ int run() {
     }
 
     if (is_u3v) {
-        GenApi::CIntegerPtr exposure(node_map->GetNode("ExposureTimeAbs"));
+        GenApi::CFloatPtr exposure(node_map->GetNode("ExposureTimeAbs"));
         if (!exposure.IsValid()) {
             throw std::runtime_error("node ExposureTimeAbs missing");
         }
@@ -298,7 +298,7 @@ int run() {
         if (std::fabs(def - 10000.0) > 0.5) {
             throw std::runtime_error("unexpected ExposureTimeAbs default");
         }
-        exposure->SetValue(12345);
+        exposure->SetValue(12345.0);
         double back = static_cast<double>(exposure->GetValue(false, true));
         std::printf("ExposureTimeAbs readback: %g us\n", back);
         if (std::fabs(back - 12345.0) > 0.001) {

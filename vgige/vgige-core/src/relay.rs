@@ -234,9 +234,7 @@ impl Relay {
             .is_some();
         if host_port != 0 {
             if open {
-                // R-586cd: only a zero write (close) is accepted while the
-                // channel is streaming.
-                return Err(GEV_STATUS_BUSY);
+                self.close();
             }
             if !self.stream_enabled {
                 // --no-stream control relay: the virtual device runs with
