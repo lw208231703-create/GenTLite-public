@@ -48,6 +48,8 @@ pub const REG_GAIN: u32 = 0x0004_1018;
 pub const REG_FRAME_RATE: u32 = 0x0004_101C;
 pub const REG_ACQUISITION_START: u32 = 0x0004_0000;
 pub const REG_ACQUISITION_STOP: u32 = 0x0004_0004;
+/// SFNC 2.x AcquisitionMode: Continuous = 2.
+pub const REG_ACQUISITION_MODE: u32 = 0x0004_000C;
 
 /// Minimal but GenApi-legal device description (v1 demo — placeholder
 /// GUIDs in the simulator's style; SmartCamera nodes come from the
@@ -64,6 +66,25 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20 <Port Name=\"Device\" NameSpace=\"Standard\">\n\
 \x20   <ToolTip>The GenCP device port (implemented by the GenTL producer).</ToolTip>\n\
 \x20 </Port>\n\
+\x20 <Group Comment=\"Categories\">\n\
+\x20   <Category Name=\"Root\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Provides the Root of the GenICam features tree.</ToolTip>\n\
+\x20     <Description>Provides the Root of the GenICam features tree.</Description>\n\
+\x20     <DisplayName>Root</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <ImposedAccessMode>RO</ImposedAccessMode>\n\
+\x20     <pFeature>DeviceVendorName</pFeature><pFeature>DeviceModelName</pFeature>\n\
+\x20     <pFeature>DeviceVersion</pFeature><pFeature>DeviceFirmwareVersion</pFeature>\n\
+\x20     <pFeature>DeviceSerialNumber</pFeature><pFeature>DeviceUserID</pFeature>\n\
+\x20     <pFeature>Width</pFeature><pFeature>Height</pFeature>\n\
+\x20     <pFeature>OffsetX</pFeature><pFeature>OffsetY</pFeature>\n\
+\x20     <pFeature>PixelFormat</pFeature><pFeature>PayloadSize</pFeature>\n\
+\x20     <pFeature>ExposureTimeAbs</pFeature><pFeature>Gain</pFeature>\n\
+\x20     <pFeature>FrameRate</pFeature><pFeature>AcquisitionFrameRate</pFeature>\n\
+\x20     <pFeature>AcquisitionStart</pFeature><pFeature>AcquisitionStop</pFeature>\n\
+\x20     <pFeature>AcquisitionMode</pFeature><pFeature>TriggerMode</pFeature>\n\
+\x20     <pFeature>SmartCamera</pFeature>\n\
+\x20   </Category>\n\
+\x20 </Group>\n\
 \x20 <String Name=\"DeviceVendorName\" NameSpace=\"Standard\"><Value>GenTLite</Value></String>\n\
 \x20 <String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual</Value></String>\n\
 \x20 <String Name=\"DeviceVersion\" NameSpace=\"Standard\"><Value>1.0.0</Value></String>\n\
@@ -111,14 +132,14 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20     <pValue>PixelFormatReg</pValue>\n\
 \x20   </Enumeration>\n\
 \x20   <IntReg Name=\"PixelFormatReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00041008</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <Address>0x00041008</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
 \x20 <Group Comment=\"AcquisitionControl\">\n\
 \x20   <Float Name=\"ExposureTimeAbs\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Unit>us</Unit>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>0</Min><Max>100000</Max><Unit>us</Unit>\n\
 \x20   </Float>\n\
 \x20   <IntReg Name=\"ExposureTimeAbs_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041014</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
@@ -134,7 +155,7 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"FrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>0</Min><Max>240</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <IntReg Name=\"FrameRate_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x0004101C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
@@ -142,7 +163,7 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"AcquisitionFrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Acquisition Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>0</Min><Max>240</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <Command Name=\"AcquisitionStart\" NameSpace=\"Standard\">\n\
 \x20     <pValue>AcquisitionStart_Reg</pValue><CommandValue>1</CommandValue>\n\
@@ -160,11 +181,11 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"AcquisitionMode\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Acquisition Mode</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <EnumEntry Name=\"Continuous\" NameSpace=\"Standard\"><DisplayName>Continuous</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"Continuous\" NameSpace=\"Standard\"><DisplayName>Continuous</DisplayName><Value>2</Value></EnumEntry>\n\
 \x20     <pValue>AcquisitionModeReg</pValue>\n\
 \x20   </Enumeration>\n\
 \x20   <IntReg Name=\"AcquisitionModeReg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x0004000C</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <Address>0x0004000C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"TriggerMode\" NameSpace=\"Standard\">\n\
@@ -186,31 +207,6 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
-\x20 <Group Comment=\"GigE Transport\">\n\
-\x20   <Integer Name=\"GevStreamChannelCount\" NameSpace=\"Standard\"><Value>1</Value></Integer>\n\
-\x20   <Integer Name=\"GevCurrentStreamChannel\" NameSpace=\"Standard\"><Value>0</Value></Integer>\n\
-\x20   <Integer Name=\"GevSCPSPacketSize\" NameSpace=\"Standard\">\n\
-\x20     <pValue>GevSCPSPacketSize_Reg</pValue><Min>576</Min><Max>9000</Max>\n\
-\x20   </Integer>\n\
-\x20   <IntReg Name=\"GevSCPSPacketSize_Reg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00000D04</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
-\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
-\x20   </IntReg>\n\
-\x20   <Integer Name=\"GevSCPD\" NameSpace=\"Standard\">\n\
-\x20     <pValue>GevSCPD_Reg</pValue><Min>0</Min><Max>4294967295</Max>\n\
-\x20   </Integer>\n\
-\x20   <IntReg Name=\"GevSCPD_Reg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00000D08</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
-\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
-\x20   </IntReg>\n\
-\x20   <Integer Name=\"GevSCDA\" NameSpace=\"Standard\">\n\
-\x20     <pValue>GevSCDA_Reg</pValue><Min>0</Min><Max>4294967295</Max>\n\
-\x20   </Integer>\n\
-\x20   <IntReg Name=\"GevSCDA_Reg\" NameSpace=\"Custom\">\n\
-\x20     <Address>0x00000D18</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
-\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>BigEndian</Endianess>\n\
-\x20   </IntReg>\n\
-\x20 </Group>\n\
 </RegisterDescription>\n";
 
 /// The synthetic camera: a writable register view plus a pattern stream.
@@ -230,6 +226,7 @@ impl NullBack {
                 (REG_EXPOSURE_US, EXPOSURE_US),
                 (REG_GAIN, GAIN),
                 (REG_FRAME_RATE, FRAME_RATE),
+                (REG_ACQUISITION_MODE, 2), // SFNC Continuous
             ]))),
         }
     }
@@ -254,6 +251,10 @@ impl CameraBack for NullBack {
             }
             REG_ACQUISITION_STOP => {
                 regs.insert(REG_ACQUISITION_START, 0);
+            }
+            REG_ACQUISITION_MODE => {
+                // Only Continuous (SFNC value 2) is supported.
+                regs.insert(addr, 2);
             }
             REG_WIDTH | REG_HEIGHT => {
                 regs.insert(addr, value.clamp(1, 4096));

@@ -389,6 +389,7 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     sbrm[0x28..0x2C].copy_from_slice(&0x48u32.to_le_bytes());
     sbrm[0x2C..0x34].copy_from_slice(&crate::EIRM_BASE.to_le_bytes());
     sbrm[0x34..0x38].copy_from_slice(&0x0Cu32.to_le_bytes());
+    sbrm[0x40..0x44].copy_from_slice(&0x08u32.to_le_bytes()); // Current Speed: SuperSpeed
 
     // SIRM (Table 5-1/5-2): alignment 1 (SI_INFO=0), standard mode;
     // RW transfer sizes zeroed (host programs at Stream Enable).
@@ -539,6 +540,9 @@ mod tests {
             rf.read(crate::SBRM_BASE + off, &mut buf)
                 .unwrap_or_else(|s| panic!("SBRM read +0x{off:02X}/{len} -> 0x{s:04X}"));
         }
+        let mut speed = [0u8; 4];
+        rf.read(crate::SBRM_BASE + 0x40, &mut speed).unwrap();
+        assert_eq!(u32::from_le_bytes(speed), 0x08);
         let _ = &mut b;
     }
 

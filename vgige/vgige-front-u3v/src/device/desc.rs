@@ -33,6 +33,10 @@ pub const STR_MANUFACTURER: u8 = 1;
 pub const STR_PRODUCT: u8 = 2;
 pub const STR_SERIAL: u8 = 3;
 pub const STR_GUID: u8 = 4;
+/// R-7cd: the IAD function string MUST be "USB3 Vision Device".
+pub const STR_FUNCTION: u8 = 5;
+/// Table 3-5: iDeviceVersion points at the bootstrap Device Version string.
+pub const STR_DEVICE_VERSION: u8 = 6;
 
 /// The full descriptor set the gadget serves over ep0 / writes to
 /// FunctionFS.
@@ -46,23 +50,17 @@ pub struct DescriptorSet {
     /// U3V Device Info CS descriptor) for GET_DESCRIPTOR(CONFIGURATION)
     /// — the high-speed shape (512-byte bulk MPS).
     pub config: Vec<u8>,
-    /// FunctionFS full-speed interface set (interfaces + endpoints, bulk
-    /// MPS 64): NO config header, NO IAD — f_fs.c's grammar takes
-    /// interface-level descriptors only (the composite layer composes
-    /// the config header and the IAD), and NO class-specific
-    /// descriptors — f_fs.c rejects CS_INTERFACE (0x24) for classes it
-    /// does not know (only HID/CCID/DFU are whitelisted), so the U3V
-    /// Device Info CS descriptor is served via the ep0
-    /// GET_DESCRIPTOR(CONFIGURATION) answer instead (our `config`
-    /// blob still carries it).
+    /// FunctionFS full-speed interface set: IAD + interfaces + endpoints
+    /// (bulk MPS 64) + the U3V Device Info CS descriptor. The composite
+    /// layer adds the configuration header.
     pub ffs_fs: Vec<u8>,
     /// FunctionFS high-speed interface set (bulk MPS 512); endpoint
     /// addresses must match `ffs_fs` (f_fs.c requires identical
     /// addresses across speed sets).
     pub ffs_hs: Vec<u8>,
-    /// FunctionFS super-speed interface set: interfaces + 1024-MPS
-    /// endpoints, each SS endpoint descriptor followed by its 6-byte
-    /// companion (USB 3.2 §9.6.7). No CS descriptors (f_fs.c whitelist).
+    /// FunctionFS super-speed interface set: IAD + Device Info CS +
+    /// 1024-MPS endpoints, each followed by its 6-byte companion
+    /// (USB 3.2 §9.6.7).
     pub ffs_ss: Vec<u8>,
     /// Super-speed device descriptor for GET_DESCRIPTOR(DEVICE) when the
     /// link negotiated SuperSpeed (USB 3.2 §9.6.1: bcdUSB 3.2, MPS0 2^9).
@@ -95,16 +93,36 @@ impl DescriptorSet {
         Self {
             device: device_descriptor(vid, pid),
             config: config_descriptor(),
-            ffs_fs: interfaces_and_eps(FS_BULK_MPS, false),
-            ffs_hs: interfaces_and_eps(HS_BULK_MPS, false),
-            ffs_ss: interfaces_and_eps_ss(false),
+            ffs_fs: functionfs_descriptors(FS_BULK_MPS, false),
+            ffs_hs: functionfs_descriptors(HS_BULK_MPS, false),
+            ffs_ss: functionfs_descriptors(BULK_MPS, true),
             device_ss: device_descriptor_ss(vid, pid),
             config_ss: config_descriptor_ss(),
             bos: bos_descriptor(),
-            ffs_strings: ffs_strings_record(config),
-            usb_strings: usb_strings_record(config),
+            ffs_strings: ffs_strings_record(config, vid),
+            usb_strings: usb_strings_record(config, vid),
         }
     }
+}
+
+fn functionfs_descriptors(mps: u16, super_speed: bool) -> Vec<u8> {
+    let mut b = Vec::new();
+    b.extend_from_slice(&[
+        8,
+        d::DESC_INTERFACE_ASSOCIATION,
+        0,
+        3,
+        d::USB_CLASS_MISC,
+        d::USB_INTERFACE_SUBCLASS_U3V,
+        d::USB_PROTOCOL_CONTROL,
+        STR_FUNCTION,
+    ]);
+    if super_speed {
+        b.extend_from_slice(&interfaces_and_eps_ss(true));
+    } else {
+        b.extend_from_slice(&interfaces_and_eps(mps, true));
+    }
+    b
 }
 
 /// USB device descriptor (USB 2.0 §9.6.1): the composite-IF U3V shape —
@@ -151,7 +169,7 @@ fn config_descriptor() -> Vec<u8> {
         d::USB_CLASS_MISC,
         d::USB_INTERFACE_SUBCLASS_U3V,
         d::USB_PROTOCOL_CONTROL,
-        0, // iFunction
+        STR_FUNCTION, // iFunction: R-7cd "USB3 Vision Device"
     ]);
 
     b.extend_from_slice(&interfaces_and_eps(HS_BULK_MPS, true));
@@ -166,19 +184,18 @@ fn config_descriptor() -> Vec<u8> {
 /// the FunctionFS speed sets: control IF + ep OUT + ep IN [+ devinfo CS]
 /// + event IF + ep IN + streaming IF + ep IN. `mps` is the bulk
 /// wMaxPacketSize for the speed (64 full / 512 high / 1024 super);
-/// `with_devinfo` adds the U3V class-specific Device Info descriptor —
-/// host-facing descriptors only, f_fs.c rejects it in the record.
+/// `with_devinfo` adds the U3V class-specific Device Info descriptor.
 fn interfaces_and_eps(mps: u16, with_devinfo: bool) -> Vec<u8> {
     let mut b = Vec::new();
 
     // Control interface (Table 3-3): EF/05/00, two bulk endpoints.
     b.extend_from_slice(&[9, d::DESC_INTERFACE, 0, 0, 2, d::USB_CLASS_MISC, d::USB_INTERFACE_SUBCLASS_U3V, d::USB_PROTOCOL_CONTROL, 0]);
-    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_OUT, mps));
-    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_IN, mps));
     if with_devinfo {
         // U3V class-specific Device Info (§3.2.5 Table 3-5).
         b.extend_from_slice(&device_info_cs());
     }
+    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_OUT, mps));
+    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_IN, mps));
 
     // Event interface (Table 3-6): EF/05/01, one bulk IN. The gateway
     // emits no events in v1; the endpoint exists so the function shape
@@ -213,29 +230,31 @@ fn interfaces_and_eps_ss(with_devinfo: bool) -> Vec<u8> {
     let mut b = Vec::new();
 
     b.extend_from_slice(&[9, d::DESC_INTERFACE, 0, 0, 2, d::USB_CLASS_MISC, d::USB_INTERFACE_SUBCLASS_U3V, d::USB_PROTOCOL_CONTROL, 0]);
-    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_OUT, BULK_MPS));
-    b.extend_from_slice(&ss_endpoint_companion());
-    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_IN, BULK_MPS));
-    b.extend_from_slice(&ss_endpoint_companion());
     if with_devinfo {
         b.extend_from_slice(&device_info_cs());
     }
+    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_OUT, BULK_MPS));
+    b.extend_from_slice(&ss_endpoint_companion(0));
+    b.extend_from_slice(&endpoint_descriptor(EP_CONTROL_IN, BULK_MPS));
+    b.extend_from_slice(&ss_endpoint_companion(0));
 
     b.extend_from_slice(&[9, d::DESC_INTERFACE, 1, 0, 1, d::USB_CLASS_MISC, d::USB_INTERFACE_SUBCLASS_U3V, d::USB_PROTOCOL_EVENT, 0]);
     b.extend_from_slice(&endpoint_descriptor(EP_EVENT_IN, BULK_MPS));
-    b.extend_from_slice(&ss_endpoint_companion());
+    b.extend_from_slice(&ss_endpoint_companion(0));
 
     b.extend_from_slice(&[9, d::DESC_INTERFACE, 2, 0, 1, d::USB_CLASS_MISC, d::USB_INTERFACE_SUBCLASS_U3V, d::USB_PROTOCOL_STREAMING, 0]);
     b.extend_from_slice(&endpoint_descriptor(EP_STREAM_IN, BULK_MPS));
-    b.extend_from_slice(&ss_endpoint_companion());
+    b.extend_from_slice(&ss_endpoint_companion(15));
 
     b
 }
 
-/// SS endpoint companion descriptor (USB 3.2 §9.6.7): up to 16 bulk
-/// packets per burst (bMaxBurst 15), no attributes or periodic bytes.
-fn ss_endpoint_companion() -> [u8; 6] {
-    [6, 0x30, 15, 0, 0, 0]
+/// SS endpoint companion descriptor (USB 3.2 §9.6.7): `bMaxBurst` is the
+/// number of extra packets per burst. USB 3.2 §9.6.7 requires control
+/// endpoints to use 0; the U3V control/event endpoints follow that shape
+/// (Table 3-4/3-7), while the streaming endpoint may burst (15).
+fn ss_endpoint_companion(max_burst: u8) -> [u8; 6] {
+    [6, 0x30, max_burst, 0, 0, 0]
 }
 
 /// Super-speed device descriptor (USB 3.2 §9.6.1, Table 3-1's profile):
@@ -273,7 +292,7 @@ fn config_descriptor_ss() -> Vec<u8> {
         d::USB_CLASS_MISC,
         d::USB_INTERFACE_SUBCLASS_U3V,
         d::USB_PROTOCOL_CONTROL,
-        0,
+        STR_FUNCTION,
     ]);
     b.extend_from_slice(&interfaces_and_eps_ss(true));
     let total = b.len() as u16;
@@ -318,32 +337,33 @@ fn device_info_cs() -> [u8; d::U3V_DEVICEINFO_LEN] {
     b[12] = STR_MANUFACTURER;
     b[13] = STR_PRODUCT;
     b[14] = 0; // family name: none
-    b[15] = 0; // device version: none
+    b[15] = STR_DEVICE_VERSION;
     b[16] = 0; // manufacturer info: none
     b[17] = STR_SERIAL;
     b[18] = 0; // user-defined name: none
-    b[19] = 0x08; // bmSpeedSupport: SuperSpeed
+    b[19] = 0x0C; // bmSpeedSupport: High-Speed | SuperSpeed
     b
 }
 
-/// The four device strings in STR_* index order (1-based; 0 is the
-/// language list).
-fn device_strings(config: &DeviceConfig) -> [String; 4] {
+/// The device strings in STR_* index order (1-based; 0 is the
+/// language list). The extra two satisfy R-7cd (IAD function string)
+/// and Table 3-5's iDeviceVersion link.
+fn device_strings(config: &DeviceConfig, vid: u16) -> [String; 6] {
     [
         config.manufacturer.clone(),
         config.model.clone(),
         config.serial_number.clone(),
-        guid_string(&config.guid),
+        guid_string(&config.guid, vid),
+        "USB3 Vision Device".to_owned(), // R-7cd IAD function string
+        config.device_version.clone(),   // Table 3-5 iDeviceVersion
     ]
 }
 
 /// FunctionFS strings record PAYLOAD (after the magic+length head, uapi
 /// functionfs.h): str_count, lang_count, then per language a le16 langid
-/// followed by str_count NUL-terminated UTF-8 strings. The kernel-side
-/// table is not what the host reads (ep0 answers carry
-/// [`DescriptorSet::usb_strings`]); the record just has to parse.
-fn ffs_strings_record(config: &DeviceConfig) -> Vec<u8> {
-    let strings = device_strings(config);
+/// followed by str_count NUL-terminated UTF-8 strings.
+fn ffs_strings_record(config: &DeviceConfig, vid: u16) -> Vec<u8> {
+    let strings = device_strings(config, vid);
     let mut b = Vec::new();
     b.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // str_count
     b.extend_from_slice(&1u32.to_le_bytes()); // lang_count
@@ -355,13 +375,12 @@ fn ffs_strings_record(config: &DeviceConfig) -> Vec<u8> {
     b
 }
 
-/// USB string descriptors (USB 2.0 §9.6.7) for the ep0
-/// GET_DESCRIPTOR(STRING) answer: language-id descriptor + UTF-16LE
-/// string descriptors in STR_* order.
-fn usb_strings_record(config: &DeviceConfig) -> Vec<u8> {
+/// USB string descriptors (USB 2.0 §9.6.7): language-id descriptor +
+/// UTF-16LE string descriptors in STR_* order.
+fn usb_strings_record(config: &DeviceConfig, vid: u16) -> Vec<u8> {
     let mut b = Vec::new();
     b.extend_from_slice(&[4, 0x03, 0x09, 0x04]); // LANGID en-US
-    for s in device_strings(config) {
+    for s in device_strings(config, vid) {
         let utf16: Vec<u16> = s.encode_utf16().collect();
         let len = 2 + utf16.len() * 2;
         b.push(len as u8);
@@ -373,12 +392,11 @@ fn usb_strings_record(config: &DeviceConfig) -> Vec<u8> {
     b
 }
 
-/// The canonical 8-4-4-4-12 GUID text form (R-1cd's string view).
-pub fn guid_string(guid: &[u8; 16]) -> String {
+/// R-1cd: four vendor-ID hex digits followed by eight device-unique digits.
+pub fn guid_string(guid: &[u8; 16], vid: u16) -> String {
     format!(
-        "{:02X}{:02X}{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}-{:02X}{:02X}{:02X}{:02X}{:02X}{:02X}",
-        guid[0], guid[1], guid[2], guid[3], guid[4], guid[5], guid[6], guid[7],
-        guid[8], guid[9], guid[10], guid[11], guid[12], guid[13], guid[14], guid[15],
+        "{vid:04X}{:02X}{:02X}{:02X}{:02X}",
+        guid[0], guid[1], guid[2], guid[3]
     )
 }
 
@@ -433,14 +451,14 @@ mod tests {
             assert_eq!(&set.config[pos + 4..pos + 6], &HS_BULK_MPS.to_le_bytes());
         }
 
-        // FunctionFS speed sets: interface-level only (no config header:
-        // first descriptor is an INTERFACE), per-speed bulk MPS, the
-        // endpoint order matches the host-facing blob, and NO
-        // class-specific descriptors (kernel f_fs.c rejects CS_INTERFACE
-        // for unknown classes — the Device Info CS lives in the ep0-served
-        // `config` blob only).
-        for (set_blob, mps) in [(&set.ffs_fs, FS_BULK_MPS), (&set.ffs_hs, HS_BULK_MPS)] {
-            assert_eq!(set_blob[1], d::DESC_INTERFACE, "starts at interface level");
+        // FunctionFS speed sets carry the IAD and Device Info CS so the
+        // kernel composite layer can expose the complete standard U3V shape.
+        for (set_blob, mps) in [
+            (&set.ffs_fs, FS_BULK_MPS),
+            (&set.ffs_hs, HS_BULK_MPS),
+            (&set.ffs_ss, BULK_MPS),
+        ] {
+            assert_eq!(set_blob[1], d::DESC_INTERFACE_ASSOCIATION);
             let ifs = set_blob
                 .windows(9)
                 .filter(|w| w[0] == 9 && w[1] == d::DESC_INTERFACE)
@@ -452,8 +470,8 @@ mod tests {
                 .count();
             assert_eq!(eps, 4, "four bulk endpoints");
             assert!(
-                !set_blob.windows(2).any(|w| w[1] == d::DESC_CS_INTERFACE),
-                "ffs sets carry no CS descriptors (f_fs.c rejects them)"
+                set_blob.windows(2).any(|w| w[1] == d::DESC_CS_INTERFACE),
+                "ffs set carries the U3V Device Info CS descriptor"
             );
             for needle in [EP_CONTROL_OUT, EP_CONTROL_IN, EP_EVENT_IN, EP_STREAM_IN] {
                 let pos = set_blob
@@ -482,11 +500,15 @@ mod tests {
         assert_eq!(info.i_vendor_name, STR_MANUFACTURER);
         assert_eq!(info.i_model_name, STR_PRODUCT);
         assert_eq!(info.i_serial_number, STR_SERIAL);
+        assert_eq!(info.i_device_version, STR_DEVICE_VERSION);
     }
 
     #[test]
-    fn ss_companion_allows_bulk_bursting() {
-        assert_eq!(ss_endpoint_companion()[2], 15);
+    fn ss_companion_bursting_matches_endpoint_role() {
+        // USB 3.2 §9.6.7: control endpoints shall use bMaxBurst 0.
+        assert_eq!(ss_endpoint_companion(0)[2], 0);
+        // The stream endpoint is allowed to burst.
+        assert_eq!(ss_endpoint_companion(15)[2], 15);
     }
 
     /// The FunctionFS strings payload is the v2 format (uapi
@@ -508,7 +530,7 @@ mod tests {
             0x0001,
         );
         let p = &set.ffs_strings;
-        assert_eq!(&p[0..4], &4u32.to_le_bytes(), "str_count");
+        assert_eq!(&p[0..4], &6u32.to_le_bytes(), "str_count");
         assert_eq!(&p[4..8], &1u32.to_le_bytes(), "lang_count");
         assert_eq!(&p[8..10], &0x0409u16.to_le_bytes(), "en-US");
         let mut nul = 0;
@@ -517,7 +539,7 @@ mod tests {
                 nul += 1;
             }
         }
-        assert_eq!(nul, 4, "four NUL-terminated strings");
+        assert_eq!(nul, 6, "six NUL-terminated strings");
         // The ep0 STRING answer stays in USB descriptor format.
         assert_eq!(&set.usb_strings[..4], &[4, 0x03, 0x09, 0x04]);
     }
@@ -528,7 +550,7 @@ mod tests {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D,
             0x0E, 0x0F, 0x10,
         ];
-        assert_eq!(guid_string(&g), "01020304-0506-0708-090A-0B0C0D0E0F10");
+        assert_eq!(guid_string(&g, 0x1209), "120901020304");
     }
 
     #[test]

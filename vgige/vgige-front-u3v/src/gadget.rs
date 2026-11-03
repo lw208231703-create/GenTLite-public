@@ -313,9 +313,9 @@ pub fn open(config: &GadgetConfig) -> std::io::Result<OpenGadget> {
     // then the per-speed descriptor counts CONDITIONALLY on the flags
     // (uapi functionfs.h: "Depending on which flags are set, various
     // fields may be missing" — trailing count words are parsed as
-    // descriptors and fail EINVAL). Class-specific descriptors are NOT
-    // allowed in the record (f_fs.c whitelists HID/CCID/DFU only); the
-    // U3V Device Info CS is served via the ep0 config answer.
+    // descriptors and fail EINVAL). The IAD and U3V Device Info CS are
+    // included so the kernel composite layer exposes them to the host;
+    // this requires the U3V-aware usb_f_fs module on the board.
     let mut desc_rec = ffs_descs_head(&set.ffs_fs, &set.ffs_hs, &set.ffs_ss);
     desc_rec.extend_from_slice(&set.ffs_fs);
     desc_rec.extend_from_slice(&set.ffs_hs);
