@@ -393,14 +393,6 @@ impl UsbPipe for WinUsbPipe {
                 )
             };
             let last: WIN32_ERROR = unsafe { GetLastError() };
-            eprintln!(
-                "[rd2] submit pipe={:02x} len={} ok={} last={} inline={}",
-                self.pipe,
-                buf.len(),
-                ok,
-                last,
-                read
-            );
             if ok != 0 {
                 // Inline completion (only realistic for zero-length reads).
                 let n = read.min(buf.len() as u32);
@@ -424,12 +416,6 @@ impl UsbPipe for WinUsbPipe {
             .result(self.handle)
             .map_err(|e| GentlError::Io(format!("ReadPipe overlapped: {e}")))?;
         let n = n.min(buf.len() as u32);
-        eprintln!(
-            "[rd2] done pipe={:02x} n={} head={:02x?}",
-            self.pipe,
-            n,
-            &p.buf[..n.min(12) as usize]
-        );
         buf[..n as usize].copy_from_slice(&p.buf[..n as usize]);
         *pending = None;
         Ok(n)

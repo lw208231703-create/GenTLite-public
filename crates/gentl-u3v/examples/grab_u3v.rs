@@ -193,7 +193,7 @@ fn main() {
     let mut ev: EventHandle = ptr::null_mut();
     assert_eq!(GCRegisterEvent(ds, 1, &mut ev), GC_ERR_SUCCESS);
 
-    const NUM_BUFFERS: usize = 4;
+    const NUM_BUFFERS: usize = 10;
     let mut buffers: Vec<Vec<u8>> = (0..NUM_BUFFERS).map(|_| vec![0u8; payload_size]).collect();
     let mut handles: Vec<BufferHandle> = Vec::new();
     for buf in buffers.iter_mut() {
