@@ -102,8 +102,51 @@ jumbo / 零拷贝。
 - 保持 legacy GVSP 1.2 和 1500 MTU 为默认，NI 兼容路径不变。
 - 暂不启用 jumbo：当前 1 Gbps 已满速，收益是 CPU 而非帧率，且需要
   交换机/双端 MTU 同时支持。
-- 暂不做 Relay 缓冲池/零拷贝：30 fps 板端 CPU 约 12%，90 fps U3V
-  才接近 40%；优先在真机/真实网络验收后再决定。
+- 已做安全的 frame ownership 转移和 `FramePayload` 回收池；未做
+  `DsCore` 裸指针直通/真零拷贝，留给真机验收后再评估。
 - U3V piece 保持 256 KiB；后续可做 512 KiB A/B。
 - 达到 1 Gbps/250 MB/s 以上需要改传输假设（Mono8、ROI 或更高链路），
   不是当前单帧 2.6 MB Mono16 的软件调参能突破的。
+
+## 7. 第二轮：去掉整帧克隆 + 可回收 payload
+
+这一轮只做内存安全的优化，不引入裸指针所有权转移。
+
+1. **U3V 前端不再克隆整帧**
+   - `FrameSession::send_frame` 改为按值接收 `CanonicalFrame`。
+   - GigE 前端同步发完即释放；U3V 前端把整个 frame 直接 move 进 emitter
+     队列，不再执行 `payload.clone()`。
+   - 原来每帧额外复制 2.6 MB，30 fps 就是约 78 MB/s；120 fps 基准下
+     不再产生这部分内存流量。
+2. **可回收 `FramePayload`**
+   - 新增 `FramePayload`：拥有 `Vec<u8>`，可选绑定一个有界
+     `SyncSender<Vec<u8>>`；`Drop` 时清空并归还分配。
+   - Null 后端和 GigE 后端各使用 12 个槽位的 payload 池：
+     `尝试取回 -> 填充 -> Relay -> 前端发送 -> Drop 归还`。
+   - Drop 归还使用 `try_send`，池满或接收端已销毁时直接释放；不会阻塞、
+     不会泄漏，也不存在 use-after-free。
+3. **保持已有的安全边界**
+   - 没有把 `DsCore` 的裸指针/16 MiB 槽位直接交给 Relay。
+   - 没有新增 `sendmsg` / `io_uring` / AF_XDP 等平台相关 unsafe 路径。
+   - GigE 后端仍保留一次从重组槽到 `CanonicalFrame` 的复制；它是下一步
+     真正需要“零拷贝”时才会动的部分。
+
+### 第二轮结果
+
+- NI-IMAQdx U3V 30 fps：300/300 帧，CPU 从约 13.4% 降到约 10%
+  （单核，同一采样口径）。
+- GenTL U3V 120 fps 请求：900/900 帧，实际 93.7 fps / 245.7 MB/s，
+  CPU 37–40%；仍受 USB 字节率上限约束。
+- GenTL GigE 45 fps：600/600 帧，44.66 fps / 117.1 MB/s，
+  CPU 19–22%；仍是 1 Gbps 线速上限。
+- GigE 30 fps：300/300 帧，29.74 fps，CPU 15–16%。
+- 所有点位 `incomplete=0`、FrameID 连续、`underrun=0`；
+  GenTL U3V 首末帧与生成图 0 差异。
+
+### 当前结论
+
+- 30 fps 目标下 CPU 余量充足；这轮优化主要减少内存流量和分配抖动。
+- 帧率没有提升是因为 GigE 已满 1 Gbps、U3V 已接近 USB3/FFS 字节率上限，
+  不是软件还没有“跑满”。
+- 继续追求更高吞吐应改传输假设（Mono8、ROI、更大链路）或做更底层的
+  真零拷贝；在当前 30 fps 目标下继续加 unsafe 复杂度收益不成比例。

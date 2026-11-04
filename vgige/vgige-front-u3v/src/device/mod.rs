@@ -239,24 +239,15 @@ impl FrameSession for U3vStreamSession {
         Ok(())
     }
 
-    fn send_frame(&mut self, frame: &CanonicalFrame) {
+    fn send_frame(&mut self, frame: CanonicalFrame) {
         self.frames_relayed.fetch_add(1, Ordering::Relaxed);
         // Bounded queue: a slow/absent U3V host must not backpressure
         // the relay; drop-newest at this boundary (the relay's own ring
-        // already absorbed upstream loss accounting).
+        // already absorbed upstream loss accounting). Ownership moves into
+        // the queue: cloning here would copy the full payload per frame.
         let _ = self.tx.try_send(SessionFrame {
             generation: self.current,
-            frame: CanonicalFrame {
-                timestamp: frame.timestamp,
-                pixel_format: frame.pixel_format,
-                width: frame.width,
-                height: frame.height,
-                offset_x: frame.offset_x,
-                offset_y: frame.offset_y,
-                padding_x: frame.padding_x,
-                padding_y: frame.padding_y,
-                payload: frame.payload.clone(),
-            },
+            frame,
         });
     }
 
@@ -267,5 +258,45 @@ impl FrameSession for U3vStreamSession {
 impl RegisterFile {
     pub(crate) fn config(&self) -> &DeviceConfig {
         self.config_ref()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vgige_core::FramePayload;
+
+    #[test]
+    fn send_frame_moves_payload_into_the_emitter_queue() {
+        let (tx, rx) = sync_channel(1);
+        let mut session = U3vStreamSession {
+            tx,
+            frames_relayed: Arc::new(AtomicU32::new(0)),
+            generation: Arc::new(AtomicU64::new(0)),
+            current: 7,
+        };
+        let frame = CanonicalFrame {
+            timestamp: 1,
+            pixel_format: 0x0108_0001,
+            width: 2,
+            height: 2,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+            padding_y: 0,
+            payload: FramePayload::new(vec![1, 2, 3, 4]),
+        };
+        let payload_ptr = frame.payload.as_ptr();
+
+        session.send_frame(frame);
+
+        let queued = rx.try_recv().expect("frame queued");
+        assert_eq!(queued.generation, 7);
+        assert_eq!(queued.frame.payload.as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(
+            queued.frame.payload.as_ptr(),
+            payload_ptr,
+            "the emitter queue must take ownership, not clone the frame"
+        );
     }
 }

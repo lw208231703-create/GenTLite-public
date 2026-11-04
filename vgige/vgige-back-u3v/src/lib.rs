@@ -34,7 +34,7 @@ use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
 use gentl_u3v::client::{Block, U3vCamera, U3vError, U3vStream, UsbPipe};
-use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FrameSource};
+use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSource};
 
 // Generic error (GigE Vision spec Appendix B.21); gentl-gvcp's wire module
 // does not export it. Used for local failures (camera unreachable, USB
@@ -207,7 +207,7 @@ impl FrameSource for U3vFrameSource {
                 // U3V carries no padding_y (leader has a single padding,
                 // §5.5.5.1.1 Table 5-7).
                 padding_y: 0,
-                payload,
+                payload: FramePayload::new(payload),
             }),
         }
     }

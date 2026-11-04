@@ -217,7 +217,7 @@ impl FrameSession for GvspSession {
         Ok(())
     }
 
-    fn send_frame(&mut self, frame: &CanonicalFrame) {
+    fn send_frame(&mut self, frame: CanonicalFrame) {
         let Some(socket) = &self.socket else { return };
         let (target, chunk) = {
             let regs = self.regs.lock().expect("vgige relay regs poisoned");
@@ -243,7 +243,7 @@ impl FrameSession for GvspSession {
                 socket,
                 target,
                 self.next_block_id,
-                frame,
+                &frame,
                 chunk,
                 &mut self.scratch,
             );
@@ -252,7 +252,7 @@ impl FrameSession for GvspSession {
                 socket,
                 target,
                 self.next_block_id,
-                frame,
+                &frame,
                 chunk,
                 &mut self.scratch,
             );

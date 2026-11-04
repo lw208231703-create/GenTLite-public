@@ -20,7 +20,7 @@
     支持已加入 `gentl-u3v`。
   - Linux `cargo cti` 已支持 `.so → .cti`；`TL_INFO_PATHNAME` 已实现。
   - Null 相机同时提供 Mono8/Mono16；MVS/LD 可用 Mono8，NI/GenTL 可用 Mono16。
-  - 性能：30 fps 板端 CPU 约单核 12%；GigE 上限约 44.7 fps /
+  - 性能：30 fps 板端 CPU 约单核 10–16%；GigE 上限约 44.7 fps /
     117 MB/s（1 Gbps），U3V 上限约 95 fps / 249 MB/s。详见
     `docs/vgige-performance-2026-11-04.md`。
 - MVS / LD：

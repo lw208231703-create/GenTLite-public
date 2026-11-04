@@ -21,7 +21,74 @@ pub struct CanonicalFrame {
     pub offset_y: u32,
     pub padding_x: u32,
     pub padding_y: u32,
-    pub payload: Vec<u8>,
+    /// Payload bytes. A recyclable payload returns its allocation to the
+    /// source when the frame is dropped.
+    pub payload: FramePayload,
+}
+
+/// Payload storage with optional recycling.
+///
+/// A `FramePayload` owns its bytes. When it carries a recycler, `Drop`
+/// returns the emptied allocation to the source's pool instead of freeing
+/// it; the next frame reuses the same capacity. This keeps the hot path free
+/// of per-frame heap allocation without any raw-pointer ownership.
+pub struct FramePayload {
+    bytes: Vec<u8>,
+    recycle: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
+}
+
+impl FramePayload {
+    /// A plain owned payload (no recycling).
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            recycle: None,
+        }
+    }
+
+    /// An owned payload that returns its allocation to `recycle` on drop.
+    pub fn with_recycle(bytes: Vec<u8>, recycle: std::sync::mpsc::SyncSender<Vec<u8>>) -> Self {
+        Self {
+            bytes,
+            recycle: Some(recycle),
+        }
+    }
+
+    /// Shrink the visible payload, as `Vec::truncate` did before the wrapper
+    /// existed. The allocation and capacity stay intact for recycling.
+    pub fn truncate(&mut self, len: usize) {
+        self.bytes.truncate(len);
+    }
+}
+
+impl std::ops::Deref for FramePayload {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl std::ops::DerefMut for FramePayload {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.bytes
+    }
+}
+
+impl AsRef<[u8]> for FramePayload {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for FramePayload {
+    fn drop(&mut self) {
+        if let Some(recycle) = self.recycle.take() {
+            let mut bytes = std::mem::take(&mut self.bytes);
+            bytes.clear();
+            let _ = recycle.try_send(bytes);
+        }
+    }
 }
 
 /// Downstream image intake (the real camera's stream). One live instance
@@ -57,6 +124,35 @@ pub trait FrameSession: Send {
     /// per-frame negotiation (GigE SCPS) re-read their registers every
     /// `send_frame` and treat it as the first frame's value.
     fn open(&mut self, payload_hint: usize) -> Result<(), String>;
-    fn send_frame(&mut self, frame: &CanonicalFrame);
+    /// Send one frame. Ownership passes to the session: a queueing front
+    /// (U3V's emitter) can retain it without cloning; a synchronous front
+    /// (GigE's socket writer) drops it when this returns.
+    fn send_frame(&mut self, frame: CanonicalFrame);
     fn close(&mut self);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    #[test]
+    fn recycled_payload_returns_the_same_allocation() {
+        let (tx, rx) = sync_channel(1);
+        let payload = FramePayload::with_recycle(vec![1, 2, 3], tx);
+        let ptr = payload.as_ptr();
+
+        drop(payload);
+
+        let returned = rx.try_recv().expect("payload returned to the pool");
+        assert_eq!(returned.as_ptr(), ptr);
+        assert!(returned.is_empty(), "pooled buffers are cleared");
+    }
+
+    #[test]
+    fn plain_payload_derefs_to_its_bytes() {
+        let payload = FramePayload::new(vec![4, 5, 6]);
+        assert_eq!(&payload[..], &[4, 5, 6]);
+        assert_eq!(payload.as_ref(), &[4, 5, 6]);
+    }
 }

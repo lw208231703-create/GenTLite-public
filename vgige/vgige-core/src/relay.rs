@@ -386,7 +386,7 @@ fn driver_tx(
     while !stop.load(Ordering::Relaxed) {
         match frame_rx.recv_timeout(POLL) {
             Ok(frame) => {
-                session.send_frame(&frame);
+                session.send_frame(frame);
                 frames_relayed.fetch_add(1, Ordering::Relaxed);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,

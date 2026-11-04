@@ -50,7 +50,7 @@ or `cargo test --workspace` for a hardware-free regression.
     cannot share that interface at the same time.
   - The Null camera exposes both `Mono8` and `Mono16`; MVS/LD can use
     Mono8 while NI and GenTL can use Mono16.
-  - Performance at 30 fps: about 12% of one board CPU core. GigE saturates
+  - Performance at 30 fps: about 10–16% of one board CPU core. GigE saturates
     at 44.7 fps / 117 MB/s (1 Gbps); U3V reaches about 95 fps / 249 MB/s.
     See `docs/vgige-performance-2026-11-04.md`.
 - GenTL CTI packaging: `cargo cti` produces `.cti` twins on both Windows

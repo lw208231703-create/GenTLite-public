@@ -30,7 +30,7 @@ pub mod xml;
 pub use back::{
     swap_register_endian, BackIdentity, CameraBack, RegisterEndian, SharedBack,
 };
-pub use frame::{CanonicalFrame, FrameSession, FrameSource};
+pub use frame::{CanonicalFrame, FramePayload, FrameSession, FrameSource};
 pub use relay::{Relay, SessionFactory, StreamRegs, virtual_payload_chunk};
 pub use space::RegisterSpace;
 pub use xml::XmlMerger;

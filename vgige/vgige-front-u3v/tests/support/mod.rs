@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use gentl_core::{GentlError, GentlResult};
 use gentl_u3v::client::UsbPipe;
-use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FrameSource};
+use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSource};
 use vgige_front_u3v::device::{DeviceTransfers, HostCommands, StreamError};
 
 pub const MONO8: u32 = 0x0108_0001;
@@ -148,7 +148,9 @@ pub fn mono8_frame(block_seed: u64, timestamp: u64) -> CanonicalFrame {
         offset_y: 0,
         padding_x: 0,
         padding_y: 0,
-        payload: (0..PAYLOAD).map(|k| (k as u64 + block_seed) as u8).collect(),
+        payload: FramePayload::new(
+            (0..PAYLOAD).map(|k| (k as u64 + block_seed) as u8).collect(),
+        ),
     }
 }
 

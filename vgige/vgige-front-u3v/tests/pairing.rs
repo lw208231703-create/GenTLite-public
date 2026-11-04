@@ -121,8 +121,8 @@ fn stream_blocks_roundtrip_byte_exact() {
 
     let mut session = p.device.frame_session();
     session.open(0).expect("session open");
-    session.send_frame(&mono8_frame(1, 111));
-    session.send_frame(&mono8_frame(2, 222));
+    session.send_frame(mono8_frame(1, 111));
+    session.send_frame(mono8_frame(2, 222));
 
     // Block 1: leader metadata + payload bytes + trailer status.
     let block = stream
@@ -192,9 +192,9 @@ fn variable_frame_sizes_do_not_desync_following_blocks() {
     medium.width = 2;
     medium.height = 2;
     medium.payload.truncate(4);
-    session.send_frame(&small);
-    session.send_frame(&medium);
-    session.send_frame(&mono8_frame(5, 555));
+    session.send_frame(small);
+    session.send_frame(medium);
+    session.send_frame(mono8_frame(5, 555));
 
     for (block_id, width, height, payload_len) in [(3, 2, 1, 2), (4, 2, 2, 4), (5, W, H, PAYLOAD)] {
         let block = stream

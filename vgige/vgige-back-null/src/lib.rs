@@ -17,10 +17,11 @@
 //! - The XML deliberately carries NO SmartCamera group: the gateway's
 //!   XmlMerger injects it on top, exactly like a real camera's XML.
 
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FrameSource};
+use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSource};
 
 /// Default synthetic stream geometry: 1280x1024 Mono16. Width, height,
 /// offsets, exposure, gain and frame rate remain writable through GenCP.
@@ -33,6 +34,9 @@ pub const PFNC_MONO16: u32 = 0x0110_0001;
 pub const EXPOSURE_US: u32 = 10_000;
 pub const GAIN: u32 = 0;
 pub const FRAME_RATE: u32 = 30;
+/// Reusable payload slots. Relay ring (4) + U3V emitter queue (4) + the
+/// frame being generated gives at most 9 live buffers; 12 leaves margin.
+const FRAME_POOL_DEPTH: usize = 12;
 
 fn frame_period(fps: u32) -> Duration {
     Duration::from_micros(1_000_000 / u64::from(fps.max(1)))
@@ -370,14 +374,19 @@ pub struct NullFrameSource {
     regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
     next_block: u64,
     next_at: Instant,
+    recycler: SyncSender<Vec<u8>>,
+    pool: Receiver<Vec<u8>>,
 }
 
 impl NullFrameSource {
     pub fn new(regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>) -> Self {
+        let (recycler, pool) = sync_channel(FRAME_POOL_DEPTH);
         Self {
             regs,
             next_block: 1,
             next_at: Instant::now(),
+            recycler,
+            pool,
         }
     }
 }
@@ -475,7 +484,9 @@ impl FrameSource for NullFrameSource {
         } else {
             None
         };
-        let mut payload = Vec::with_capacity((w * h) as usize * bpp);
+        let mut payload = self.pool.try_recv().unwrap_or_default();
+        payload.clear();
+        payload.reserve((w * h) as usize * bpp);
         for y in 0..h {
             if y < 32 {
                 if let Some(top) = &top_bytes {
@@ -494,7 +505,7 @@ impl FrameSource for NullFrameSource {
             offset_y: oy,
             padding_x: 0,
             padding_y: 0,
-            payload,
+            payload: FramePayload::with_recycle(payload, self.recycler.clone()),
         })
     }
 }
@@ -656,7 +667,23 @@ mod tests {
         let mut row = Vec::new();
         row.extend_from_slice(&expected_pixel(0, 0, 2, 2, 1));
         row.extend_from_slice(&expected_pixel(1, 0, 2, 2, 1));
-        assert_eq!(frame.payload, [row.clone(), row].concat());
+        assert_eq!(frame.payload.as_ref(), [row.clone(), row].concat().as_slice());
+    }
+
+    #[test]
+    fn dropped_frames_reuse_the_payload_allocation() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
+        let mut src = back.open_stream().unwrap();
+        let first = src.next_frame(Duration::from_secs(2)).unwrap();
+        let payload_ptr = first.payload.as_ptr();
+        drop(first);
+        let second = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            second.payload.as_ptr(),
+            payload_ptr,
+            "the frame source must recycle its payload allocation"
+        );
     }
 
     #[test]

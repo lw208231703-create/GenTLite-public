@@ -10,6 +10,7 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::time::{Duration, Instant};
 
 use gentl_core::ds::{BufferState, DsCore, GENTL_INFINITE};
@@ -18,7 +19,7 @@ use gentl_gige::GvspReassembler;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 use gentl_gvcp::GvcpClient;
-use vgige_core::{CameraBack, CanonicalFrame, FrameSource};
+use vgige_core::{CameraBack, CanonicalFrame, FramePayload, FrameSource};
 
 /// READMEM chunk. 512 bytes keeps every request/acknowledge datagram under
 /// the 1500-byte MTU — no IP fragmentation. A larger chunk (the 13 KB XML in
@@ -37,6 +38,8 @@ const RECV_TIMEOUT_MIN: Duration = Duration::from_millis(1);
 const RELAY_FRAME_MAX: usize = 16 * 1024 * 1024;
 /// Reassembly pool depth (the relay ring adds its own bound on top).
 const POOL_DEPTH: usize = 4;
+/// Reusable canonical-frame payload slots (relay ring + pending + current).
+const FRAME_POOL_DEPTH: usize = 12;
 
 /// The downstream GigE camera: one GVCP control channel plus the stream
 /// configuration knowledge for channel 0.
@@ -304,6 +307,9 @@ struct GigeFrameSource {
     /// Frames drained from the pool, not yet handed to the driver.
     pending: VecDeque<CanonicalFrame>,
     buf: [u8; 65536],
+    /// Canonical-frame payloads returned by the relay/front after send.
+    recycler: SyncSender<Vec<u8>>,
+    frame_pool: Receiver<Vec<u8>>,
     /// Set on transport-level failure: keep answering `None` (the driver
     /// contract requires waiting out the timeout) until dropped.
     dead: bool,
@@ -312,6 +318,7 @@ struct GigeFrameSource {
 impl GigeFrameSource {
     fn new(socket: UdpSocket) -> Self {
         let core = DsCore::new();
+        let (recycler, frame_pool) = sync_channel(FRAME_POOL_DEPTH);
         let mut dead = false;
         for _ in 0..POOL_DEPTH {
             match core.announce_owned(RELAY_FRAME_MAX, std::ptr::null_mut()) {
@@ -337,6 +344,8 @@ impl GigeFrameSource {
             core,
             pending: VecDeque::new(),
             buf: [0u8; 65536],
+            recycler,
+            frame_pool,
             dead,
         }
     }
@@ -346,47 +355,45 @@ impl GigeFrameSource {
     fn drain_pool(&mut self) {
         for i in 0..self.core.announced_count() {
             let Some(id) = self.core.buffer_id_at(i) else { continue };
-            let taken = self.core.with_buffer(id, |b| {
-                if b.state != BufferState::Filled {
-                    return None;
-                }
-                let meta = b.meta?;
-                // The zero-copy path fills exactly the leader's expected
-                // payload (padded image rows, DsCore::on_frame); unknown
-                // pixel formats cannot be sized and forward as empty
-                // payloads (v1, design note). begin_frame's size gate
-                // guarantees the buffer holds `len` bytes.
-                let len = meta.payload_bytes().unwrap_or(0);
-                let mut payload = vec![0u8; len];
-                if len > 0 {
+            let Some(Some(meta)) = self.core.with_buffer(id, |b| {
+                (b.state == BufferState::Filled).then_some(b.meta).flatten()
+            }) else {
+                continue;
+            };
+            // The zero-copy path fills exactly the leader's expected
+            // payload (padded image rows, DsCore::on_frame); unknown pixel
+            // formats cannot be sized and forward as empty payloads (v1,
+            // design note). begin_frame's size gate guarantees the buffer
+            // holds `len` bytes.
+            let len = meta.payload_bytes().unwrap_or(0);
+            let mut payload = self.frame_pool.try_recv().unwrap_or_default();
+            payload.clear();
+            payload.reserve(len);
+            if len > 0 {
+                let Some(()) = self.core.with_buffer(id, |b| {
                     // SAFETY: the buffer is Filled and exclusively ours
-                    // until mark_delivered; len <= buffer capacity (the
-                    // begin_frame size gate), and payload has exactly len
-                    // bytes.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            b.base_ptr() as *const u8,
-                            payload.as_mut_ptr(),
-                            len,
-                        );
-                    }
-                }
-                Some(CanonicalFrame {
-                    timestamp: meta.timestamp,
-                    pixel_format: meta.pixel_format,
-                    width: meta.width,
-                    height: meta.height,
-                    offset_x: meta.offset_x,
-                    offset_y: meta.offset_y,
-                    padding_x: meta.padding_x,
-                    padding_y: meta.padding_y,
-                    payload,
-                })
-            });
-            // with_buffer wraps the closure's own Option: None buffer ->
-            // outer None; a buffer that is not filled/has no meta -> inner
-            // None.
-            let Some(Some(frame)) = taken else { continue };
+                    // until mark_delivered; the pool lock held by
+                    // with_buffer keeps the base pointer stable, and
+                    // begin_frame's size gate guarantees len <= capacity.
+                    let src = unsafe {
+                        std::slice::from_raw_parts(b.base_ptr() as *const u8, len)
+                    };
+                    payload.extend_from_slice(src);
+                }) else {
+                    continue;
+                };
+            }
+            let frame = CanonicalFrame {
+                timestamp: meta.timestamp,
+                pixel_format: meta.pixel_format,
+                width: meta.width,
+                height: meta.height,
+                offset_x: meta.offset_x,
+                offset_y: meta.offset_y,
+                padding_x: meta.padding_x,
+                padding_y: meta.padding_y,
+                payload: FramePayload::with_recycle(payload, self.recycler.clone()),
+            };
             let _ = self.core.mark_delivered(id);
             if let Err(e) = self.core.queue_buffer(id) {
                 eprintln!("vgige: relay buffer requeue: {e}");
