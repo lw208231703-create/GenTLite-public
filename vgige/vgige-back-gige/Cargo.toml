@@ -12,4 +12,5 @@ gentl-gige = { path = "../../crates/gentl-gige", default-features = false }
 gentl-gvcp = { path = "../../crates/gentl-gvcp" }
 # Zipped camera XML (spec §14.1.1 manifest format 1): transparently unzipped
 # at startup (same crate/features as gentl-gige's example tooling).
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

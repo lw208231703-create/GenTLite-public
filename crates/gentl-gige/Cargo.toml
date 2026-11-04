@@ -39,4 +39,5 @@ gentl-simulator = { path = "../gentl-simulator" }
 # every GenTL 1.6 export at runtime (tests/consumer_dll.rs).
 libloading = "0.8"
 # ZIPped camera XML (spec §14.1), example tools only
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

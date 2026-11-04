@@ -16,7 +16,8 @@ cti-exports = []
 [dependencies]
 gentl-core = { path = "../gentl-core" }
 # ZIPped camera XML (manifest file format 1, GenCP §5.5.1.2)
-zip = { version = "2", default-features = false, features = ["deflate"] }
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(windows)'.dependencies]
 # WinUSB backend.

@@ -28,7 +28,8 @@ use windows_sys::Win32::Devices::Properties::{
     DEVPKEY_Device_BusReportedDeviceDesc, DEVPROPKEY, DEVPROPTYPE,
 };
 use windows_sys::Win32::Devices::Usb::{
-    WinUsb_Free, WinUsb_GetDescriptor, WinUsb_Initialize, WINUSB_INTERFACE_HANDLE,
+    WinUsb_Free, WinUsb_GetAssociatedInterface, WinUsb_GetDescriptor, WinUsb_Initialize,
+    WINUSB_INTERFACE_HANDLE,
 };
 use windows_sys::Win32::Foundation::{
     CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
@@ -452,15 +453,36 @@ impl Drop for OpenedDevice {
 unsafe impl Send for OpenedDevice {}
 unsafe impl Sync for OpenedDevice {}
 
-/// Open EVERY device interface path of the instance (one per MI_xN child
-/// of a composite device). Zadig-style per-interface WinUSB bindings are
-/// independent device nodes: WinUsb_GetAssociatedInterface sees none of
-/// them, so each interface needs its own CreateFile+WinUSB handle.
+/// Open every interface of the instance. Per-interface WinUSB bindings
+/// expose independent MI_xN device nodes; an IAD-composite binding exposes
+/// only the control node, whose associated interfaces are reached through
+/// WinUsb_GetAssociatedInterface.
 pub fn open_device_all(instance_id: &str) -> Vec<OpenedDevice> {
-    device_interface_paths(instance_id)
+    let mut owners: Vec<OpenedDevice> = device_interface_paths(instance_id)
         .iter()
         .filter_map(|path| open_path(path).ok())
-        .collect()
+        .collect();
+    if owners.len() == 1 {
+        if let Some(parent) = owners.pop() {
+            let mut associated = Vec::new();
+            for index in 0..8u8 {
+                let mut handle: WINUSB_INTERFACE_HANDLE = std::ptr::null_mut();
+                let ok =
+                    unsafe { WinUsb_GetAssociatedInterface(parent.winusb, index, &mut handle) };
+                if ok == 0 {
+                    break;
+                }
+                associated.push(unsafe { OpenedDevice::from_raw(std::ptr::null_mut(), handle) });
+            }
+            if associated.is_empty() {
+                owners.push(parent);
+            } else {
+                owners = associated;
+                owners.push(parent);
+            }
+        }
+    }
+    owners
 }
 
 /// Open a USB device instance for overlapped I/O and initialize WinUSB
