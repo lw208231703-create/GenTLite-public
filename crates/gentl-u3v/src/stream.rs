@@ -776,9 +776,12 @@ fn read_block(
     }
 
     // Variable frame size: the trailer's size_y is the actual height
-    // (CR-86st), making payload_bytes() match the valid rows.
+    // (CR-86st), making payload_bytes() match the valid rows. Carry the
+    // byte count actually written as well: U3V has no GVSP trailer byte
+    // count, and an unknown PixelFormat must still report SIZE_FILLED.
     let meta = FrameMeta {
         height: trailer.size_y.min(meta.height),
+        payload_bytes: Some(written as usize),
         ..meta
     };
     let _ = trailer.valid_payload_size; // valid size is implied by meta rows
