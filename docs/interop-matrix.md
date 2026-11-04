@@ -23,6 +23,7 @@
   - 16-bit 能收流但不显示；不是 pixel-format 缺失（XML、GVSP、GenTL
     BufferInfo 均为 `Mono16 = 0x01100001`），是宿主底层 16-bit 显示/转换限制。
   - LD 同一设备重复三次是旧 CTI/缓存重复枚举；当前 CTI 只枚举 1 个设备。
+- NI test packet：设备侧 `SCPS fire_test_packet` 已实现；NI 5/5 帧通过。
 - 驱动互斥：U3V 同一时间只能绑定 NI-IMAQdx 或 WinUSB；当前 PC 侧为
   NI-IMAQdx，GenTL U3V 需临时切 WinUSB。
 - 详细记录：`docs/vgige-board-kernel-interop-2026-11-04.md`。

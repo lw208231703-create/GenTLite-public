@@ -81,11 +81,39 @@ pub fn assemble_identity(back: &SharedBack, up: &UpIdentity) -> GentlResult<Disc
 pub struct GigEFront {
     identity: DiscoveryInfo,
     space: RegisterSpace,
+    pending_test_packet: Arc<Mutex<Option<u32>>>,
 }
 
 impl GigEFront {
     pub fn new(identity: DiscoveryInfo, space: RegisterSpace) -> Self {
-        Self { identity, space }
+        Self {
+            identity,
+            space,
+            pending_test_packet: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn maybe_fire_test_packet(&self) {
+        let mut pending = match self.pending_test_packet.lock() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let Some(size) = *pending else { return };
+        let scp = self.space.read_reg(reg::SCP0).unwrap_or(0);
+        let scda = self.space.read_reg(reg::SCDA0).unwrap_or(0);
+        let port = reg::scp_host_port(scp);
+        if port == 0 || scda == 0 {
+            return;
+        }
+        if let Some(packet) = build_test_packet(size) {
+            if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                let _ = socket.send_to(
+                    &packet,
+                    SocketAddr::from((Ipv4Addr::from(scda), port)),
+                );
+            }
+        }
+        *pending = None;
     }
 }
 
@@ -99,7 +127,18 @@ impl DeviceHandler for GigEFront {
     }
 
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
-        self.space.write_reg(addr, value)
+        let result = self.space.write_reg(addr, value);
+        if result.is_ok() {
+            if addr == reg::SCPS0 && value & reg::SCPS_FIRE_TEST_PACKET != 0 {
+                if let Ok(mut pending) = self.pending_test_packet.lock() {
+                    *pending = Some(reg::scps_packet_size(value));
+                }
+            }
+            if addr == reg::SCPS0 || addr == reg::SCP0 || addr == reg::SCDA0 {
+                self.maybe_fire_test_packet();
+            }
+        }
+        result
     }
 
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
@@ -109,6 +148,26 @@ impl DeviceHandler for GigEFront {
     fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.space.write_block(addr, data)
     }
+}
+
+fn build_test_packet(total: u32) -> Option<Vec<u8>> {
+    let total = total as usize;
+    if total < 36 {
+        return None;
+    }
+    let mut packet = vec![0u8; total - 28];
+    let mut header = [0u8; GVSP_LEGACY_HEADER_LEN];
+    GvspHeader {
+        status: 0,
+        flag: 0,
+        extended_id: false,
+        packet_format: 0,
+        block_id: 0,
+        packet_id: 0,
+    }
+    .encode_legacy(&mut header);
+    packet[..GVSP_LEGACY_HEADER_LEN].copy_from_slice(&header);
+    Some(packet)
 }
 
 /// GVSP 3.0 encoding session: one UDP sender socket plus the virtual
@@ -298,4 +357,23 @@ fn push_header(pkt: &mut Vec<u8>, packet_format: u8, block_id: u64, packet_id: u
     }
     .encode(&mut hdr);
     pkt.extend_from_slice(&hdr);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_packet_has_the_requested_total_ip_length() {
+        let packet = build_test_packet(1500).expect("test packet");
+        assert_eq!(packet.len() + 28, 1500);
+        let header = GvspHeader::decode_legacy(&packet).expect("legacy header");
+        assert_eq!(header.block_id, 0);
+        assert_eq!(header.packet_id, 0);
+    }
+
+    #[test]
+    fn too_small_test_packet_is_rejected() {
+        assert!(build_test_packet(35).is_none());
+    }
 }

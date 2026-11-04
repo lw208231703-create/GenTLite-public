@@ -181,16 +181,19 @@ VGIGE_GVSP_3_0=1
 
 - `start: 0xBFF69031`，系统没有收到 test packet。
 
-当前处理：
+处理：
 
-NI `.icd` 中设置：
+- GigE front 已实现 `SCPS fire_test_packet`：
+  - 拦截 `SCPS0` 的 fire bit；
+  - 若 `SCP0`/`SCDA0` 尚未就绪，先挂起 pending；
+  - 目标 IP/端口就绪后，发送 legacy 8-byte GVSP 头、block_id=0 的测试包；
+  - 测试包总长严格等于 SCPS0 声明值（IP+UDP+GVSP+payload）。
+- NI `.icd` 可保持默认 `TestPacketEnabled=true`；当前实测 NI 5/5 帧正常。
+- 仍建议保留：
 
 ```ini
-AcquisitionAttributes::AdvancedEthernet::TestPacketParameters::TestPacketEnabled = "false"
 AcquisitionAttributes::PacketSize = "1500"
 ```
-
-> 如果删除 `.icd` 或换主机重新生成，这两个值可能恢复默认；需要重新设置。后续可在设备侧实现 `SCPS fire_test_packet` 发测试包，目前未实现。
 
 ## 4. 16-bit Null 图像
 
@@ -334,9 +337,9 @@ cat /sys/class/udc/fc000000.usb/current_speed
 
 ## 9. 当前遗留与注意事项
 
-1. NI GigE `.icd` 的 `TestPacketEnabled=false` / `PacketSize=1500` 是主机侧配置，删除 `.icd` 后要重设。
+1. NI test packet 已由设备侧实现；`.icd` 的 `PacketSize=1500` 仍建议保留，删除 `.icd` 后重新确认。
 2. MVS/LD 的 16-bit 显示限制不在虚拟相机侧；需要时加 Mono8 fallback。
 3. U3V 当前绑定 NI-IMAQdx；GenTL U3V 需要临时切 WinUSB。
-4. `crates/gentl-u3v/src/discovery.rs` 的 associated-interface 修复和 3 个 Cargo.toml 的 zip/flate2 调整当前尚未提交。
+4. `crates/gentl-u3v/src/discovery.rs` 的 associated-interface 修复和 3 个 Cargo.toml 的 zip/flate2 调整已提交。
 5. LD 如果仍显示三个重复设备，检查它实际加载的 `gentl_u3v.cti` 路径，不要使用旧副本。
 6. 需要 3.0 GVSP 时使用 `VGIGE_GVSP_3_0=1`；NI 必须使用默认 legacy。
