@@ -1,0 +1,20 @@
+[Unit]
+Description=vgige U3V virtual camera gateway (null backend demo)
+After=local-fs.target systemd-modules-load.service
+ConditionPathExists=/root/GenTLite-public/target/release/vgige-cli
+
+[Service]
+Type=simple
+# Clean stale gadget state from a previous crashed run (configfs is
+# RAM-based and survives daemon restarts within a boot).
+ExecStartPre=-/bin/sh -c "cd /sys/kernel/config/usb_gadget/vgige 2>/dev/null && { echo '' > UDC 2>/dev/null; rm configs/c.1/* 2>/dev/null; rmdir functions/* strings/0x409 configs/c.1 strings 2>/dev/null; cd /sys/kernel/config/usb_gadget; rmdir vgige; } || true"
+ExecStartPre=-/bin/umount /dev/usb-ffs/vgige
+ExecStartPre=-/bin/rm -rf /dev/usb-ffs/vgige
+ExecStartPre=-/sbin/modprobe libcomposite
+ExecStartPre=-/bin/mount -t configfs none /sys/kernel/config
+ExecStart=/root/GenTLite-public/target/release/vgige-cli --back null --front u3v --u3v-payload 2621440
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

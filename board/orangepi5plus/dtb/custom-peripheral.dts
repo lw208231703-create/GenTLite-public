@@ -1,0 +1,12 @@
+/dts-v1/;
+
+/ {
+
+	fragment@0 {
+		target-path = "/usbdrd3_0/usb@fc000000";
+
+		__overlay__ {
+			maximum-speed = "super-speed";
+		};
+	};
+};

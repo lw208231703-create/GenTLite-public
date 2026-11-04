@@ -1,0 +1,12 @@
+[Unit]
+Description=Set CPUFreq governor to performance (vgige benchmark)
+After=multi-user.target
+ConditionPathExists=/sys/devices/system/cpu/cpufreq/policy0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'for p in /sys/devices/system/cpu/cpufreq/policy*; do echo performance > "$p/scaling_governor"; done'
+
+[Install]
+WantedBy=multi-user.target
