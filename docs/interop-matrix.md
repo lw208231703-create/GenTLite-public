@@ -5,6 +5,28 @@
 
 图例：✅ 通过　❌ 失败　⬜ 未测　🟡 部分（见备注）
 
+## 2026-11-04 当前状态（vgige 虚拟相机）
+
+- 板端：Orange Pi 5 Plus，Armbian 26.5.1，vendor 内核 `6.1.115-rk35xx`，
+  Type-C SuperSpeed；U3V + GigE 两个 vgige 服务 active。
+- 图像：`1280×1024 Mono16`，payload `2,621,440` 字节，30 fps，约 79 MB/s。
+- NI-IMAQdx：
+  - GigE：100/100 帧，NI MAX 可显示。
+  - U3V：100/100 帧。
+- GenTLite producer：
+  - GigE：5/5 帧；与 NI 同帧号、与模拟端生成图均逐字节 0 差异。
+  - U3V：5/5 帧；与 NI 重叠帧、与模拟端生成图均逐字节 0 差异。
+  - Windows GenTL U3V 使用 WinUSB；IAD 复合接口的 associated-interface
+    支持已加入 `gentl-u3v`。
+- MVS / LD：
+  - 8-bit 虚拟图像可显示。
+  - 16-bit 能收流但不显示；不是 pixel-format 缺失（XML、GVSP、GenTL
+    BufferInfo 均为 `Mono16 = 0x01100001`），是宿主底层 16-bit 显示/转换限制。
+  - LD 同一设备重复三次是旧 CTI/缓存重复枚举；当前 CTI 只枚举 1 个设备。
+- 驱动互斥：U3V 同一时间只能绑定 NI-IMAQdx 或 WinUSB；当前 PC 侧为
+  NI-IMAQdx，GenTL U3V 需临时切 WinUSB。
+- 详细记录：`docs/vgige-board-kernel-interop-2026-11-04.md`。
+
 ## 维度 1：第三方宿主 + 我们的 CTI + 真实相机
 
 | 宿主 | 加载 CTI | 发现相机 | 打开相机 | GenApi 读参数 | 采图 | 备注 |

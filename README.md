@@ -40,9 +40,18 @@ or `cargo test --workspace` for a hardware-free regression.
   device to WinUSB with Zadig first.
 - GigE Vision: 1000/1000 frames verified with a project camera; Linux/aarch64
   completed a 380,000-frame, 2-hour-10-minute soak test.
-- `vgige`: GigE relay and USB 2.0 High-Speed U3V gadget soak reports are available.
-- Third-party hosts (pylon, MVS, HALCON) and the multi-brand camera matrix
-  remain to be verified; see `docs/interop-matrix.md`.
+- `vgige` virtual camera: Orange Pi 5 Plus / vendor kernel `6.1.115-rk35xx`,
+  U3V and GigE fronts running `1280×1024 Mono16` at 30 fps.
+  - NI-IMAQdx: 100/100 frames on both U3V and GigE.
+  - GenTLite producer: 5-frame captures byte-identical to NI and to the
+    simulated image for both transports.
+  - GenTL U3V on Windows requires WinUSB for the U3V interface; NI-IMAQdx
+    cannot share that interface at the same time.
+- Third-party host status: NI MAX/NI-IMAQdx works; MVS and LD can display the
+  virtual camera's 8-bit stream but have incomplete 16-bit display support.
+  The producer's XML, GVSP leader and GenTL BufferInfo all declare
+  `Mono16 = 0x01100001`. See `docs/interop-matrix.md` and
+  `docs/vgige-board-kernel-interop-2026-11-04.md`.
 
 ## License
 

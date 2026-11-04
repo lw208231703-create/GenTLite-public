@@ -37,9 +37,15 @@ cargo cti    # 编译整个 workspace，并在 target/release/ 的 DLL 旁
 - USB3 Vision：海康 U3V 相机已验证；Windows 使用前需用 Zadig 切换为 WinUSB。
 - GigE Vision：自研相机已完成 1000/1000 帧验证，Linux/aarch64 已完成
   380,000 帧、2 小时 10 分长稳测试。
-- `vgige` 网关：GigE 中继与 USB 2.0 High-Speed U3V gadget 已有长稳报告。
-- pylon / MVS / HALCON 等第三方宿主及多品牌相机矩阵仍待验证，详见
-  `docs/interop-matrix.md`。
+- `vgige` 虚拟相机：Orange Pi 5 Plus / vendor 内核 `6.1.115-rk35xx`，
+  U3V 与 GigE 均运行 `1280×1024 Mono16`、30 fps。
+  - NI-IMAQdx：U3V / GigE 均 100/100 帧。
+  - GenTLite producer：U3V / GigE 各 5 帧，与 NI 及模拟端逐字节一致。
+  - Windows GenTL U3V 需要 WinUSB；与 NI-IMAQdx 不能同时占用同一接口。
+- 第三方宿主：NI MAX/NI-IMAQdx 正常；MVS、LD 可显示 8-bit 虚拟图像，
+  但 16-bit 显示支持不完整。producer 的 XML、GVSP leader 和 GenTL
+  BufferInfo 均明确声明 `Mono16 = 0x01100001`。详见
+  `docs/interop-matrix.md` 与 `docs/vgige-board-kernel-interop-2026-11-04.md`。
 
 ## 许可
 
