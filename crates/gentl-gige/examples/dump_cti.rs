@@ -82,6 +82,7 @@ fn main() {
             (3, "VERSION"),
             (4, "TLTYPE"),
             (5, "NAME"),
+            (6, "PATHNAME"),
             (7, "DISPLAYNAME"),
             (8, "CHAR_ENCODING"),
         ] {

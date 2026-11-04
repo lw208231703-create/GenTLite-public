@@ -34,12 +34,16 @@ pub struct FrameMeta {
     pub offset_y: u32,
     pub padding_x: u32,
     pub padding_y: u32,
+    pub payload_bytes: Option<usize>,
 }
 
 impl FrameMeta {
     /// Expected payload bytes, padding included (the GigE Vision image
     /// payload spans the padded rows).
     pub fn payload_bytes(&self) -> Option<usize> {
+        if let Some(bytes) = self.payload_bytes {
+            return Some(bytes);
+        }
         let stride = pixfmt::payload_size(self.pixel_format, self.width, 1)?;
         let rows = stride
             .checked_add(self.padding_x as usize)?
@@ -1072,5 +1076,11 @@ mod tests {
             ..meta()
         };
         assert_eq!(bad.payload_bytes(), None);
+        let hinted = FrameMeta {
+            pixel_format: 0xFFFF_FFFF,
+            payload_bytes: Some(17),
+            ..meta()
+        };
+        assert_eq!(hinted.payload_bytes(), Some(17));
     }
 }

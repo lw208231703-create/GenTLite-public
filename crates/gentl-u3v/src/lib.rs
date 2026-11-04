@@ -512,6 +512,54 @@ pub extern "C" fn TLClose(h_tl: TLHandle) -> GCError {
     })
 }
 
+fn module_path() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::System::LibraryLoader::{
+            GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        };
+
+        fn anchor() {}
+        let mut module = std::ptr::null_mut();
+        let ok = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                anchor as *const u16,
+                &mut module,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; 32768];
+        let n = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) };
+        if n == 0 {
+            return None;
+        }
+        Some(OsString::from_wide(&buf[..n as usize]).to_string_lossy().into_owned())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::ffi::CStr;
+        use std::os::raw::c_void;
+
+        fn anchor() {}
+        let mut info: libc::Dl_info = unsafe { std::mem::zeroed() };
+        let ok = unsafe { libc::dladdr(anchor as *const c_void, &mut info) };
+        if ok == 0 || info.dli_fname.is_null() {
+            return None;
+        }
+        Some(unsafe { CStr::from_ptr(info.dli_fname) }.to_string_lossy().into_owned())
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    {
+        None
+    }
+}
+
 #[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn TLGetInfo(
     h_tl: TLHandle,
@@ -535,7 +583,10 @@ pub extern "C" fn TLGetInfo(
                 TL_INFO_VERSION => info_string(pi_type, p_buffer, pi_size, version),
                 TL_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_U3V),
                 TL_INFO_NAME => info_string(pi_type, p_buffer, pi_size, TL_FILENAME),
-                TL_INFO_PATHNAME => fail(GentlError::NotAvailable), // OPEN-QUESTION Q10 (gige)
+                TL_INFO_PATHNAME => match module_path() {
+                    Some(path) => info_string(pi_type, p_buffer, pi_size, &path),
+                    None => fail(GentlError::NotAvailable),
+                },
                 TL_INFO_DISPLAYNAME => info_string(pi_type, p_buffer, pi_size, TL_DISPLAYNAME),
                 TL_INFO_CHAR_ENCODING => {
                     let v: i32 = 0; // TL_CHAR_ENCODING_ASCII

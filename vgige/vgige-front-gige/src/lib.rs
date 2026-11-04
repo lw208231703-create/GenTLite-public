@@ -127,7 +127,15 @@ impl DeviceHandler for GigEFront {
     }
 
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
-        let result = self.space.write_reg(addr, value);
+        self.write_reg_from(
+            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            addr,
+            value,
+        )
+    }
+
+    fn write_reg_from(&self, peer: SocketAddr, addr: u32, value: u32) -> Result<(), u16> {
+        let result = self.space.write_reg_from(peer, addr, value);
         if result.is_ok() {
             if addr == reg::SCPS0 && value & reg::SCPS_FIRE_TEST_PACKET != 0 {
                 if let Ok(mut pending) = self.pending_test_packet.lock() {

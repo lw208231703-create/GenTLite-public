@@ -28,6 +28,7 @@ pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 1024;
 pub const BYTES_PER_PIXEL: usize = 2;
 pub const PAYLOAD: usize = WIDTH as usize * HEIGHT as usize * BYTES_PER_PIXEL;
+pub const PFNC_MONO8: u32 = 0x0108_0001;
 pub const PFNC_MONO16: u32 = 0x0110_0001;
 pub const EXPOSURE_US: u32 = 10_000;
 pub const GAIN: u32 = 0;
@@ -142,6 +143,9 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"PixelFormat\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Pixel Format</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <EnumEntry Name=\"Mono8\" NameSpace=\"Standard\">\n\
+\x20       <DisplayName>Mono8</DisplayName><Value>0x01080001</Value>\n\
+\x20     </EnumEntry>\n\
 \x20     <EnumEntry Name=\"Mono16\" NameSpace=\"Standard\">\n\
 \x20       <DisplayName>Mono16</DisplayName><Value>0x01100001</Value>\n\
 \x20     </EnumEntry>\n\
@@ -280,7 +284,9 @@ impl CameraBack for NullBack {
                 regs.insert(addr, value.clamp(1, 4096));
             }
             REG_PIXEL_FORMAT => {
-                regs.insert(addr, PFNC_MONO16);
+                if value == PFNC_MONO8 || value == PFNC_MONO16 {
+                    regs.insert(addr, value);
+                }
             }
             REG_OFFSET_X | REG_OFFSET_Y => {
                 regs.insert(addr, value.min(4095));
@@ -321,7 +327,12 @@ impl CameraBack for NullBack {
         let regs = self.regs.lock().expect("null regs lock");
         let w = u64::from(regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH));
         let h = u64::from(regs.get(&REG_HEIGHT).copied().unwrap_or(HEIGHT));
-        Ok(w * h * BYTES_PER_PIXEL as u64)
+        let bpp = if regs.get(&REG_PIXEL_FORMAT).copied() == Some(PFNC_MONO8) {
+            1
+        } else {
+            BYTES_PER_PIXEL
+        };
+        Ok(w * h * bpp as u64)
     }
 
     fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> {
@@ -402,7 +413,7 @@ impl FrameSource for NullFrameSource {
             }
             return None;
         }
-        let (w, h, ox, oy, fps) = {
+        let (w, h, ox, oy, fps, pixel_format) = {
             let regs = self.regs.lock().expect("null regs lock");
             (
                 regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH),
@@ -410,6 +421,9 @@ impl FrameSource for NullFrameSource {
                 regs.get(&REG_OFFSET_X).copied().unwrap_or(0),
                 regs.get(&REG_OFFSET_Y).copied().unwrap_or(0),
                 regs.get(&REG_FRAME_RATE).copied().unwrap_or(FRAME_RATE),
+                regs.get(&REG_PIXEL_FORMAT)
+                    .copied()
+                    .unwrap_or(PFNC_MONO16),
             )
         };
         let block = self.next_block;
@@ -420,17 +434,26 @@ impl FrameSource for NullFrameSource {
         if self.next_at < now {
             self.next_at = now + period;
         }
-        let row_bytes = w as usize * BYTES_PER_PIXEL;
-        let mut payload = vec![0u8; (w * h) as usize * BYTES_PER_PIXEL];
+        let bpp = if pixel_format == PFNC_MONO8 {
+            1
+        } else {
+            BYTES_PER_PIXEL
+        };
+        let row_bytes = w as usize * bpp;
+        let mut payload = vec![0u8; (w * h) as usize * bpp];
         for (y, row) in payload.chunks_exact_mut(row_bytes).enumerate() {
-            for (x, pixel) in row.chunks_exact_mut(BYTES_PER_PIXEL).enumerate() {
+            for (x, pixel) in row.chunks_exact_mut(bpp).enumerate() {
                 let value = pattern_value(x as u32, y as u32, w, h, block);
-                pixel.copy_from_slice(&value.to_le_bytes());
+                if bpp == 1 {
+                    pixel[0] = (value >> 8) as u8;
+                } else {
+                    pixel.copy_from_slice(&value.to_le_bytes());
+                }
             }
         }
         Some(CanonicalFrame {
             timestamp: block * (1_000_000 / u64::from(fps)),
-            pixel_format: PFNC_MONO16,
+            pixel_format,
             width: w,
             height: h,
             offset_x: ox,
@@ -499,6 +522,7 @@ mod tests {
             assert!(text.contains(&format!("<Float Name=\"{node}\"")), "{node} must be a GenApi Float");
             assert!(text.contains(&format!("<IntReg Name=\"{node}_Reg\"")), "{node}_Reg must be a GenApi IntReg");
         }
+        assert!(text.contains("<EnumEntry Name=\"Mono8\""));
         assert!(text.contains("<EnumEntry Name=\"Mono16\""));
     }
 
@@ -557,6 +581,29 @@ mod tests {
             pattern_value(64, 32, WIDTH, HEIGHT, 2)
         );
         assert_eq!(pattern_value(128, 32, WIDTH, HEIGHT, 2), 0xffff);
+    }
+
+    #[test]
+    fn mono8_mode_updates_payload_and_pattern() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
+        back.write_reg(REG_PIXEL_FORMAT, PFNC_MONO8).unwrap();
+        assert_eq!(back.payload_size().unwrap(), 1280 * 1024);
+        let mut src = back.open_stream().unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(frame.pixel_format, PFNC_MONO8);
+        assert_eq!(frame.payload.len(), 1280 * 1024);
+        assert_eq!(
+            frame.payload[..4],
+            [
+                (pattern_value(0, 0, WIDTH, HEIGHT, 1) >> 8) as u8,
+                (pattern_value(1, 0, WIDTH, HEIGHT, 1) >> 8) as u8,
+                (pattern_value(2, 0, WIDTH, HEIGHT, 1) >> 8) as u8,
+                (pattern_value(3, 0, WIDTH, HEIGHT, 1) >> 8) as u8,
+            ]
+        );
+        back.write_reg(REG_PIXEL_FORMAT, PFNC_MONO16).unwrap();
+        assert_eq!(back.payload_size().unwrap(), 1280 * 1024 * 2);
     }
 
     #[test]

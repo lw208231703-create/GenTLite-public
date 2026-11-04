@@ -201,6 +201,7 @@ fn frame_meta(l: &ImageLeader) -> FrameMeta {
         offset_y: l.offset_y,
         padding_x: l.padding_x,
         padding_y: l.padding_y,
+        payload_bytes: None,
     }
 }
 
@@ -649,10 +650,9 @@ impl GvspReassembler {
             sink.abort_frame(false);
             return;
         }
-        if sink
-            .on_frame(block.block_id, frame_meta(&block.leader), &[])
-            .is_some()
-        {
+        let mut meta = frame_meta(&block.leader);
+        meta.payload_bytes = Some(block.bytes_written);
+        if sink.on_frame(block.block_id, meta, &[]).is_some() {
             self.stats.frames_delivered += 1;
             if block.resend_touched {
                 self.stats.resend_recovered += 1;
@@ -1072,12 +1072,12 @@ mod tests {
         let s = r.stats();
         assert_eq!(s.frames_delivered, 1);
         assert_eq!(s.frames_completed, 1);
-        // The payload bytes land in the buffer, but zero-copy delivery
-        // cannot size the frame (payload_bytes() == None), so
-        // BUFFER_INFO_SIZE_FILLED reports 0 (notes/OPEN-QUESTIONS.md Q21).
+        // The trailer-delivered byte count is carried as a metadata hint,
+        // so SIZE_FILLED reports the actual payload even for an unknown
+        // pixel format.
         core.with_buffer(buf_id, |b| {
             assert_eq!(b.state, BufferState::Filled);
-            assert_eq!(b.filled_size, 0);
+            assert_eq!(b.filled_size, PAYLOAD);
             let mem = unsafe { std::slice::from_raw_parts(b.base_ptr() as *const u8, PAYLOAD) };
             assert_eq!(mem, &payload);
         })

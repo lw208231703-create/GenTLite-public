@@ -1,7 +1,7 @@
 //! GVCP server: answers DISCOVERY / READREG / WRITEREG / READMEM / WRITEMEM
 //! for a simulated (or test) device. One thread per server instance.
 
-use std::net::{Ipv4Addr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -21,6 +21,18 @@ pub trait DeviceHandler: Send + 'static {
 
     /// Write one 32-bit register. Err(status) is a GEV status code.
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16>;
+
+    /// Peer-aware register write. Devices with multi-host state (CCP,
+    /// heartbeat ownership) can override this; the default preserves the
+    /// peer-independent behavior.
+    fn write_reg_from(
+        &self,
+        _peer: SocketAddr,
+        addr: u32,
+        value: u32,
+    ) -> Result<(), u16> {
+        self.write_reg(addr, value)
+    }
 
     /// Read `count` bytes at `addr` from device memory. Err(status) is a
     /// GEV status code. Must succeed atomically (all bytes or error).
@@ -167,7 +179,7 @@ fn serve_loop<H: DeviceHandler>(
                     for chunk in payload_in.chunks_exact(8) {
                         let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                         let value = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-                        if let Err(s) = handler.write_reg(addr, value) {
+                        if let Err(s) = handler.write_reg_from(peer, addr, value) {
                             status = s;
                             break;
                         }

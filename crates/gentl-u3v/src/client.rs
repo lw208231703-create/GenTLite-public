@@ -521,6 +521,7 @@ fn read_block_alloc(
         offset_y: leader.offset_y,
         padding_x: u32::from(leader.padding_x),
         padding_y: 0,
+        payload_bytes: None,
     };
     let expected = meta.payload_bytes().unwrap_or(required_payload as usize);
 

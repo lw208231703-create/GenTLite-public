@@ -1,9 +1,10 @@
 //! `cargo cti` — build the workspace and place a `.cti` twin next to each
-//! producer DLL in `target/<profile>/`, so the directory is directly
-//! usable as a `GENICAM_GENTL64_PATH` entry.
+//! producer shared library in `target/<profile>/`, so the directory is
+//! directly usable as a `GENICAM_GENTL64_PATH` entry.
 //!
-//! A `.cti` is the same DLL under the extension GenTL consumers look for;
-//! this tool copies `gentl_gige.dll`/`gentl_u3v.dll` after the build.
+//! A `.cti` is the same shared library under the extension GenTL consumers
+//! look for: `gentl_gige.dll` / `gentl_u3v.dll` on Windows, and
+//! `libgentl_gige.so` / `libgentl_u3v.so` on Unix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -36,7 +37,12 @@ fn main() {
     // 1) Build the producers.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(&cargo);
-    cmd.current_dir(&root).arg("build").arg("--workspace");
+    cmd.current_dir(&root)
+        .arg("build")
+        .arg("-p")
+        .arg("gentl-gige")
+        .arg("-p")
+        .arg("gentl-u3v");
     if profile == "release" {
         cmd.arg("--release");
     } else if profile != "debug" {
@@ -49,15 +55,29 @@ fn main() {
         std::process::exit(1);
     }
 
-    // 2) Copy each producer DLL next to its .cti twin.
+    // 2) Copy each producer shared library next to its .cti twin.
     let mut ok = true;
     for name in PRODUCERS {
-        let dll = profile_dir.join(format!("{name}.dll"));
+        let suffix = if std::env::consts::DLL_SUFFIX.starts_with('.') {
+            std::env::consts::DLL_SUFFIX.to_owned()
+        } else {
+            format!(".{}", std::env::consts::DLL_SUFFIX)
+        };
+        let library = profile_dir.join(format!(
+            "{}{}{}",
+            std::env::consts::DLL_PREFIX,
+            name,
+            suffix
+        ));
         let cti = profile_dir.join(format!("{name}.cti"));
-        match std::fs::copy(&dll, &cti) {
-            Ok(_) => println!("packager: {} -> {}", dll.display(), cti.display()),
+        match std::fs::copy(&library, &cti) {
+            Ok(_) => println!("packager: {} -> {}", library.display(), cti.display()),
             Err(e) => {
-                eprintln!("packager: copy {} -> {} failed: {e}", dll.display(), cti.display());
+                eprintln!(
+                    "packager: copy {} -> {} failed: {e}",
+                    library.display(),
+                    cti.display()
+                );
                 ok = false;
             }
         }

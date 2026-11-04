@@ -604,6 +604,7 @@ fn read_block(
         offset_y: leader.offset_y,
         padding_x: u32::from(leader.padding_x),
         padding_y: 0,
+        payload_bytes: None,
     };
     // Expected payload: the leader-derived size when the pixel format is
     // known, else the SIRM-declared SI Required Payload Size (§5.4.1.3) —

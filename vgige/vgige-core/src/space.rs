@@ -24,7 +24,7 @@
 //! and does not (roadmap Step 3 — which is why this is a concrete type and
 //! not a trait).
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -41,6 +41,7 @@ use crate::{slot, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION, XML_BASE_V};
 /// privilege, with connection_count always zero to the requesting host.
 struct CcpState {
     flags: u32,
+    peer: Option<SocketAddr>,
     last_contact: Option<Instant>,
     heartbeat_ms: u32,
 }
@@ -49,6 +50,7 @@ impl Default for CcpState {
     fn default() -> Self {
         Self {
             flags: 0,
+            peer: None,
             last_contact: None,
             heartbeat_ms: 3000,
         }
@@ -62,9 +64,45 @@ impl CcpState {
         });
         if stale {
             self.flags = 0;
+            self.peer = None;
             self.last_contact = None;
         }
         stale
+    }
+
+    fn update(&mut self, value: u32, peer: Option<SocketAddr>) -> (Result<(), u16>, bool) {
+        if value == 0 {
+            if peer.is_some() && self.peer.is_some() && peer != self.peer {
+                return (Err(GEV_STATUS_ACCESS_DENIED), false);
+            }
+            self.flags = 0;
+            self.peer = None;
+            self.last_contact = None;
+            return (Ok(()), true);
+        }
+        let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
+        if requested == 0 {
+            return (Ok(()), false);
+        }
+        if self.flags == 0 {
+            self.flags = if requested & reg::CCP_EXCLUSIVE_ACCESS != 0 {
+                reg::CCP_EXCLUSIVE_ACCESS
+            } else {
+                reg::CCP_CONTROL_ACCESS
+            };
+            self.peer = peer;
+            self.last_contact = Some(Instant::now());
+            return (Ok(()), false);
+        }
+        if self.peer.is_some() && peer.is_some() && peer != self.peer {
+            return (Err(GEV_STATUS_ACCESS_DENIED), false);
+        }
+        if requested == self.flags {
+            self.last_contact = Some(Instant::now());
+            (Ok(()), false)
+        } else {
+            (Err(GEV_STATUS_ACCESS_DENIED), false)
+        }
     }
 }
 
@@ -191,39 +229,15 @@ impl RegisterSpace {
         c.flags
     }
 
-    fn ccp_write(&self, value: u32) -> Result<(), u16> {
+    fn ccp_write(&self, value: u32, peer: Option<SocketAddr>) -> Result<(), u16> {
         let mut c = self.ccp.lock().expect("vgige ccp poisoned");
-        if c.expire_stale_grant() {
+        let expired = c.expire_stale_grant();
+        let (result, close) = c.update(value, peer);
+        drop(c);
+        if expired || close {
             self.channel.close();
         }
-        if value == 0 {
-            c.flags = 0;
-            c.last_contact = None;
-            self.channel.close();
-            return Ok(());
-        }
-        let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
-        if requested == 0 {
-            // No privilege bits: nothing to grant, accept as a no-op.
-            return Ok(());
-        }
-        if c.flags == 0 {
-            // EA takes priority over CA when both are requested.
-            c.flags = if requested & reg::CCP_EXCLUSIVE_ACCESS != 0 {
-                reg::CCP_EXCLUSIVE_ACCESS
-            } else {
-                reg::CCP_CONTROL_ACCESS
-            };
-            c.last_contact = Some(Instant::now());
-            return Ok(());
-        }
-        // R-069cd: a repeated identical request refreshes the grant.
-        if requested == c.flags {
-            c.last_contact = Some(Instant::now());
-            Ok(())
-        } else {
-            Err(GEV_STATUS_ACCESS_DENIED)
-        }
+        result
     }
 
     fn back_read_reg(&self, addr: u32) -> Result<u32, u16> {
@@ -334,13 +348,27 @@ impl RegisterSpace {
             return Err(GEV_STATUS_INVALID_ADDRESS);
         }
         if addr == reg::CCP {
-            return self.ccp_write(value);
+            return self.ccp_write(value, None);
         }
         if addr == reg::HEARTBEAT_TIMEOUT {
             self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms = value.max(500);
             return Ok(());
         }
         self.back_write_reg(addr, value)
+    }
+
+    /// Peer-aware write used by the GVCP server. CCP ownership is tied to
+    /// the requesting host; other privileged state remains peer-neutral.
+    pub fn write_reg_from(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        value: u32,
+    ) -> Result<(), u16> {
+        if addr == reg::CCP {
+            return self.ccp_write(value, Some(peer));
+        }
+        self.write_reg(addr, value)
     }
 
     /// Block read (`count` bytes, a multiple of 4); Err is a GEV status code.
@@ -444,5 +472,49 @@ impl RegisterSpace {
             .lock()
             .map_err(|_| crate::GEV_STATUS_ERROR)?
             .write_block(addr, payload)
+    }
+}
+
+#[cfg(test)]
+mod ccp_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn ccp_peer_owns_the_grant_until_release() {
+        let mut c = CcpState::default();
+        let p1 = SocketAddr::from(([127, 0, 0, 1], 40001));
+        let p2 = SocketAddr::from(([127, 0, 0, 1], 40002));
+
+        let (r, close) = c.update(reg::CCP_EXCLUSIVE_ACCESS, Some(p1));
+        assert_eq!(r, Ok(()));
+        assert!(!close);
+        assert_eq!(c.peer, Some(p1));
+
+        let (r, _) = c.update(reg::CCP_EXCLUSIVE_ACCESS, Some(p2));
+        assert_eq!(r, Err(GEV_STATUS_ACCESS_DENIED));
+
+        let (r, _) = c.update(reg::CCP_EXCLUSIVE_ACCESS, Some(p1));
+        assert_eq!(r, Ok(()));
+
+        let (r, _) = c.update(0, Some(p2));
+        assert_eq!(r, Err(GEV_STATUS_ACCESS_DENIED));
+
+        let (r, close) = c.update(0, Some(p1));
+        assert_eq!(r, Ok(()));
+        assert!(close);
+        assert_eq!(c.flags, 0);
+        assert_eq!(c.peer, None);
+    }
+
+    #[test]
+    fn stale_heartbeat_releases_the_peer() {
+        let mut c = CcpState::default();
+        let p = SocketAddr::from(([127, 0, 0, 1], 40003));
+        let _ = c.update(reg::CCP_CONTROL_ACCESS, Some(p));
+        c.last_contact = Some(Instant::now() - Duration::from_secs(10));
+        assert!(c.expire_stale_grant());
+        assert_eq!(c.flags, 0);
+        assert_eq!(c.peer, None);
     }
 }

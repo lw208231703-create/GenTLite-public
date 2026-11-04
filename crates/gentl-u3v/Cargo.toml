@@ -29,6 +29,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Registry",
     "Win32_System_Threading",
 ] }
@@ -40,3 +41,4 @@ windows-sys = { version = "0.59", features = [
 # `usbio::libusb::usb_context` must survive a failed `libusb_init` rather
 # than assume the host is USB-capable.
 rusb = "0.9"
+libc = "0.2"
