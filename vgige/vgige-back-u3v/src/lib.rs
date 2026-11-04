@@ -101,6 +101,10 @@ fn gentl_to_gev(e: GentlError) -> u16 {
 }
 
 impl CameraBack for U3vBack {
+    fn register_endian(&self) -> vgige_core::RegisterEndian {
+        vgige_core::RegisterEndian::Little
+    }
+
     fn read_reg(&mut self, addr: u32) -> Result<u32, u16> {
         // LE register via the GenCP transaction (R-30cd); the raw device
         // status crosses unchanged.

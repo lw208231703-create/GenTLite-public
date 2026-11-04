@@ -1,9 +1,9 @@
 //! vgige-back-null: the camera-less `CameraBack` (CLI `--back null`).
 //! Unlocks the gateway demos with no camera attached: the GigE/U3V
 //! virtual device fronts a synthetic camera — a minimal but GenApi-legal
-//! register view plus a 30 fps Mono8 test-pattern stream the host can
-//! verify byte-for-byte (`(byte_index + block_id) mod 256`, the
-//! simulator's pattern).
+//! register view plus a 30 fps Mono16 test-pattern stream the host can
+//! verify byte-for-byte (a 16-bit horizontal gradient with a per-frame
+//! block phase).
 //!
 //! Parameter model:
 //! - Width/Height/OffsetX/OffsetY, ExposureTimeAbs, Gain and FrameRate
@@ -22,18 +22,34 @@ use std::time::{Duration, Instant};
 
 use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FrameSource};
 
-/// Default synthetic stream geometry: 1280x1024 Mono8. Width, height,
+/// Default synthetic stream geometry: 1280x1024 Mono16. Width, height,
 /// offsets, exposure, gain and frame rate remain writable through GenCP.
 pub const WIDTH: u32 = 1280;
 pub const HEIGHT: u32 = 1024;
-pub const PAYLOAD: usize = (WIDTH * HEIGHT) as usize;
-pub const PFNC_MONO8: u32 = 0x0108_0001;
+pub const BYTES_PER_PIXEL: usize = 2;
+pub const PAYLOAD: usize = WIDTH as usize * HEIGHT as usize * BYTES_PER_PIXEL;
+pub const PFNC_MONO16: u32 = 0x0110_0001;
 pub const EXPOSURE_US: u32 = 10_000;
 pub const GAIN: u32 = 0;
 pub const FRAME_RATE: u32 = 30;
 
 fn frame_period(fps: u32) -> Duration {
     Duration::from_micros(1_000_000 / u64::from(fps.max(1)))
+}
+
+fn pattern_value(x: u32, y: u32, w: u32, h: u32, block: u64) -> u16 {
+    let denom = u64::from(w.saturating_sub(1).max(1));
+    let mut value = ((u64::from(x) * 65_535) / denom + block) & 0xffff;
+    let bar_w = 32u32.min(w);
+    let bar_x = ((block.wrapping_mul(64)) % u64::from(w.max(1))) as u32;
+    if h >= 32 && y >= 32 && x >= bar_x && x < bar_x.saturating_add(bar_w).min(w) {
+        value = 0xffff;
+    }
+    if w >= 512 && h >= 32 && y < 32 && x < 512 {
+        let bit = (block >> (x / 32)) & 1;
+        value = if bit != 0 { 0xffff } else { 0 };
+    }
+    value as u16
 }
 
 /// XML-advertised little-endian registers. The acquisition block addresses
@@ -126,8 +142,8 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"PixelFormat\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Pixel Format</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <EnumEntry Name=\"Mono8\" NameSpace=\"Standard\">\n\
-\x20       <DisplayName>Mono8</DisplayName><Value>0x01080001</Value>\n\
+\x20     <EnumEntry Name=\"Mono16\" NameSpace=\"Standard\">\n\
+\x20       <DisplayName>Mono16</DisplayName><Value>0x01100001</Value>\n\
 \x20     </EnumEntry>\n\
 \x20     <pValue>PixelFormatReg</pValue>\n\
 \x20   </Enumeration>\n\
@@ -220,7 +236,7 @@ impl NullBack {
             regs: Arc::new(Mutex::new(std::collections::HashMap::from([
                 (REG_WIDTH, WIDTH),
                 (REG_HEIGHT, HEIGHT),
-                (REG_PIXEL_FORMAT, PFNC_MONO8),
+                (REG_PIXEL_FORMAT, PFNC_MONO16),
                 (REG_OFFSET_X, 0),
                 (REG_OFFSET_Y, 0),
                 (REG_EXPOSURE_US, EXPOSURE_US),
@@ -239,6 +255,10 @@ impl Default for NullBack {
 }
 
 impl CameraBack for NullBack {
+    fn register_endian(&self) -> vgige_core::RegisterEndian {
+        vgige_core::RegisterEndian::Little
+    }
+
     fn read_reg(&mut self, addr: u32) -> Result<u32, u16> {
         Ok(self.regs.lock().expect("null regs lock").get(&addr).copied().unwrap_or(0))
     }
@@ -258,6 +278,9 @@ impl CameraBack for NullBack {
             }
             REG_WIDTH | REG_HEIGHT => {
                 regs.insert(addr, value.clamp(1, 4096));
+            }
+            REG_PIXEL_FORMAT => {
+                regs.insert(addr, PFNC_MONO16);
             }
             REG_OFFSET_X | REG_OFFSET_Y => {
                 regs.insert(addr, value.min(4095));
@@ -298,7 +321,7 @@ impl CameraBack for NullBack {
         let regs = self.regs.lock().expect("null regs lock");
         let w = u64::from(regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH));
         let h = u64::from(regs.get(&REG_HEIGHT).copied().unwrap_or(HEIGHT));
-        Ok(w * h)
+        Ok(w * h * BYTES_PER_PIXEL as u64)
     }
 
     fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> {
@@ -397,17 +420,17 @@ impl FrameSource for NullFrameSource {
         if self.next_at < now {
             self.next_at = now + period;
         }
-        let mut payload = vec![0u8; (w * h) as usize];
-        for (y, row) in payload.chunks_exact_mut(w as usize).enumerate() {
-            let source_row = (y as u32 + oy) as u64;
-            let start = (source_row * u64::from(WIDTH) + u64::from(ox) + block) as u8;
-            for (x, byte) in row.iter_mut().enumerate() {
-                *byte = start.wrapping_add(x as u8);
+        let row_bytes = w as usize * BYTES_PER_PIXEL;
+        let mut payload = vec![0u8; (w * h) as usize * BYTES_PER_PIXEL];
+        for (y, row) in payload.chunks_exact_mut(row_bytes).enumerate() {
+            for (x, pixel) in row.chunks_exact_mut(BYTES_PER_PIXEL).enumerate() {
+                let value = pattern_value(x as u32, y as u32, w, h, block);
+                pixel.copy_from_slice(&value.to_le_bytes());
             }
         }
         Some(CanonicalFrame {
             timestamp: block * (1_000_000 / u64::from(fps)),
-            pixel_format: PFNC_MONO8,
+            pixel_format: PFNC_MONO16,
             width: w,
             height: h,
             offset_x: ox,
@@ -423,12 +446,16 @@ impl FrameSource for NullFrameSource {
 mod tests {
     use super::*;
 
+    fn expected_pixel(x: u32, y: u32, w: u32, h: u32, block: u64) -> [u8; 2] {
+        pattern_value(x, y, w, h, block).to_le_bytes()
+    }
+
     #[test]
     fn register_semantics_and_identity() {
         let mut back = NullBack::new();
         assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
         assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), HEIGHT);
-        assert_eq!(back.read_reg(REG_PIXEL_FORMAT).unwrap(), PFNC_MONO8);
+        assert_eq!(back.read_reg(REG_PIXEL_FORMAT).unwrap(), PFNC_MONO16);
         assert_eq!(back.read_reg(0x0FF0).unwrap(), 0);
         back.write_reg(0x0FF0, 42).unwrap();
         assert_eq!(back.read_reg(0x0FF0).unwrap(), 0, "unknown writes are no-ops");
@@ -443,7 +470,7 @@ mod tests {
         back.write_reg(REG_EXPOSURE_US, 20_000).unwrap();
         back.write_reg(REG_GAIN, 8).unwrap();
         back.write_reg(REG_FRAME_RATE, 60).unwrap();
-        assert_eq!(back.payload_size().unwrap(), 640 * 480);
+        assert_eq!(back.payload_size().unwrap(), 640 * 480 * 2);
         assert_eq!(back.read_reg(REG_OFFSET_X).unwrap(), 40);
         assert_eq!(back.read_reg(REG_OFFSET_Y).unwrap(), 24);
         assert_eq!(back.read_reg(REG_EXPOSURE_US).unwrap(), 20_000);
@@ -451,7 +478,10 @@ mod tests {
         assert_eq!(back.read_reg(REG_FRAME_RATE).unwrap(), 60);
         assert_eq!(frame_period(60), Duration::from_micros(16_666));
         let payload = back.read_block(0x0004_0008, 8).unwrap();
-        assert_eq!(u64::from_le_bytes(payload.try_into().unwrap()), 640 * 480);
+        assert_eq!(
+            u64::from_le_bytes(payload.try_into().unwrap()),
+            640 * 480 * 2
+        );
 
         let id = back.fetch_identity().unwrap();
         assert_eq!(id.manufacturer, "GenTLite");
@@ -469,6 +499,7 @@ mod tests {
             assert!(text.contains(&format!("<Float Name=\"{node}\"")), "{node} must be a GenApi Float");
             assert!(text.contains(&format!("<IntReg Name=\"{node}_Reg\"")), "{node}_Reg must be a GenApi IntReg");
         }
+        assert!(text.contains("<EnumEntry Name=\"Mono16\""));
     }
 
     #[test]
@@ -479,24 +510,53 @@ mod tests {
         let f1 = src.next_frame(Duration::from_secs(2)).expect("frame 1");
         assert_eq!(f1.width, WIDTH);
         assert_eq!(f1.height, HEIGHT);
-        assert_eq!(f1.pixel_format, PFNC_MONO8);
+        assert_eq!(f1.pixel_format, PFNC_MONO16);
         assert_eq!(f1.payload.len(), PAYLOAD);
         assert!(
             f1.payload
-                .iter()
+                .chunks_exact(2)
                 .enumerate()
-                .all(|(k, &b)| b == (k as u64 + 1) as u8),
-            "block 1 payload is (k + 1) mod 256, byte-exact"
+                .all(|(k, px)| {
+                    px == expected_pixel(
+                        (k % WIDTH as usize) as u32,
+                        (k / WIDTH as usize) as u32,
+                        WIDTH,
+                        HEIGHT,
+                        1,
+                    )
+                }),
+            "block 1 payload is the Mono16 gradient, byte-exact"
         );
         let f2 = src.next_frame(Duration::from_secs(2)).expect("frame 2");
         assert!(
             f2.payload
-                .iter()
+                .chunks_exact(2)
                 .enumerate()
-                .all(|(k, &b)| b == (k as u64 + 2) as u8),
-            "block 2 payload is (k + 2) mod 256, byte-exact"
+                .all(|(k, px)| {
+                    px == expected_pixel(
+                        (k % WIDTH as usize) as u32,
+                        (k / WIDTH as usize) as u32,
+                        WIDTH,
+                        HEIGHT,
+                        2,
+                    )
+                }),
+            "block 2 payload is the Mono16 gradient, byte-exact"
         );
         assert!(f2.timestamp > f1.timestamp);
+    }
+
+    #[test]
+    fn frame_marker_and_moving_bar_follow_the_block_id() {
+        assert_eq!(pattern_value(0, 0, WIDTH, HEIGHT, 1), 0xffff);
+        assert_eq!(pattern_value(32, 0, WIDTH, HEIGHT, 1), 0);
+        assert_eq!(pattern_value(32, 0, WIDTH, HEIGHT, 2), 0xffff);
+        assert_eq!(pattern_value(64, 32, WIDTH, HEIGHT, 1), 0xffff);
+        assert_ne!(
+            pattern_value(64, 32, WIDTH, HEIGHT, 1),
+            pattern_value(64, 32, WIDTH, HEIGHT, 2)
+        );
+        assert_eq!(pattern_value(128, 32, WIDTH, HEIGHT, 2), 0xffff);
     }
 
     #[test]
@@ -511,7 +571,11 @@ mod tests {
         let frame = src.next_frame(Duration::from_secs(2)).unwrap();
         assert_eq!((frame.width, frame.height), (2, 2));
         assert_eq!((frame.offset_x, frame.offset_y), (1, 1));
-        assert_eq!(frame.payload, vec![2, 3, 2, 3]);
+        assert_eq!(frame.pixel_format, PFNC_MONO16);
+        let mut row = Vec::new();
+        row.extend_from_slice(&expected_pixel(0, 0, 2, 2, 1));
+        row.extend_from_slice(&expected_pixel(1, 0, 2, 2, 1));
+        assert_eq!(frame.payload, [row.clone(), row].concat());
     }
 
     #[test]
@@ -537,7 +601,7 @@ mod tests {
             Some(f2) => assert_eq!(f2.width, WIDTH, "a due frame is the next block"),
         }
 
-        // ~30 fps pacing: at least 5 frames in 200 ms (loose bound for CI).
+        // ~30 fps pacing: at least 4 frames in 200 ms (loose bound for CI).
         let t0 = Instant::now();
         let mut n = 0;
         while t0.elapsed() < Duration::from_millis(200) {
@@ -545,7 +609,7 @@ mod tests {
                 n += 1;
             }
         }
-        assert!(n >= 5, "paced frames: {n}");
+        assert!(n >= 4, "paced frames: {n}");
     }
 
     #[test]

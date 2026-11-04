@@ -57,7 +57,14 @@ pub fn provision(config: &GadgetConfig) -> std::io::Result<GadgetPaths> {
 #[cfg(unix)]
 fn provision_impl(config: &GadgetConfig) -> std::io::Result<GadgetPaths> {
     let root = Path::new("/sys/kernel/config/usb_gadget").join(&config.name);
-    let ffs_function = format!("ffs.{}", config.name);
+    // The stock in-kernel f_fs function is named "ffs" and uses the
+    // "functionfs" filesystem. A vendor kernel with CONFIG_USB_F_FS=y
+    // needs the out-of-tree U3V-aware variant, which registers a
+    // distinct function/filesystem name to coexist with the built-in:
+    // VGIGE_FFS_FUNCTION=u3vffs VGIGE_FFS_FS=functionfs_u3v.
+    let ffs_driver = std::env::var("VGIGE_FFS_FUNCTION").unwrap_or_else(|_| "ffs".into());
+    let ffs_fs_type = std::env::var("VGIGE_FFS_FS").unwrap_or_else(|_| "functionfs".into());
+    let ffs_function = format!("{ffs_driver}.{}", config.name);
     let udc = pick_udc()?;
     std::fs::create_dir_all(&root)?;
 
@@ -110,7 +117,7 @@ fn provision_impl(config: &GadgetConfig) -> std::io::Result<GadgetPaths> {
         // caller's CWD into an absolute path (strace: source
         // "/root/GenTLite-public/vgige" from CWD /root/GenTLite-public,
         // kernel ENODEV), which breaks the name lookup.
-        mount_functionfs(&config.name, &mount)
+        mount_functionfs(&config.name, &mount, &ffs_fs_type)
             .map_err(|e| std::io::Error::new(e.kind(), format!("mount functionfs {ffs_function} on {}: {e}", mount.display())))?;
     }
     let sym = cfgdir.join(&ffs_function);
@@ -202,17 +209,19 @@ fn write_file(path: impl AsRef<Path>, contents: impl AsRef<str>) -> std::io::Res
 
 /// `mount(2)` a FunctionFS instance by its bare name (see [`provision`]).
 #[cfg(unix)]
-fn mount_functionfs(source: &str, target: &Path) -> std::io::Result<()> {
+fn mount_functionfs(source: &str, target: &Path, fs_type: &str) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let source = std::ffi::CString::new(source)
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ffs instance name contains NUL"))?;
     let target = std::ffi::CString::new(target.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ffs mount path contains NUL"))?;
+    let fs_type = std::ffi::CString::new(fs_type)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "ffs filesystem type contains NUL"))?;
     let ret = unsafe {
         libc::mount(
             source.as_ptr(),
             target.as_ptr(),
-            c"functionfs".as_ptr(),
+            fs_type.as_ptr(),
             0,
             std::ptr::null(),
         )

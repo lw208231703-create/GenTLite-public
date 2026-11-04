@@ -27,7 +27,9 @@ pub mod relay;
 pub mod space;
 pub mod xml;
 
-pub use back::{BackIdentity, CameraBack, SharedBack};
+pub use back::{
+    swap_register_endian, BackIdentity, CameraBack, RegisterEndian, SharedBack,
+};
 pub use frame::{CanonicalFrame, FrameSession, FrameSource};
 pub use relay::{Relay, SessionFactory, StreamRegs, virtual_payload_chunk};
 pub use space::RegisterSpace;

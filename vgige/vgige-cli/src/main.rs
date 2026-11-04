@@ -109,6 +109,16 @@ impl FrontKind {
             _ => None,
         }
     }
+
+    /// Native register byte order of the front: GigE Vision registers are
+    /// big-endian; U3V/GenCP registers are little-endian.
+    fn target_big_endian(self) -> bool {
+        #[cfg(feature = "front-gige")]
+        if matches!(self, FrontKind::Gige) {
+            return true;
+        }
+        false
+    }
 }
 
 struct Args {
@@ -345,10 +355,13 @@ fn main() {
             std::process::exit(1);
         })
     });
-    let xml = Arc::new(XmlMerger::new(&raw_xml, ext.as_deref()).unwrap_or_else(|e| {
-        eprintln!("vgige: merging the camera XML: {e}");
-        std::process::exit(1);
-    }));
+    let xml = Arc::new(
+        XmlMerger::new_with_endian(&raw_xml, ext.as_deref(), args.front.target_big_endian())
+            .unwrap_or_else(|e| {
+                eprintln!("vgige: merging the camera XML: {e}");
+                std::process::exit(1);
+            }),
+    );
 
     match args.front {
         #[cfg(feature = "front-gige")]
@@ -382,7 +395,7 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
         link.mac,
         relay,
     );
-    let identity = assemble_identity(
+    let mut identity = assemble_identity(
         &back,
         &UpIdentity {
             ip: args.up,
@@ -394,6 +407,11 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
         eprintln!("vgige: assembling the virtual device: {e}");
         std::process::exit(1);
     });
+    // Keep the GigE personality distinct from a U3V virtual device backed by
+    // the same camera: NI derives its XML cache key from this identity, and
+    // the two fronts serve different register byte orders.
+    identity.model_name = format!("{} GigE", identity.model_name);
+    identity.serial_number = format!("{}-GE", identity.serial_number);
     let front = GigEFront::new(identity, space);
 
     // Standard GigE discovery uses limited/subnet broadcast, which a socket

@@ -13,8 +13,34 @@ use std::sync::{Arc, Mutex};
 
 use crate::frame::FrameSource;
 
+/// Native byte order of a backend's register block data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegisterEndian {
+    Little,
+    Big,
+}
+
+/// Swap one register block between little- and big-endian. Four-byte
+/// registers are reversed word-wise; an eight-byte register (PayloadSize)
+/// is reversed as a whole.
+pub fn swap_register_endian(data: &mut [u8]) {
+    if data.len() == 8 {
+        data.reverse();
+    } else if data.len() % 4 == 0 {
+        for word in data.chunks_exact_mut(4) {
+            word.reverse();
+        }
+    }
+}
+
 /// The downstream camera, behind one exclusive control channel.
 pub trait CameraBack: Send {
+    /// Byte order of `read_block`/`write_block` data. GigE Vision registers
+    /// are big-endian; GenCP/U3V registers are little-endian. The virtual
+    /// front converts block data to its own wire endianness.
+    fn register_endian(&self) -> RegisterEndian {
+        RegisterEndian::Big
+    }
     /// READREG of one 32-bit register (spec §16.3). Err = GEV status.
     fn read_reg(&mut self, addr: u32) -> Result<u32, u16>;
     /// WRITEREG of one 32-bit register (spec §16.4). Err = GEV status.
@@ -71,3 +97,23 @@ pub struct BackIdentity {
 /// thread), relay open/close (same thread in practice), and startup all
 /// hold clones; every access is one short exclusive transaction.
 pub type SharedBack = Arc<Mutex<dyn CameraBack>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn register_endian_swaps_4_and_8_byte_values() {
+        let mut four = [1u8, 2, 3, 4];
+        swap_register_endian(&mut four);
+        assert_eq!(four, [4, 3, 2, 1]);
+
+        let mut eight = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        swap_register_endian(&mut eight);
+        assert_eq!(eight, [8, 7, 6, 5, 4, 3, 2, 1]);
+
+        let mut twelve = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        swap_register_endian(&mut twelve);
+        assert_eq!(twelve, [4, 3, 2, 1, 8, 7, 6, 5, 12, 11, 10, 9]);
+    }
+}

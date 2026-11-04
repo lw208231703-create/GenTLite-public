@@ -16,7 +16,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use gentl_u3v::packets;
-use vgige_core::{slot, SharedBack, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION};
+use vgige_core::{
+    slot, swap_register_endian, RegisterEndian, SharedBack, CUSTOM_BASE, CUSTOM_SLOTS,
+    VGIGE_VERSION,
+};
 
 use crate::device::sha1;
 use crate::{DeviceConfig, MANIFEST_BASE, SBRM_BASE, SIRM_BASE, XML_BASE};
@@ -48,6 +51,10 @@ pub struct RegisterFile {
     regions: Vec<Region>,
     config: DeviceConfig,
     back: SharedBack,
+    /// Native byte order of the backend's block data; the U3V device-side
+    /// register file is little-endian (R-30cd) and converts a big-endian
+    /// GigE backend at this boundary.
+    back_endian: RegisterEndian,
     sirm_control: Mutex<u32>,
     eirm_control: Mutex<u32>,
     event_in: Mutex<Option<Arc<dyn super::DeviceTransfers>>>,
@@ -63,10 +70,15 @@ pub struct RegisterFile {
 impl RegisterFile {
     pub fn new(config: DeviceConfig, back: SharedBack) -> Self {
         let regions = build_regions(&config);
+        let back_endian = back
+            .lock()
+            .map(|b| b.register_endian())
+            .unwrap_or(RegisterEndian::Big);
         Self {
             regions,
             config,
             back,
+            back_endian,
             sirm_control: Mutex::new(0),
             eirm_control: Mutex::new(0),
             event_in: Mutex::new(None),
@@ -316,13 +328,25 @@ impl RegisterFile {
         // wider addresses are unmapped here.
         let addr32 = u32::try_from(addr).map_err(|_| packets::GENCP_INVALID_ADDRESS)?;
         let mut back = self.back.lock().map_err(|_| packets::GENCP_ERROR)?;
-        back.read_block(addr32, len as u32)
+        let mut data = back.read_block(addr32, len as u32)?;
+        if self.back_endian == RegisterEndian::Big {
+            swap_register_endian(&mut data);
+        }
+        Ok(data)
     }
 
     fn back_write(&self, addr: u64, data: &[u8]) -> Result<(), u16> {
         let addr32 = u32::try_from(addr).map_err(|_| packets::GENCP_INVALID_ADDRESS)?;
         let mut back = self.back.lock().map_err(|_| packets::GENCP_ERROR)?;
-        back.write_block(addr32, data)
+        let mut owned;
+        let payload = if self.back_endian == RegisterEndian::Big {
+            owned = data.to_vec();
+            swap_register_endian(&mut owned);
+            owned.as_slice()
+        } else {
+            data
+        };
+        back.write_block(addr32, payload)
     }
 }
 
@@ -459,6 +483,10 @@ mod tests {
 
     struct NullBack;
     impl vgige_core::CameraBack for NullBack {
+        fn register_endian(&self) -> vgige_core::RegisterEndian {
+            vgige_core::RegisterEndian::Little
+        }
+
         fn read_reg(&mut self, _a: u32) -> Result<u32, u16> {
             Ok(0)
         }
@@ -592,7 +620,7 @@ mod tests {
                 spec_version_minor: 2,
             },
             b"<x/>",
-            1280 * 1024,
+            1280 * 1024 * 2,
             synthesize_guid("s"),
         );
         let rf = RegisterFile::new(cfg, back.clone());
@@ -601,13 +629,13 @@ mod tests {
 
         let mut b32 = [0u8; 4];
         rf.read(ACQ_BASE + 0x08, &mut b32).unwrap();
-        assert_eq!(u32::from_le_bytes(b32), 640 * 512);
+        assert_eq!(u32::from_le_bytes(b32), 640 * 512 * 2);
         let mut b64 = [0u8; 8];
         rf.read(ACQ_BASE + 0x08, &mut b64).unwrap();
-        assert_eq!(u64::from_le_bytes(b64), 640 * 512);
+        assert_eq!(u64::from_le_bytes(b64), 640 * 512 * 2);
         rf.read(SIRM_BASE + packets::sirm::SI_REQUIRED_PAYLOAD_SIZE, &mut b64)
             .unwrap();
-        assert_eq!(u64::from_le_bytes(b64), 640 * 512);
+        assert_eq!(u64::from_le_bytes(b64), 640 * 512 * 2);
         rf.write(ACQ_BASE, &1u32.to_le_bytes()).unwrap();
         assert_eq!(back.lock().unwrap().read_reg(ACQ_BASE as u32).unwrap(), 1);
         rf.write(ACQ_BASE + 4, &0u32.to_le_bytes()).unwrap();

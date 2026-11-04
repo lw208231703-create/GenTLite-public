@@ -138,12 +138,13 @@ impl Relay {
     /// by the virtual channel).
     pub fn read_reg(&self, off: u32) -> Result<u32, u16> {
         let regs = self.inner.regs.lock().expect("vgige relay regs poisoned");
-        Ok(match off {
+        let value = match off {
             reg::SCP_OFFSET => regs.scp,
             reg::SCPS_OFFSET => regs.scps,
             reg::SCPD_OFFSET => regs.scpd,
             _ => regs.scda,
-        })
+        };
+        Ok(value)
     }
 
     /// Write one virtual channel-0 register. `SCPx` non-zero opens the

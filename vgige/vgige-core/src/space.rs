@@ -32,7 +32,7 @@ use std::time::Instant;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 
-use crate::back::SharedBack;
+use crate::back::{swap_register_endian, RegisterEndian, SharedBack};
 use crate::relay::Relay;
 use crate::xml::XmlMerger;
 use crate::{slot, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION, XML_BASE_V};
@@ -73,6 +73,10 @@ impl CcpState {
 /// its own clone.
 pub struct RegisterSpace {
     back: SharedBack,
+    /// Native byte order of the backend's block register data. The virtual
+    /// GigE register space is always big-endian; a little-endian backend
+    /// (the null demo / U3V) is converted at this boundary.
+    back_endian: RegisterEndian,
     xml: Arc<XmlMerger>,
     /// Virtual identity: the up-facing NIC's IP/MAC (the camera's stay
     /// hidden from the client).
@@ -93,6 +97,7 @@ impl Clone for RegisterSpace {
     fn clone(&self) -> Self {
         Self {
             back: Arc::clone(&self.back),
+            back_endian: self.back_endian,
             xml: Arc::clone(&self.xml),
             up_ip: self.up_ip,
             up_mac: self.up_mac,
@@ -117,8 +122,13 @@ impl RegisterSpace {
         let mut url_slot = [0u8; 512];
         let url = xml.url().as_bytes();
         url_slot[..url.len()].copy_from_slice(url);
+        let back_endian = back
+            .lock()
+            .map(|b| b.register_endian())
+            .unwrap_or(RegisterEndian::Big);
         Self {
             back,
+            back_endian,
             xml,
             up_ip: u32::from(up_ip),
             up_mac,
@@ -231,10 +241,15 @@ impl RegisterSpace {
     }
 
     fn back_read_block(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
-        self.back
+        let mut data = self
+            .back
             .lock()
             .map_err(|_| crate::GEV_STATUS_ERROR)?
-            .read_block(addr, u32::from(count))
+            .read_block(addr, u32::from(count))?;
+        if self.back_endian == RegisterEndian::Little {
+            swap_register_endian(&mut data);
+        }
+        Ok(data)
     }
 
     /// Read one 32-bit register; Err is a GEV status code.
@@ -417,9 +432,17 @@ impl RegisterSpace {
         if data.len() == 4 && virtual_reg {
             return self.write_reg(addr, u32::from_be_bytes(data[..4].try_into().expect("u32")));
         }
+        let mut owned;
+        let payload = if self.back_endian == RegisterEndian::Little {
+            owned = data.to_vec();
+            swap_register_endian(&mut owned);
+            owned.as_slice()
+        } else {
+            data
+        };
         self.back
             .lock()
             .map_err(|_| crate::GEV_STATUS_ERROR)?
-            .write_block(addr, data)
+            .write_block(addr, payload)
     }
 }

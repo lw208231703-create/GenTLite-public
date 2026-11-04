@@ -141,10 +141,16 @@ fn emit_payload(
         }
         let n = size as usize;
         let end = (offset + n).min(payload.len());
-        let mut piece = Vec::with_capacity(n);
-        piece.extend_from_slice(&payload[offset..end]);
-        piece.resize(n, 0);
-        stream.send(&piece)?;
+        if end - offset == n {
+            // Full planned piece: send the frame payload slice directly
+            // (no per-piece allocation/copy on the hot path).
+            stream.send(&payload[offset..end])?;
+        } else {
+            let mut piece = Vec::with_capacity(n);
+            piece.extend_from_slice(&payload[offset..end]);
+            piece.resize(n, 0);
+            stream.send(&piece)?;
+        }
         offset = end;
     }
     Ok(())

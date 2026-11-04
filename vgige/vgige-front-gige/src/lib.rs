@@ -2,10 +2,12 @@
 //! remote client sees. [`GigEFront`] adapts [`RegisterSpace`] to
 //! `gentl_gvcp`'s [`DeviceHandler`] (discovery identity, register/memory
 //! dispatch) for [`GvcpServer`]; [`GvspSession`] is the [`FrameSession`]
-//! that re-emits relayed frames as GigE Vision 3.0-form GVSP blocks
-//! (§24.2: 20-byte EI=1 headers, 40-byte §25.2.1 leader body, 8-byte
-//! §25.2.3 trailer), block_id from 1 per channel open (R-259st), sliced to
-//! the virtual SCPS0 (§36.58 total-size semantics).
+//! that re-emits relayed frames as legacy 1.2-form GVSP blocks by default
+//! (8-byte header, 36-byte leader body, 8-byte trailer), block_id from 1
+//! per channel open (R-259st), sliced to the virtual SCPS0 (§36.58
+//! total-size semantics). `VGIGE_GVSP_3_0=1` opts into the 20-byte
+//! extended form. NI-IMAQdx only accepts the legacy form from a 2.x
+//! device, hence the default.
 //!
 //! Roadmap: a USB3 Vision gadget front (Step 3) implements `FrameSession`
 //! against a gadget device and owns a different device model — it will not
@@ -118,6 +120,9 @@ pub struct GvspSession {
     regs: Arc<Mutex<StreamRegs>>,
     /// Per-channel-open block sequence (R-259st: restarts at 1).
     next_block_id: u64,
+    /// Emit the 1.2 8-byte header form (the default). Set
+    /// `VGIGE_GVSP_3_0=1` to emit the extended 20-byte form instead.
+    legacy: bool,
 }
 
 impl GvspSession {
@@ -126,6 +131,7 @@ impl GvspSession {
             socket: None,
             regs,
             next_block_id: 1,
+            legacy: std::env::var_os("VGIGE_GVSP_3_0").is_none(),
         }
     }
 }
@@ -150,12 +156,24 @@ impl FrameSession for GvspSession {
                 Ipv4Addr::from(regs.scda),
                 reg::scp_host_port(regs.scp),
             ));
-            (target, virtual_payload_chunk(regs.scps))
+            let chunk = if self.legacy {
+                reg::scps_packet_size(regs.scps)
+                    .checked_sub(GVSP_LEGACY_HEADERS_OVERHEAD)
+                    .filter(|c| *c >= 1)
+                    .unwrap_or(1500 - GVSP_LEGACY_HEADERS_OVERHEAD) as usize
+            } else {
+                virtual_payload_chunk(regs.scps)
+            };
+            (target, chunk)
         };
         if target.port() == 0 {
             return; // channel closing; nothing to address.
         }
-        send_block(socket, target, self.next_block_id, frame, chunk);
+        if self.legacy {
+            send_block_legacy(socket, target, self.next_block_id, frame, chunk);
+        } else {
+            send_block(socket, target, self.next_block_id, frame, chunk);
+        }
         self.next_block_id += 1;
     }
 
@@ -206,6 +224,65 @@ fn send_block(
     push_header(&mut pkt, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
     pkt.extend_from_slice(&encode_image_trailer_body(frame.height));
     let _ = socket.send_to(&pkt, target);
+}
+
+/// Emit one block in the 1.2 legacy form: 8-byte common header, 36-byte
+/// leader body, payload, 8-byte trailer body. Receivers that predate the
+/// extended GVSP header (NI-IMAQdx among them) only accept this form.
+fn send_block_legacy(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    block_id: u64,
+    frame: &CanonicalFrame,
+    chunk: usize,
+) {
+    let leader = ImageLeader {
+        field_id: 0,
+        field_count: 0,
+        timestamp: frame.timestamp,
+        pixel_format: frame.pixel_format,
+        size_x: frame.width,
+        size_y: frame.height,
+        offset_x: frame.offset_x,
+        offset_y: frame.offset_y,
+        padding_x: frame.padding_x,
+        padding_y: frame.padding_y,
+    };
+    let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + IMAGE_LEADER_LEGACY_BODY_LEN);
+    push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_LEADER, block_id, 0);
+    pkt.extend_from_slice(&encode_image_leader_body_legacy(&leader));
+    if socket.send_to(&pkt, target).is_err() {
+        return;
+    }
+    let mut packet_id = 1u32;
+    for data in frame.payload.chunks(chunk) {
+        let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + data.len());
+        push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
+        pkt.extend_from_slice(data);
+        if socket.send_to(&pkt, target).is_err() {
+            return;
+        }
+        packet_id += 1;
+    }
+    let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + IMAGE_TRAILER_LEN);
+    push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
+    pkt.extend_from_slice(&encode_image_trailer_body(frame.height));
+    let _ = socket.send_to(&pkt, target);
+}
+
+/// Append a 1.2 legacy GVSP header (8 bytes).
+fn push_header_legacy(pkt: &mut Vec<u8>, packet_format: u8, block_id: u64, packet_id: u32) {
+    let mut hdr = [0u8; GVSP_LEGACY_HEADER_LEN];
+    GvspHeader {
+        status: GEV_STATUS_SUCCESS,
+        flag: 0,
+        extended_id: false,
+        packet_format,
+        block_id,
+        packet_id,
+    }
+    .encode_legacy(&mut hdr);
+    pkt.extend_from_slice(&hdr);
 }
 
 /// Append a 3.0 extended GVSP header (§24.2).

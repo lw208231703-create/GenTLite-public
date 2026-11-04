@@ -307,7 +307,7 @@ fn stream_relay_reemits_as_30_from_a_12_camera() {
     s.remote
         .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
         .unwrap();
-    let total = 300 + reg::GVSP_HEADERS_OVERHEAD as u32;
+    let total = 300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32;
     s.remote.write_reg(reg::SCPS0, reg::scps_make(total)).unwrap();
     assert_eq!(
         reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
@@ -389,20 +389,21 @@ fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
         assert!(Instant::now() < deadline, "timed out waiting for a block");
         let (n, _) = rx.recv_from(&mut buf).expect("gvsp datagram");
         let (hdr, hlen) = GvspHeader::decode_auto(&buf[..n]).expect("decodable gvsp header");
-        assert!(
-            hdr.extended_id,
-            "the relay must emit the 3.0 extended form (EI=1, §24.2)"
-        );
         let id = hdr.block_id;
         match hdr.packet_format {
             PACKET_FORMAT_DATA_LEADER => {
                 let body = &buf[hlen..n];
-                assert_eq!(
-                    body.len(),
-                    IMAGE_LEADER_BODY_LEN,
-                    "relay must re-encode the leader in the 3.0 40-byte layout"
-                );
-                let leader = ImageLeader::decode(body).expect("leader body decodes");
+                let leader = if hdr.extended_id {
+                    assert_eq!(body.len(), IMAGE_LEADER_BODY_LEN, "3.0 leader body");
+                    ImageLeader::decode(body).expect("leader body decodes")
+                } else {
+                    assert_eq!(
+                        body.len(),
+                        IMAGE_LEADER_LEGACY_BODY_LEN,
+                        "1.2 legacy leader body"
+                    );
+                    ImageLeader::decode_legacy(body).expect("legacy leader body decodes")
+                };
                 assert_eq!(leader.pixel_format, MONO8);
                 assert_eq!(leader.size_x, W);
                 assert_eq!(leader.size_y, H);
@@ -422,7 +423,8 @@ fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
             other => panic!("unexpected packet format {other}"),
         }
     };
-    // The virtual SCPS0 asked for 348 total -> 300-byte payload packets.
+    // The virtual SCPS0 asks for 336 total (legacy 36-byte overhead)
+    // -> 300-byte payload packets.
     assert!(
         max_payload_packet <= 300,
         "payload packets respect the virtual SCPS0 (max {max_payload_packet})"

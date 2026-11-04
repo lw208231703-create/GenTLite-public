@@ -24,9 +24,36 @@ impl XmlMerger {
     /// Build the injected blob from the raw camera XML and the optional
     /// operator fragment (a file's content, inserted verbatim).
     pub fn new(camera_xml: &[u8], ext: Option<&[u8]>) -> GentlResult<Self> {
+        Self::build(camera_xml, ext, None)
+    }
+
+    /// Like [`new`](Self::new), but rewrites every `Endianess` declaration
+    /// to the virtual front's native byte order. The gateway converts
+    /// pass-through register blocks to that same order, so a GigE front
+    /// (big-endian wire) and a U3V front (little-endian GenCP) can both
+    /// serve a little-endian null backend correctly.
+    pub fn new_with_endian(
+        camera_xml: &[u8],
+        ext: Option<&[u8]>,
+        big_endian: bool,
+    ) -> GentlResult<Self> {
+        Self::build(camera_xml, ext, Some(big_endian))
+    }
+
+    fn build(
+        camera_xml: &[u8],
+        ext: Option<&[u8]>,
+        target_big_endian: Option<bool>,
+    ) -> GentlResult<Self> {
         let camera_xml = String::from_utf8(camera_xml.to_vec())
             .map_err(|_| GentlError::Io("camera XML is not UTF-8".into()))?;
-        let (blob, node_count) = build_injected_xml(&camera_xml, ext)?;
+        let (mut blob, node_count) = build_injected_xml(&camera_xml, ext)?;
+        if let Some(big) = target_big_endian {
+            blob = rewrite_endian(blob, big);
+            if big {
+                blob = rewrite_gige_identity(blob);
+            }
+        }
         let url = format!("local:vgige.xml;{XML_BASE_V:x};{:x}", blob.len());
         if url.len() > 512 {
             return Err(GentlError::Io("injected XML URL exceeds the 512-byte First URL slot".into()));
@@ -57,6 +84,40 @@ impl XmlMerger {
     pub fn node_count(&self) -> usize {
         self.node_count
     }
+}
+
+/// Rewrite every int-register endianness declaration to `big` (GigE wire)
+/// or little (GenCP/U3V wire). The gateway's register boundary performs the
+/// matching byte conversion.
+fn rewrite_endian(mut xml: String, big: bool) -> String {
+    if big {
+        xml = xml.replace(
+            "<Endianess>LittleEndian</Endianess>",
+            "<Endianess>BigEndian</Endianess>",
+        );
+    } else {
+        xml = xml.replace(
+            "<Endianess>BigEndian</Endianess>",
+            "<Endianess>LittleEndian</Endianess>",
+        );
+    }
+    xml
+}
+
+/// Give the GigE personality its own GenICam identity. NI-IMAQdx caches
+/// downloaded XML by vendor/model/serial; U3V and GigE otherwise share
+/// `GenTLite/Virtual/NULL-0001` and the first download (little-endian U3V)
+/// would be reused for the big-endian GigE device, producing
+/// `AcquisitionFrameRate=503316480` again.
+fn rewrite_gige_identity(blob: String) -> String {
+    blob.replace(
+        "<String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual</Value></String>",
+        "<String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual GigE</Value></String>",
+    )
+    .replace(
+        "<String Name=\"DeviceSerialNumber\" NameSpace=\"Standard\"><Value>NULL-0001</Value></String>",
+        "<String Name=\"DeviceSerialNumber\" NameSpace=\"Standard\"><Value>NULL-0001-GE</Value></String>",
+    )
 }
 
 /// Insert the SmartCamera fragment and the optional operator fragment before
@@ -272,5 +333,30 @@ mod tests {
     #[test]
     fn missing_closing_tag_is_a_clean_error() {
         assert!(XmlMerger::new(b"<RegisterDescription>", None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod endian_tests {
+    use super::{rewrite_endian, rewrite_gige_identity};
+
+    #[test]
+    fn rewrites_declarations_in_both_directions() {
+        let little = "<A><Endianess>LittleEndian</Endianess></A>";
+        let big = rewrite_endian(little.to_owned(), true);
+        assert_eq!(big, "<A><Endianess>BigEndian</Endianess></A>");
+        let back = rewrite_endian(big, false);
+        assert_eq!(back, little);
+    }
+
+    #[test]
+    fn gige_identity_gets_a_distinct_cache_key() {
+        let xml = concat!(
+            "<String Name=\"DeviceModelName\" NameSpace=\"Standard\"><Value>Virtual</Value></String>",
+            "<String Name=\"DeviceSerialNumber\" NameSpace=\"Standard\"><Value>NULL-0001</Value></String>",
+        );
+        let out = rewrite_gige_identity(xml.to_owned());
+        assert!(out.contains("<Value>Virtual GigE</Value>"));
+        assert!(out.contains("<Value>NULL-0001-GE</Value>"));
     }
 }

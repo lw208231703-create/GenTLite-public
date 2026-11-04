@@ -552,7 +552,7 @@ fn stream_relay_u3v_camera_to_gige_client() {
     s.remote
         .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
         .unwrap();
-    let total = 300 + reg::GVSP_HEADERS_OVERHEAD as u32;
+    let total = 300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32;
     s.remote.write_reg(reg::SCPS0, reg::scps_make(total)).unwrap();
 
     let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -621,15 +621,21 @@ fn recv_block(rx: &UdpSocket) -> (u64, Vec<u8>) {
         assert!(Instant::now() < deadline, "timed out waiting for a block");
         let (n, _) = rx.recv_from(&mut buf).expect("gvsp datagram");
         let (hdr, hlen) = GvspHeader::decode_auto(&buf[..n]).expect("decodable gvsp header");
-        assert!(
-            hdr.extended_id,
-            "the relay must emit the 3.0 extended form (EI=1, §24.2)"
-        );
         let id = hdr.block_id;
         match hdr.packet_format {
             PACKET_FORMAT_DATA_LEADER => {
-                assert_eq!(n - hlen, IMAGE_LEADER_BODY_LEN, "3.0 40-byte leader body");
-                let leader = ImageLeader::decode(&buf[hlen..n]).expect("leader body decodes");
+                let body = &buf[hlen..n];
+                let leader = if hdr.extended_id {
+                    assert_eq!(body.len(), IMAGE_LEADER_BODY_LEN, "3.0 40-byte leader body");
+                    ImageLeader::decode(body).expect("leader body decodes")
+                } else {
+                    assert_eq!(
+                        body.len(),
+                        IMAGE_LEADER_LEGACY_BODY_LEN,
+                        "1.2 legacy 36-byte leader body"
+                    );
+                    ImageLeader::decode_legacy(body).expect("legacy leader body decodes")
+                };
                 assert_eq!(leader.pixel_format, MONO8);
                 assert_eq!(leader.size_x, W);
                 assert_eq!(leader.size_y, H);

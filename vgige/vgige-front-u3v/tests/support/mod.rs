@@ -205,6 +205,10 @@ impl StubBack {
 }
 
 impl CameraBack for StubBack {
+    fn register_endian(&self) -> vgige_core::RegisterEndian {
+        vgige_core::RegisterEndian::Little
+    }
+
     fn read_reg(&mut self, addr: u32) -> Result<u32, u16> {
         self.vendor
             .lock()
