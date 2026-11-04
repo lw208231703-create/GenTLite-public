@@ -23,8 +23,9 @@ Written in Rust, C ABI, MIT licensed.
 ## Quick start
 
 ```bash
-cargo cti    # build the workspace, then place gentl_gige.cti /
-             # gentl_u3v.cti next to the DLLs in target/release/
+cargo cti    # build the producer crates, then place gentl_gige.cti /
+             # gentl_u3v.cti next to the shared libraries in
+             # target/release/ (Windows DLL or Unix .so)
              # (cargo ctid for a debug build; plain cargo build --release
              # still works, it just skips the .cti copies)
 ```
@@ -47,6 +48,11 @@ or `cargo test --workspace` for a hardware-free regression.
     simulated image for both transports.
   - GenTL U3V on Windows requires WinUSB for the U3V interface; NI-IMAQdx
     cannot share that interface at the same time.
+  - The Null camera exposes both `Mono8` and `Mono16`; MVS/LD can use
+    Mono8 while NI and GenTL can use Mono16.
+- GenTL CTI packaging: `cargo cti` produces `.cti` twins on both Windows
+  (`.dll`) and Linux (`.so`), and `TL_INFO_PATHNAME` reports the loaded CTI
+  path on both platforms.
 - Third-party host status: NI MAX/NI-IMAQdx works; MVS and LD can display the
   virtual camera's 8-bit stream but have incomplete 16-bit display support.
   The producer's XML, GVSP leader and GenTL BufferInfo all declare

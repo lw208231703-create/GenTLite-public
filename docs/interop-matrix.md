@@ -18,6 +18,8 @@
   - U3V：5/5 帧；与 NI 重叠帧、与模拟端生成图均逐字节 0 差异。
   - Windows GenTL U3V 使用 WinUSB；IAD 复合接口的 associated-interface
     支持已加入 `gentl-u3v`。
+  - Linux `cargo cti` 已支持 `.so → .cti`；`TL_INFO_PATHNAME` 已实现。
+  - Null 相机同时提供 Mono8/Mono16；MVS/LD 可用 Mono8，NI/GenTL 可用 Mono16。
 - MVS / LD：
   - 8-bit 虚拟图像可显示。
   - 16-bit 能收流但不显示；不是 pixel-format 缺失（XML、GVSP、GenTL

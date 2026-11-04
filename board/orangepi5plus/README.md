@@ -12,6 +12,18 @@ virtual U3V / GigE setup. It complements
 - Type-C device port in SuperSpeed
 - board IP for the GigE front: `192.168.137.55`
 
+## Install
+
+The repository-side helper installs the DTB, module, units, udev rule and
+helper scripts:
+
+```bash
+sudo sh board/orangepi5plus/install.sh /root/GenTLite-public
+# add START=1 to restart both vgige units after installation
+```
+
+It enables the units but does not start them unless `START=1` is set.
+
 ## Layout
 
 ```text

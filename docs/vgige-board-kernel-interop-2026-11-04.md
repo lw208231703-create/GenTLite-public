@@ -5,6 +5,24 @@
 > 目标：板端同时提供虚拟 U3V 与虚拟 GigE，兼容 NI MAX / NI-IMAQdx、GenTLite CTI、MVS/LD 等消费者。  
 > 板端可重放资产：`board/orangepi5plus/`
 
+## 0. 2026-11-04 无真机收尾
+
+- `cargo cti` / `gentl-packager` 已跨平台：Windows 复制 `.dll`，Linux 复制
+  `lib*.so` 为 `.cti`；板端 `dump_cti` 可直接加载生成的 `.cti`。
+- `TL_INFO_PATHNAME` 已在 GigE/U3V producer 实现（Windows
+  `GetModuleFileNameW`，Linux `dladdr`）。
+- Null 后端同时暴露 `Mono8` 和 `Mono16`，`PixelFormat` 可写；Mono8
+  使用 8-bit 梯度/帧号图案，PayloadSize 动态变化。
+- GigE `FrameMeta` 增加实际 payload 字节数提示；未知 PixelFormat 的
+  `BUFFER_INFO_SIZE_FILLED` 不再是 0。
+- GVCP 增加 peer-aware `write_reg_from`；CCP 授权绑定首个控制主机，
+  心跳过期后释放，另一 peer 的写请求会被拒绝。
+- 板端新增 `board/orangepi5plus/install.sh`，自动安装 DTB、u3vffs、
+  systemd、udev 和 helper scripts；仅 `START=1` 时重启服务。
+- Windows 验证：NI GigE/U3V 各 5/5；GenTL GigE Mono16 5/5 与生成图
+  0 差异；GenTL GigE Mono8 5/5 与生成图 0 差异；GenTL U3V 5/5，
+  Mono16 `pf=0x01100001`。
+
 ## 1. 当前状态
 
 - 板端地址：`192.168.137.55`

@@ -21,10 +21,10 @@ Rust 实现，C ABI，MIT 许可。
 ## 快速开始
 
 ```bash
-cargo cti    # 编译整个 workspace，并在 target/release/ 的 DLL 旁
+cargo cti    # 编译 producer crate，并在 target/release/ 的共享库旁
              # 生成 gentl_gige.cti / gentl_u3v.cti
-             # （cargo ctid 出 debug 版；直接 cargo build --release
-             #  也可以，只是不会生成 .cti 副本）
+             # （Windows DLL 或 Unix .so；cargo ctid 出 debug 版）
+             # 直接 cargo build --release 也可以，只是不会生成 .cti 副本
 ```
 
 把构建目录指给 GenTL consumer（加入 `GENICAM_GENTL64_PATH` 或显式加载
@@ -42,6 +42,10 @@ cargo cti    # 编译整个 workspace，并在 target/release/ 的 DLL 旁
   - NI-IMAQdx：U3V / GigE 均 100/100 帧。
   - GenTLite producer：U3V / GigE 各 5 帧，与 NI 及模拟端逐字节一致。
   - Windows GenTL U3V 需要 WinUSB；与 NI-IMAQdx 不能同时占用同一接口。
+  - Null 相机同时提供 `Mono8` / `Mono16`；MVS/LD 可选 Mono8，NI 和 GenTL
+    可选 Mono16。
+- GenTL CTI 打包：`cargo cti` 在 Windows（`.dll`）和 Linux（`.so`）都能
+  生成 `.cti`；两平台的 `TL_INFO_PATHNAME` 都能返回实际加载路径。
 - 第三方宿主：NI MAX/NI-IMAQdx 正常；MVS、LD 可显示 8-bit 虚拟图像，
   但 16-bit 显示支持不完整。producer 的 XML、GVSP leader 和 GenTL
   BufferInfo 均明确声明 `Mono16 = 0x01100001`。详见
