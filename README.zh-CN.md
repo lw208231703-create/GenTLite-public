@@ -44,6 +44,9 @@ cargo cti    # 编译 producer crate，并在 target/release/ 的共享库旁
   - Windows GenTL U3V 需要 WinUSB；与 NI-IMAQdx 不能同时占用同一接口。
   - Null 相机同时提供 `Mono8` / `Mono16`；MVS/LD 可选 Mono8，NI 和 GenTL
     可选 Mono16。
+  - 30 fps 板端 CPU 约单核 12%；GigE 在 1 Gbps 下最高约 44.7 fps /
+    117 MB/s，U3V 最高约 95 fps / 249 MB/s。详见
+    `docs/vgige-performance-2026-11-04.md`。
 - GenTL CTI 打包：`cargo cti` 在 Windows（`.dll`）和 Linux（`.so`）都能
   生成 `.cti`；两平台的 `TL_INFO_PATHNAME` 都能返回实际加载路径。
 - 第三方宿主：NI MAX/NI-IMAQdx 正常；MVS、LD 可显示 8-bit 虚拟图像，

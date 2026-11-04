@@ -439,17 +439,51 @@ impl FrameSource for NullFrameSource {
         } else {
             BYTES_PER_PIXEL
         };
-        let row_bytes = w as usize * bpp;
-        let mut payload = vec![0u8; (w * h) as usize * bpp];
-        for (y, row) in payload.chunks_exact_mut(row_bytes).enumerate() {
-            for (x, pixel) in row.chunks_exact_mut(bpp).enumerate() {
-                let value = pattern_value(x as u32, y as u32, w, h, block);
+        let row_y = if h >= 32 { 32 } else { 0 };
+        let mut base_row = Vec::with_capacity(w as usize);
+        base_row.extend((0..w).map(|x| pattern_value(x, row_y, w, h, block)));
+        let mut row_bytes = Vec::with_capacity(w as usize * bpp);
+        for value in &base_row {
+            if bpp == 1 {
+                row_bytes.push((*value >> 8) as u8);
+            } else {
+                row_bytes.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        // Rows 0..31 are the gradient plus, for a wide enough ROI, the
+        // 16-bit block-id marker over x < 512. Build one shared row so the
+        // frame copy stays row-granular.
+        let top_bytes = if h >= 32 {
+            let denom = u64::from(w.saturating_sub(1).max(1));
+            let mut top = Vec::with_capacity(w as usize * bpp);
+            for x in 0..w {
+                let value = ((u64::from(x) * 65_535) / denom + block) & 0xffff;
                 if bpp == 1 {
-                    pixel[0] = (value >> 8) as u8;
+                    top.push((value >> 8) as u8);
                 } else {
-                    pixel.copy_from_slice(&value.to_le_bytes());
+                    top.extend_from_slice(&(value as u16).to_le_bytes());
                 }
             }
+            let marker_px = if w >= 512 { 512 } else { 0 };
+            for bit in 0..marker_px / 32 {
+                let value = if (block >> bit) & 1 != 0 { 0xff } else { 0 };
+                let start = bit as usize * 32 * bpp;
+                let end = start + 32 * bpp;
+                top[start..end].fill(value);
+            }
+            Some(top)
+        } else {
+            None
+        };
+        let mut payload = Vec::with_capacity((w * h) as usize * bpp);
+        for y in 0..h {
+            if y < 32 {
+                if let Some(top) = &top_bytes {
+                    payload.extend_from_slice(top);
+                    continue;
+                }
+            }
+            payload.extend_from_slice(&row_bytes);
         }
         Some(CanonicalFrame {
             timestamp: block * (1_000_000 / u64::from(fps)),
@@ -623,6 +657,28 @@ mod tests {
         row.extend_from_slice(&expected_pixel(0, 0, 2, 2, 1));
         row.extend_from_slice(&expected_pixel(1, 0, 2, 2, 1));
         assert_eq!(frame.payload, [row.clone(), row].concat());
+    }
+
+    #[test]
+    fn narrow_roi_top_rows_match_the_pattern() {
+        let mut back = NullBack::new();
+        let (w, h) = (320u32, 64u32);
+        back.write_reg(REG_WIDTH, w).unwrap();
+        back.write_reg(REG_HEIGHT, h).unwrap();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
+        let mut src = back.open_stream().unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!((frame.width, frame.height), (w, h));
+        for y in 0..h {
+            for x in 0..w {
+                let k = (y * w + x) as usize * 2;
+                assert_eq!(
+                    frame.payload[k..k + 2],
+                    expected_pixel(x, y, w, h, 1),
+                    "pixel ({x},{y})"
+                );
+            }
+        }
     }
 
     #[test]

@@ -190,6 +190,7 @@ pub struct GvspSession {
     /// Emit the 1.2 8-byte header form (the default). Set
     /// `VGIGE_GVSP_3_0=1` to emit the extended 20-byte form instead.
     legacy: bool,
+    scratch: Vec<u8>,
 }
 
 impl GvspSession {
@@ -199,6 +200,7 @@ impl GvspSession {
             regs,
             next_block_id: 1,
             legacy: std::env::var_os("VGIGE_GVSP_3_0").is_none(),
+            scratch: Vec::with_capacity(65_535),
         }
     }
 }
@@ -237,9 +239,23 @@ impl FrameSession for GvspSession {
             return; // channel closing; nothing to address.
         }
         if self.legacy {
-            send_block_legacy(socket, target, self.next_block_id, frame, chunk);
+            send_block_legacy(
+                socket,
+                target,
+                self.next_block_id,
+                frame,
+                chunk,
+                &mut self.scratch,
+            );
         } else {
-            send_block(socket, target, self.next_block_id, frame, chunk);
+            send_block(
+                socket,
+                target,
+                self.next_block_id,
+                frame,
+                chunk,
+                &mut self.scratch,
+            );
         }
         self.next_block_id += 1;
     }
@@ -258,6 +274,7 @@ fn send_block(
     block_id: u64,
     frame: &CanonicalFrame,
     chunk: usize,
+    scratch: &mut Vec<u8>,
 ) {
     let leader = ImageLeader {
         field_id: 0,
@@ -271,26 +288,26 @@ fn send_block(
         padding_x: frame.padding_x,
         padding_y: frame.padding_y,
     };
-    let mut pkt = Vec::with_capacity(GVSP_HEADER_LEN + IMAGE_LEADER_BODY_LEN);
-    push_header(&mut pkt, PACKET_FORMAT_DATA_LEADER, block_id, 0);
-    pkt.extend_from_slice(&encode_image_leader_body(&leader));
-    if socket.send_to(&pkt, target).is_err() {
+    scratch.clear();
+    push_header(scratch, PACKET_FORMAT_DATA_LEADER, block_id, 0);
+    scratch.extend_from_slice(&encode_image_leader_body(&leader));
+    if socket.send_to(scratch, target).is_err() {
         return;
     }
     let mut packet_id = 1u32;
     for data in frame.payload.chunks(chunk) {
-        let mut pkt = Vec::with_capacity(GVSP_HEADER_LEN + data.len());
-        push_header(&mut pkt, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
-        pkt.extend_from_slice(data);
-        if socket.send_to(&pkt, target).is_err() {
+        scratch.clear();
+        push_header(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
+        scratch.extend_from_slice(data);
+        if socket.send_to(scratch, target).is_err() {
             return;
         }
         packet_id += 1;
     }
-    let mut pkt = Vec::with_capacity(GVSP_HEADER_LEN + IMAGE_TRAILER_LEN);
-    push_header(&mut pkt, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
-    pkt.extend_from_slice(&encode_image_trailer_body(frame.height));
-    let _ = socket.send_to(&pkt, target);
+    scratch.clear();
+    push_header(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
+    scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
+    let _ = socket.send_to(scratch, target);
 }
 
 /// Emit one block in the 1.2 legacy form: 8-byte common header, 36-byte
@@ -302,6 +319,7 @@ fn send_block_legacy(
     block_id: u64,
     frame: &CanonicalFrame,
     chunk: usize,
+    scratch: &mut Vec<u8>,
 ) {
     let leader = ImageLeader {
         field_id: 0,
@@ -315,26 +333,26 @@ fn send_block_legacy(
         padding_x: frame.padding_x,
         padding_y: frame.padding_y,
     };
-    let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + IMAGE_LEADER_LEGACY_BODY_LEN);
-    push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_LEADER, block_id, 0);
-    pkt.extend_from_slice(&encode_image_leader_body_legacy(&leader));
-    if socket.send_to(&pkt, target).is_err() {
+    scratch.clear();
+    push_header_legacy(scratch, PACKET_FORMAT_DATA_LEADER, block_id, 0);
+    scratch.extend_from_slice(&encode_image_leader_body_legacy(&leader));
+    if socket.send_to(scratch, target).is_err() {
         return;
     }
     let mut packet_id = 1u32;
     for data in frame.payload.chunks(chunk) {
-        let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + data.len());
-        push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
-        pkt.extend_from_slice(data);
-        if socket.send_to(&pkt, target).is_err() {
+        scratch.clear();
+        push_header_legacy(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
+        scratch.extend_from_slice(data);
+        if socket.send_to(scratch, target).is_err() {
             return;
         }
         packet_id += 1;
     }
-    let mut pkt = Vec::with_capacity(GVSP_LEGACY_HEADER_LEN + IMAGE_TRAILER_LEN);
-    push_header_legacy(&mut pkt, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
-    pkt.extend_from_slice(&encode_image_trailer_body(frame.height));
-    let _ = socket.send_to(&pkt, target);
+    scratch.clear();
+    push_header_legacy(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
+    scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
+    let _ = socket.send_to(scratch, target);
 }
 
 /// Append a 1.2 legacy GVSP header (8 bytes).
