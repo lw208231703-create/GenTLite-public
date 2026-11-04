@@ -61,8 +61,10 @@ jumbo / 零拷贝。
 - 与之前 Mono8 `186 fps / 244 MB/s` 的结果一致：限制主要来自
   **每秒钟搬运的字节数**，不是帧数或 Null 图案生成。
 - 继续提高 U3V 帧率需要 Mono8、缩小 ROI/Height，或优化 FFS/用户态
-  搬运；单纯调大 256 KiB piece 的收益需要单独 A/B，当前不是 30 fps 的
-  瓶颈。
+  搬运。后续把 payload transfer 从 256 KiB 调到 512 KiB：单次 900 帧
+  约 100.1 fps / 262.5 MB/s，1800 帧长测约 95.1 fps / 249.2 MB/s；
+  640 KiB / 1 MiB 会 EPIPE。瓶颈定位详见
+  `docs/u3v-bandwidth-2026-11-04.md`。
 
 ### U3V + GigE 并发（30 fps）
 

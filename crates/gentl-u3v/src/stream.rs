@@ -33,11 +33,12 @@ pub fn stream_id(index: u32) -> String {
 /// blocks"). A 1 KiB multiple and well inside every USB limit — EXCEPT
 /// the one found the hard way (vgige bring-up 2026-10-27): a 1 MiB
 /// piece makes WinUSB/xHCI halt the bulk-IN endpoint on the very first
-/// piece (the device sees EPIPE after the leader); 512 KiB pieces
-/// stream indefinitely (500/500 frames verified). The precise
-/// driver-level mechanism is an open question (Q39); 512 KiB is the
-/// empirical safe value. 256 KiB measured best for large frames.
-const PAYLOAD_TRANSFER: u64 = 1 << 18;
+/// piece (the device sees EPIPE after the leader). On the 2026-11-04
+/// benchmark, 512 KiB is the largest stable request (1800/1800 frames);
+/// 640 KiB and 1 MiB both EPIPE. 512 KiB also measured slightly faster
+/// than 256 KiB for the 2.6 MiB Mono16 frame (about 250–260 MB/s).
+/// The precise driver-level mechanism is an open question (Q39).
+const PAYLOAD_TRANSFER: u64 = 1 << 19;
 
 /// SIRM snapshot of one stream channel, taken at `DevOpenDataStream`.
 #[derive(Debug, Clone)]
@@ -874,18 +875,18 @@ mod tests {
 
     #[test]
     fn geometry_aligned_and_bounded() {
-        let g = plan_geometry(326_680, 52, 32, 1);
+        let g = plan_geometry(PAYLOAD_TRANSFER + 64_536, 52, 32, 1);
         assert_eq!(g.max_leader, 52);
         assert_eq!(g.max_trailer, 32);
         // One full transfer plus the remaining tail.
         assert_eq!(u64::from(g.transfer_size), PAYLOAD_TRANSFER);
         assert_eq!(g.transfer_count, 1);
-        assert_eq!(g.final1, 326_680 - 262_144);
+        assert_eq!(g.final1, 64_536);
         assert_eq!(g.final2, 0);
 
         let g = plan_geometry(3 << 20, 52, 32, 1);
         assert_eq!(u64::from(g.transfer_size), PAYLOAD_TRANSFER);
-        assert_eq!(g.transfer_count, 12);
+        assert_eq!(g.transfer_count, 6);
         assert_eq!(g.final1, 0);
 
         // Alignment 4: every programmed value is a multiple of 4.
@@ -898,7 +899,7 @@ mod tests {
             g.transfer_size as u64 * g.transfer_count as u64 + g.final1 as u64 + g.final2 as u64;
         assert!(total >= 1000);
 
-        // Alignment larger than the 256 KiB cap: TS falls back to the
+        // Alignment larger than the 512 KiB cap: TS falls back to the
         // alignment itself.
         let g = plan_geometry(1 << 22, 64, 32, 1 << 22);
         assert_eq!(g.transfer_size as u64, 1 << 22);
