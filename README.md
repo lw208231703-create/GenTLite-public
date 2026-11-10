@@ -31,9 +31,28 @@ cargo cti    # build the producer crates, then place gentl_gige.cti /
 ```
 
 Point a GenTL consumer at the build directory (add it to
-`GENICAM_GENTL64_PATH`, or load a `.cti` explicitly). `consumer-test/` is a
-C++ reference; run `cargo run --example grab_u3v -- <id> 100` to grab frames,
-or `cargo test --workspace` for a hardware-free regression.
+`GENICAM_GENTL64_PATH`, or load a `.cti` explicitly).
+`gentl/consumer-test/` is a C++ reference; run
+`cargo run --example grab_u3v -- <id> 100` to grab frames, or
+`cargo test --workspace` for a hardware-free regression.
+
+## Repository layout
+
+```text
+gentl/       universal GenTL producer: core, GVCP, GigE, U3V, simulator,
+             packager, consumer-test and platform notes
+gateway/     Linux relay gateway: relay core, camera backends, CLI
+virtual/     virtual-camera fronts: GigE, U3V and the Null source
+board/       Orange Pi deployment assets
+docs/        specifications, interoperability and performance records
+scripts/     shared build/deployment helpers
+```
+
+The GenTL producer source is shared by Linux and Windows; only the packaged
+artifact differs (`lib*.so -> .cti` vs `*.dll -> .cti`). Platform-specific
+build notes live under `gentl/platforms/`. See
+[`docs/repository-layout.md`](docs/repository-layout.md) for the full tree
+and dependency direction.
 
 ## Status
 
@@ -64,8 +83,9 @@ or `cargo test --workspace` for a hardware-free regression.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). `include/GenTL.h` / `include/PFNC.h` are
-EMVA-copyrighted headers (BSD-style, headers retained).
+MIT — see [LICENSE](LICENSE). `gentl/include/GenTL.h` /
+`gentl/include/PFNC.h` are EMVA-copyrighted headers (BSD-style, headers
+retained).
 
 *GenTL, GenICam, GigE Vision and USB3 Vision are trademarks of their
 respective owners. Independent implementation from public specifications;

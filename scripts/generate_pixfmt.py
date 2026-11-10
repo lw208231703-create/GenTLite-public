@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate crates/gentl-core/src/pixfmt_table.rs from include/PFNC.h.
+"""Generate gentl/core/src/pixfmt_table.rs from gentl/include/PFNC.h.
 
 The table is explicit (every PFNC format enumerated, reviewable) and
 faithful (mechanically extracted from the authoritative EMVA header, so no
 manual transcription errors). Re-run this script when the PFNC version in
-include/ changes; the generated file carries a header saying so.
+gentl/include/ changes; the generated file carries a header saying so.
 
 Entry layout: (name, value, bits_per_pixel, planar)
   - bits_per_pixel comes from the PFNC value's own bits 16-23 (the EMVA
@@ -18,8 +18,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-PFNC_H = ROOT / "include" / "PFNC.h"
-OUT = ROOT / "crates" / "gentl-core" / "src" / "pixfmt_table.rs"
+PFNC_H = ROOT / "gentl" / "include" / "PFNC.h"
+OUT = ROOT / "gentl" / "core" / "src" / "pixfmt_table.rs"
 
 # Values below 0x01000000 are helpers/masks, not pixel formats.
 FMT = re.compile(r"^#define\s+(PFNC_[A-Za-z0-9_]+)\s+(0x[0-9A-Fa-f]{8})\s*(?:/\*.*\*/)?\s*$")
@@ -48,7 +48,7 @@ def main() -> int:
     entries.sort(key=lambda e: e[1])
     lines = [
         "//! GENERATED FILE — do not edit by hand.",
-        "//! Source: `include/PFNC.h`, extracted by `scripts/generate_pixfmt.py`.",
+        "//! Source: `gentl/include/PFNC.h`, extracted by `scripts/generate_pixfmt.py`.",
         "//! Re-run the generator when the PFNC header version changes.",
         "//!",
         "//! Explicit enumeration of every PFNC pixel format (explicit rather",

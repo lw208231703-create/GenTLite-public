@@ -28,9 +28,26 @@ cargo cti    # 编译 producer crate，并在 target/release/ 的共享库旁
 ```
 
 把构建目录指给 GenTL consumer（加入 `GENICAM_GENTL64_PATH` 或显式加载
-`.cti`）。`consumer-test/` 提供 C++ 参考实现；
+`.cti`）。`gentl/consumer-test/` 提供 C++ 参考实现；
 `cargo run --example grab_u3v -- <id> 100` 可直接收图，
 `cargo test --workspace` 无硬件回归。
+
+## 目录结构
+
+```text
+gentl/       通用 GenTL producer：core、GVCP、GigE、U3V、simulator、
+             packager、consumer-test 和平台说明
+gateway/     Linux 中转网关：relay core、相机 backends、CLI
+virtual/     虚拟相机前端：GigE、U3V 和 Null 源
+board/       Orange Pi 板端部署资产
+docs/        规范、互操作和性能记录
+scripts/     共享构建/部署脚本
+```
+
+GenTL producer 的源码由 Linux 和 Windows 共用，区别只在最终打包产物
+（`lib*.so -> .cti` 与 `*.dll -> .cti`）；平台构建说明放在
+`gentl/platforms/`。完整目录树和依赖方向见
+[`docs/repository-layout.md`](docs/repository-layout.md)。
 
 ## 状态
 
@@ -56,7 +73,7 @@ cargo cti    # 编译 producer crate，并在 target/release/ 的共享库旁
 
 ## 许可
 
-MIT —— 见 [LICENSE](LICENSE)。`include/GenTL.h` / `include/PFNC.h`
+MIT —— 见 [LICENSE](LICENSE)。`gentl/include/GenTL.h` / `gentl/include/PFNC.h`
 为 EMVA 版权头文件（BSD 风格，版权头保留）。
 
 *GenTL、GenICam、GigE Vision、USB3 Vision 为各自所有方的商标。本项目

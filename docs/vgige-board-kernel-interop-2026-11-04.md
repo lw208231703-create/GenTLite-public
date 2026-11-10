@@ -272,7 +272,7 @@ AcquisitionAttributes::PacketSize = "1500"
 - Windows/WinUSB 可能只暴露控制节点；原 `gentl-u3v` 只打开独立 MI 节点，导致：
   `DevOpenDataStream: -1007 invalid ID`（stream_in 为空）。
 - 修复：
-  `crates/gentl-u3v/src/discovery.rs` 增加 `WinUsb_GetAssociatedInterface` fallback：
+  `gentl/u3v/src/discovery.rs` 增加 `WinUsb_GetAssociatedInterface` fallback：
   - 只有一个 device interface 时，枚举 associated interfaces；
   - children handles 放在 parent 之前，避免 parent 先释放。
 - 修复后 `grab_u3v` 5/5 帧，Mono16 正常。
@@ -312,9 +312,9 @@ Get-PnpDevice -PresentOnly | Where-Object { $_.InstanceId -match 'VID_1209&PID_7
   - 显式添加 `flate2`，启用 `rust_backend`；
   - 避免 `zopfli`。
 - 涉及文件：
-  - `crates/gentl-gige/Cargo.toml`
-  - `crates/gentl-u3v/Cargo.toml`
-  - `vgige/vgige-back-gige/Cargo.toml`
+  - `gentl/gige/Cargo.toml`
+  - `gentl/u3v/Cargo.toml`
+  - `gateway/backends/gige/Cargo.toml`
 - 板端无外网时用：
 
 ```bash
@@ -362,6 +362,6 @@ cat /sys/class/udc/fc000000.usb/current_speed
 1. NI test packet 已由设备侧实现；`.icd` 的 `PacketSize=1500` 仍建议保留，删除 `.icd` 后重新确认。
 2. MVS/LD 的 16-bit 显示限制不在虚拟相机侧；需要时加 Mono8 fallback。
 3. U3V 当前绑定 NI-IMAQdx；GenTL U3V 需要临时切 WinUSB。
-4. `crates/gentl-u3v/src/discovery.rs` 的 associated-interface 修复和 3 个 Cargo.toml 的 zip/flate2 调整已提交。
+4. `gentl/u3v/src/discovery.rs` 的 associated-interface 修复和 3 个 Cargo.toml 的 zip/flate2 调整已提交。
 5. LD 如果仍显示三个重复设备，检查它实际加载的 `gentl_u3v.cti` 路径，不要使用旧副本。
 6. 需要 3.0 GVSP 时使用 `VGIGE_GVSP_3_0=1`；NI 必须使用默认 legacy。

@@ -1,0 +1,63 @@
+[package]
+name = "vgige-cli"
+description = "vgige gateway binary: argument parsing, up/down NIC assembly (back-gige + core + front-gige), signal handling"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[features]
+# The binary links one camera backend AND one front. Producer CTI exports
+# are disabled in this dependency graph, so back-gige + front-u3v links too.
+# Deployments:
+#   GigE gateway:        default
+#   U3V camera → GigE:   --no-default-features --features back-u3v,front-gige
+#   GigE camera → U3V:   --no-default-features --features back-gige,front-u3v
+#   U3V camera → U3V:    --no-default-features --features back-u3v,front-u3v
+#   no camera → GigE:    --no-default-features --features back-null,front-gige
+#   no camera → U3V:     --no-default-features --features back-null,front-u3v
+default = ["back-gige", "front-gige"]
+back-gige = ["dep:vgige-back-gige"]
+back-null = ["dep:vgige-back-null"]
+back-u3v = ["dep:vgige-back-u3v"]
+front-gige = ["dep:vgige-front-gige"]
+front-u3v = ["dep:vgige-front-u3v"]
+
+[dependencies]
+vgige-core = { path = "../core" }
+vgige-back-gige = { path = "../backends/gige", optional = true }
+vgige-back-null = { path = "../../virtual/null", optional = true }
+vgige-back-u3v = { path = "../backends/u3v", optional = true }
+vgige-front-gige = { path = "../../virtual/gige", optional = true }
+vgige-front-u3v = { path = "../../virtual/u3v", optional = true }
+gentl-core = { path = "../../gentl/core" }
+gentl-gvcp = { path = "../../gentl/gvcp" }
+
+[target.'cfg(unix)'.dependencies]
+# SIGINT/SIGTERM shutdown flag (src/signal.rs) and getifaddrs NIC lookup
+# (src/netid.rs); same standing as gentl-gige's unix backend (notes/PENDING.md
+# "Linux 可移植").
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# Up-facing NIC MAC lookup via GetAdaptersAddresses (src/netid.rs), same API
+# family gentl-gige uses for its Windows enumeration. Ndis is required by
+# windows-sys 0.59 for IP_ADAPTER_ADDRESSES_LH (the adapter struct's cfg).
+windows-sys = { version = "0.59", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+] }
+
+[dev-dependencies]
+# tests/relay_e2e.rs: the simulator plays the real camera; no hardware needed.
+gentl-simulator = { path = "../../gentl/simulator" }
+# Test binaries are their own link units: the U3V suites build the fake
+# GenCP device on the client facade's UsbPipe, and the GigE suites use
+# back-gige — neither links both GenTL producers into one image (see
+# [features]). Both fronts/backs are listed here so every test builds
+# under any feature combination of the library itself.
+gentl-u3v = { path = "../../gentl/u3v", default-features = false }
+vgige-back-gige = { path = "../backends/gige" }
+vgige-back-u3v = { path = "../backends/u3v" }
+vgige-front-gige = { path = "../../virtual/gige" }

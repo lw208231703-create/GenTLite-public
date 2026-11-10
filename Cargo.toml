@@ -1,19 +1,23 @@
 [workspace]
 resolver = "2"
+# Product groups:
+#   gentl/   universal GenTL producer (.cti)
+#   gateway/ Linux relay gateway + camera backends + CLI
+#   virtual/ virtual GigE/U3V fronts and the Null source
 members = [
-    "crates/gentl-core",
-    "crates/gentl-gvcp",
-    "crates/gentl-gige",
-    "crates/gentl-simulator",
-    "crates/gentl-u3v",
-    "crates/gentl-packager",
-    "vgige/vgige-core",
-    "vgige/vgige-back-gige",
-    "vgige/vgige-back-null",
-    "vgige/vgige-back-u3v",
-    "vgige/vgige-front-gige",
-    "vgige/vgige-front-u3v",
-    "vgige/vgige-cli",
+    "gentl/core",
+    "gentl/gvcp",
+    "gentl/gige",
+    "gentl/simulator",
+    "gentl/u3v",
+    "gentl/packager",
+    "gateway/core",
+    "gateway/backends/gige",
+    "gateway/backends/u3v",
+    "gateway/cli",
+    "virtual/gige",
+    "virtual/u3v",
+    "virtual/null",
 ]
 
 [workspace.package]
