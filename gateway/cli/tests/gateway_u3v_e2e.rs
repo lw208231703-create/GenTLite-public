@@ -437,7 +437,7 @@ fn start() -> Stack {
         UP_MAC,
         relay,
     );
-    space.set_bootstrap(0x0002_0002, Ipv4Addr::new(255, 0, 0, 0));
+    space.set_bootstrap(0x0001_0002, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -482,9 +482,9 @@ fn register_passthrough_and_virtualized_identity() {
     assert_eq!(on_camera, 128, "write landed on the fake camera");
 
     // The virtual GigE device reports the GigE spec version of its own
-    // identity (2.2), not the downstream U3V GenCP version: the latter is
-    // not a valid GigE VERSION register value.
-    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0002_0002);
+    // identity (1.2 legacy GVSP), not the downstream U3V GenCP version:
+    // the latter is not a valid GigE VERSION register value.
+    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0001_0002);
 
     // Identity virtualization is local to the register space: the up NIC
     // replaces the camera.

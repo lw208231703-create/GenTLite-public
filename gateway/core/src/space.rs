@@ -176,7 +176,7 @@ impl RegisterSpace {
             xml,
             up_ip: u32::from(up_ip),
             up_mac,
-            spec_version: 0x0002_0002,
+            spec_version: 0x0001_0002,
             subnet_mask: 0,
             url_slot: Arc::new(url_slot),
             ccp: Arc::new(Mutex::new(CcpState::default())),
@@ -195,7 +195,7 @@ impl RegisterSpace {
 
     /// Keep the bootstrap registers (Version / subnet) coherent with the
     /// discovery identity. Called before the register space is shared with
-    /// the front; the defaults are GigE 2.2 and mask 0.
+    /// the front; the defaults are GigE Vision 1.2 and mask 0.
     pub fn set_bootstrap(&mut self, spec_version: u32, subnet_mask: Ipv4Addr) {
         self.spec_version = spec_version;
         self.subnet_mask = u32::from(subnet_mask);

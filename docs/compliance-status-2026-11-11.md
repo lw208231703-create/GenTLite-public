@@ -82,6 +82,12 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
   `GEV_STATUS_BUSY`（普通包长写和 test-packet 请求都一样）；首个 GVSP 帧
   之前的 §11.7 协商窗口仍允许写。`SCPD` 的包间延迟在设备提供时间戳 tick
   频率时按 §36.59 生效，tick 频率为 0 时该寄存器无定义单位。
+- 虚拟 GigE 声称 GigE Vision 1.2（`VERSION=0x00010002`、
+  `DEVICE_MODE=0x80000001`：big-endian + UTF-8 + transmitter），因为前端
+  发送的是 1.2 legacy GVSP（8 B 头 / 36 B leader）。此前 `VERSION=0x00020002`
+  时 NI-IMAQdx 能打开设备但按 2.x 解析并丢弃 1.2 包，表现为 `GetImageData`
+  超时；改为 1.2 后 NI 与 MVS 都正常取流。discovery 版本、`VERSION` 寄存器
+  和 `DEVICE_MODE` 保持一致。
 - 虚拟 Null 相机的 `Mono16` PFNC 值已修正为 `0x01100007`（旧 `0x01100001`
   不是 PFNC 值）；Null XML、GVSP leader、GenTL BufferInfo 三处一致。
   MVS 只识别标准值，旧值会让 16-bit 流显示为花屏；修正后 MVS 原生 GigE

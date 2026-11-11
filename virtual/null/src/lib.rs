@@ -435,7 +435,7 @@ impl CameraBack for NullBack {
     }
 
     fn open_stream(&mut self) -> Result<Box<dyn FrameSource>, u16> {
-        Ok(Box::new(NullFrameSource::new(self.regs.clone())))
+        Ok(Box::new(NullFrameSource::new(self.regs.clone(), self.epoch)))
     }
 
     fn close_stream(&mut self) -> Result<(), u16> {
@@ -451,6 +451,9 @@ impl CameraBack for NullBack {
 /// full-frame `(source_byte_index + block_id) mod 256` pattern.
 pub struct NullFrameSource {
     regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
+    /// Same clock as the bootstrap timestamp registers, so GVSP leader
+    /// timestamps use the same epoch/unit the host reads from the device.
+    epoch: Instant,
     next_block: u64,
     next_at: Instant,
     recycler: SyncSender<Vec<u8>>,
@@ -458,10 +461,11 @@ pub struct NullFrameSource {
 }
 
 impl NullFrameSource {
-    pub fn new(regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>) -> Self {
+    pub fn new(regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>, epoch: Instant) -> Self {
         let (recycler, pool) = sync_channel(FRAME_POOL_DEPTH);
         Self {
             regs,
+            epoch,
             next_block: 1,
             next_at: Instant::now(),
             recycler,
@@ -472,7 +476,8 @@ impl NullFrameSource {
 
 impl Default for NullFrameSource {
     fn default() -> Self {
-        Self::new(NullBack::new().regs)
+        let back = NullBack::new();
+        Self::new(back.regs, back.epoch)
     }
 }
 
@@ -576,7 +581,7 @@ impl FrameSource for NullFrameSource {
             payload.extend_from_slice(&row_bytes);
         }
         Some(CanonicalFrame {
-            timestamp: block * (1_000_000 / u64::from(fps)),
+            timestamp: self.epoch.elapsed().as_micros() as u64,
             pixel_format,
             width: w,
             height: h,

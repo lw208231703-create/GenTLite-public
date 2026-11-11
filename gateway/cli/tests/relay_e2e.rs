@@ -82,7 +82,7 @@ fn start(legacy_stream: bool) -> Stack {
         UP_MAC,
         relay,
     );
-    space.set_bootstrap(0x0002_0002, Ipv4Addr::new(255, 0, 0, 0));
+    space.set_bootstrap(0x0001_0002, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -125,13 +125,13 @@ fn register_passthrough_and_virtualized_identity() {
     assert_eq!(s.remote.read_reg(REG_WIDTH).unwrap(), W);
     assert_eq!(
         s.remote.read_reg(reg::VERSION).unwrap(),
-        0x0002_0002,
-        "virtual device advertises its identity version"
+        0x0001_0002,
+        "virtual device advertises the 1.2 legacy GVSP identity"
     );
     assert_eq!(
         s.remote.read_reg(reg::DEVICE_MODE).unwrap(),
         0x8000_0001,
-        "transmitter class + deprecated bit (2.x identity)"
+        "big-endian + UTF-8 + transmitter (1.2 bit 0 / 2.x deprecated MSB)"
     );
     assert_eq!(
         s.remote.read_reg(reg::NET_IF_CAPABILITY).unwrap(),

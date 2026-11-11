@@ -43,9 +43,14 @@ pub struct UpIdentity {
 /// via the back's native bootstrap ([`CameraBack::fetch_identity`]), the
 /// up-facing IP/MAC/mask applied, and the network-shaped fields the
 /// virtual device owns synthesized:
-/// - `device_mode`: the virtual device is a GigE Vision 1.2/3.0-class
-///   transmitter (same value the simulator publishes: deprecated
-///   big-endian bit set per §36.2, device_class = Transmitter, UTF-8);
+/// - `spec_version`: the virtual device emits the GigE Vision 1.2 legacy
+///   GVSP form (8-byte header, 36-byte leader body), so it claims 1.2 even
+///   when the downstream camera is newer. A 2.2 identity with a 1.2 stream
+///   makes strict hosts (NI-IMAQdx) discard the packets.
+/// - `device_mode`: big-endian + UTF-8 + transmitter. In 1.2 printed bit 0
+///   is the endianess bit (1 = big-endian) and printed bits 24-31 are the
+///   character-set index (1 = UTF-8); the same MSB stays the 2.x
+///   deprecated always-1 bit.
 /// - `ip_config_options/current`: the up NIC is configured by the
 ///   gateway host, so the claim is persistent-IP + LLA / persistent-IP
 ///   (§36.5 values; there is no camera NIC to mirror — a U3V back has no
@@ -59,8 +64,10 @@ pub fn assemble_identity(back: &SharedBack, up: &UpIdentity) -> GentlResult<Disc
         .fetch_identity()
         .map_err(gentl_core::GentlError::GevStatus)?;
     Ok(DiscoveryInfo {
-        spec_version_major: id.spec_version_major,
-        spec_version_minor: id.spec_version_minor,
+        // The GVSP front is 1.2-form; the downstream camera's native
+        // version (possibly 2.x/3.0) is not what the virtual wire speaks.
+        spec_version_major: 1,
+        spec_version_minor: 2,
         device_mode: 0x8000_0001,
         mac: up.mac,
         ip_config_options: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
