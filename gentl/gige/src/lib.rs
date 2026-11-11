@@ -31,6 +31,7 @@ mod cti;
 mod device;
 mod discovery;
 mod gvsp_receiver;
+mod payload;
 mod stream;
 mod sys;
 
@@ -1210,6 +1211,16 @@ pub extern "C" fn DSGetInfo(
                 info_value(pi_type, INFO_DATATYPE_UINT64, p_buffer, pi_size, &v)
             }
             STREAM_INFO_PAYLOAD_SIZE => {
+                // PayloadSize follows Width/Height/PixelFormat; before the
+                // stream starts, refresh from the device register so a
+                // changed ROI is visible without reopening the stream.
+                if !ds.core.is_grabbing() {
+                    if let Some(device) = ds.parent.upgrade() {
+                        if let Some(size) = device.payload_size() {
+                            ds.core.set_expected_payload_size(size);
+                        }
+                    }
+                }
                 let v = ds.core.expected_payload_size();
                 info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &v)
             }

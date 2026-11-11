@@ -7,6 +7,7 @@
 //! starts from the raw bytes.
 
 use gentl_core::{GentlError, GentlResult};
+use gentl_gvcp::registers as reg;
 
 use crate::XML_BASE_V;
 
@@ -47,7 +48,17 @@ impl XmlMerger {
     ) -> GentlResult<Self> {
         let camera_xml = String::from_utf8(camera_xml.to_vec())
             .map_err(|_| GentlError::Io("camera XML is not UTF-8".into()))?;
-        let (mut blob, node_count) = build_injected_xml(&camera_xml, ext)?;
+        let (mut blob, mut node_count) = build_injected_xml(&camera_xml, ext)?;
+        // A GigE personality must expose the standard transport features
+        // (§37.5.4 and SFNC GevSCP*/GevSCD*), even when the downstream
+        // camera speaks U3V or is the null source and therefore has no
+        // GigE nodes. A real GigE camera XML already carries them: only the
+        // missing ones are injected, so the document never has duplicates.
+        if target_big_endian == Some(true) {
+            let (with_transport, transport_nodes) = inject_gige_transport(blob);
+            blob = with_transport;
+            node_count += transport_nodes;
+        }
         if let Some(big) = target_big_endian {
             blob = rewrite_endian(blob, big);
             if big {
@@ -146,6 +157,141 @@ fn build_injected_xml(
     }
     out.push_str(&camera_xml[cut..]);
     Ok((out, node_count))
+}
+
+/// Insert the standard GigE Vision transport features for stream channel 0
+/// when the camera XML does not already declare them. The addresses are the
+/// spec's fixed stream-channel map (§36.57–§36.60); the virtual front routes
+/// them to its local channel, so they never reach the downstream camera.
+/// Returns the document and the number of injected features (4 when the
+/// camera had no GigE transport nodes at all).
+fn inject_gige_transport(xml: String) -> (String, usize) {
+    let mut fragment = String::new();
+    let mut nodes = 0usize;
+    fragment.push_str("  <Group Comment=\"GigEVisionTransport\">\n");
+
+    if !has_node(&xml, "GevSCPSPacketSize") {
+        gige_int_feature(
+            &mut fragment,
+            "GevSCPSPacketSize",
+            "Packet Size",
+            "Total GVSP packet size in bytes, including IP, UDP and GVSP headers (GigE Vision §36.58).",
+            "GevSCPSPacketSize_Reg",
+            "576",
+            "65535",
+        );
+        // packet_size is the low 16 bits; the FIRE/DF flags above it are
+        // not part of the SFNC packet-size feature.
+        gige_masked_reg(&mut fragment, "GevSCPSPacketSize_Reg", reg::SCPS0, 0, 15);
+        nodes += 1;
+    }
+    if !has_node(&xml, "GevSCPHostPort") {
+        gige_int_feature(
+            &mut fragment,
+            "GevSCPHostPort",
+            "Host Port",
+            "Host UDP port of the stream channel; writing 0 closes it (GigE Vision §36.57).",
+            "GevSCPHostPort_Reg",
+            "0",
+            "65535",
+        );
+        gige_masked_reg(&mut fragment, "GevSCPHostPort_Reg", reg::SCP0, 0, 15);
+        nodes += 1;
+    }
+    if !has_node(&xml, "GevSCDA") {
+        gige_int_feature(
+            &mut fragment,
+            "GevSCDA",
+            "Destination Address",
+            "Stream channel destination IPv4 address (GigE Vision §36.60).",
+            "GevSCDA_Reg",
+            "0",
+            "4294967295",
+        );
+        gige_int_reg(&mut fragment, "GevSCDA_Reg", reg::SCDA0);
+        nodes += 1;
+    }
+    if !has_node(&xml, "GevSCPD") {
+        gige_int_feature(
+            &mut fragment,
+            "GevSCPD",
+            "Packet Delay",
+            "Minimal inter-packet delay in timestamp ticks (GigE Vision §36.59).",
+            "GevSCPD_Reg",
+            "0",
+            "4294967295",
+        );
+        gige_int_reg(&mut fragment, "GevSCPD_Reg", reg::SCPD0);
+        nodes += 1;
+    }
+    fragment.push_str("  </Group>\n");
+
+    if nodes == 0 {
+        return (xml, 0);
+    }
+    let Some(cut) = xml.rfind("</RegisterDescription>") else {
+        return (xml, 0);
+    };
+    let mut out = String::with_capacity(xml.len() + fragment.len());
+    out.push_str(&xml[..cut]);
+    out.push_str(&fragment);
+    out.push_str(&xml[cut..]);
+    (out, nodes)
+}
+
+fn has_node(xml: &str, name: &str) -> bool {
+    xml.contains(&format!("Name=\"{name}\"")) || xml.contains(&format!("Name='{name}'"))
+}
+
+fn gige_int_feature(
+    x: &mut String,
+    name: &str,
+    display: &str,
+    tooltip: &str,
+    pvalue: &str,
+    min: &str,
+    max: &str,
+) {
+    x.push_str(&format!(
+        "    <Integer Name=\"{name}\" NameSpace=\"Standard\">\n\
+         \x20     <ToolTip>{tooltip}</ToolTip>\n\
+         \x20     <Description>{tooltip}</Description>\n\
+         \x20     <DisplayName>{display}</DisplayName>\n\
+         \x20     <Visibility>Beginner</Visibility>\n\
+         \x20     <pValue>{pvalue}</pValue>\n\
+         \x20     <Min>{min}</Min>\n\
+         \x20     <Max>{max}</Max>\n\
+         \x20     <Inc>1</Inc>\n\
+         \x20   </Integer>\n"
+    ));
+}
+
+fn gige_masked_reg(x: &mut String, name: &str, addr: u32, lsb: u8, msb: u8) {
+    x.push_str(&format!(
+        "    <MaskedIntReg Name=\"{name}\" NameSpace=\"Custom\">\n\
+         \x20     <Address>0x{addr:08X}</Address>\n\
+         \x20     <Length>4</Length>\n\
+         \x20     <AccessMode>RW</AccessMode>\n\
+         \x20     <pPort>Device</pPort>\n\
+         \x20     <LSB>{lsb}</LSB>\n\
+         \x20     <MSB>{msb}</MSB>\n\
+         \x20     <Sign>Unsigned</Sign>\n\
+         \x20     <Endianess>BigEndian</Endianess>\n\
+         \x20   </MaskedIntReg>\n"
+    ));
+}
+
+fn gige_int_reg(x: &mut String, name: &str, addr: u32) {
+    x.push_str(&format!(
+        "    <IntReg Name=\"{name}\" NameSpace=\"Custom\">\n\
+         \x20     <Address>0x{addr:08X}</Address>\n\
+         \x20     <Length>4</Length>\n\
+         \x20     <AccessMode>RW</AccessMode>\n\
+         \x20     <pPort>Device</pPort>\n\
+         \x20     <Sign>Unsigned</Sign>\n\
+         \x20     <Endianess>BigEndian</Endianess>\n\
+         \x20   </IntReg>\n"
+    ));
 }
 
 /// Built-in SmartCamera category mapping the custom window
@@ -328,6 +474,65 @@ mod tests {
         assert!(out.contains("<Integer Name=\"MyNode\" NameSpace=\"Custom\">"));
         let cut = out.rfind("</RegisterDescription>").unwrap();
         assert!(out.find("<Category Name=\"SmartCamera\"").unwrap() < cut);
+    }
+
+    #[test]
+    fn gige_personality_injects_standard_transport_nodes() {
+        let m = XmlMerger::new_with_endian(camera_xml().as_bytes(), None, true).unwrap();
+        let out = std::str::from_utf8(m.blob()).unwrap();
+        assert_tag_balance(out);
+        for (node, addr) in [
+            ("GevSCPSPacketSize", 0x0D04u32),
+            ("GevSCPHostPort", 0x0D00),
+            ("GevSCDA", 0x0D18),
+            ("GevSCPD", 0x0D08),
+        ] {
+            assert!(
+                out.contains(&format!("Name=\"{node}\"")),
+                "missing feature {node}"
+            );
+            let reg_name = format!("{node}_Reg");
+            let at = out
+                .find(&format!("Name=\"{reg_name}\""))
+                .unwrap_or_else(|| panic!("missing register {reg_name}"));
+            assert!(
+                out[at..at + 240].contains(&format!("Address>0x{addr:08X}</Address>")),
+                "{reg_name} does not point at 0x{addr:08X}"
+            );
+        }
+        // The packet-size/host-port fields are masked to their 16-bit fields
+        // (the surrounding SCP/SCPS flag bits are not part of the feature).
+        assert!(out.contains("<MaskedIntReg Name=\"GevSCPSPacketSize_Reg\""));
+        assert!(out.contains("<MaskedIntReg Name=\"GevSCPHostPort_Reg\""));
+        assert_eq!(out.matches("<LSB>0</LSB>").count(), 2);
+        assert_eq!(out.matches("<MSB>15</MSB>").count(), 2);
+        assert_eq!(m.node_count(), 9, "5 built-in + 4 transport nodes");
+    }
+
+    #[test]
+    fn u3v_personality_does_not_get_gige_transport_nodes() {
+        let m = XmlMerger::new_with_endian(camera_xml().as_bytes(), None, false).unwrap();
+        let out = std::str::from_utf8(m.blob()).unwrap();
+        assert!(!out.contains("GevSCPSPacketSize"));
+        assert!(!out.contains("GevSCDA"));
+        assert_eq!(m.node_count(), 5);
+    }
+
+    #[test]
+    fn existing_gige_transport_nodes_are_not_duplicated() {
+        let camera = camera_xml().replace(
+            "</RegisterDescription>",
+            "<Integer Name=\"GevSCPSPacketSize\"><pValue>X</pValue></Integer></RegisterDescription>",
+        );
+        let m = XmlMerger::new_with_endian(camera.as_bytes(), None, true).unwrap();
+        let out = std::str::from_utf8(m.blob()).unwrap();
+        assert_eq!(out.matches("Name=\"GevSCPSPacketSize\"").count(), 1);
+        assert!(out.contains("Name=\"GevSCPHostPort\""));
+        assert_eq!(
+            m.node_count(),
+            8,
+            "5 built-in + the 3 missing transport nodes"
+        );
     }
 
     #[test]

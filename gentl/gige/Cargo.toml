@@ -18,6 +18,11 @@ cti-exports = []
 [dependencies]
 gentl-core = { path = "../core" }
 gentl-gvcp = { path = "../gvcp" }
+# PayloadSize pre-stream initialization reads the device XML from its
+# `local:` First URL; camera XML is commonly served as a zip manifest
+# (GigE Vision §14.1.1 / GenCP §5.5.1.2).
+zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -39,6 +44,3 @@ gentl-simulator = { path = "../simulator" }
 # Real-consumer test: loads the built `gentl_gige.dll` by path and resolves
 # every GenTL 1.6 export at runtime (tests/consumer_dll.rs).
 libloading = "0.8"
-# ZIPped camera XML (spec §14.1), example tools only
-zip = { version = "2", default-features = false, features = ["deflate-flate2", "flate2"] }
-flate2 = { version = "1", default-features = false, features = ["rust_backend"] }

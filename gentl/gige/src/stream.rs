@@ -609,7 +609,7 @@ impl GevDataStream {
                 Err(_) => break,
             }
         }
-        Ok(Arc::new(Self {
+        let stream = Arc::new(Self {
             parent: Arc::downgrade(device),
             core: Arc::new(DsCore::new()),
             control,
@@ -617,7 +617,15 @@ impl GevDataStream {
             tick_freq,
             events: Mutex::new(HashMap::new()),
             buffer_handles: Mutex::new(HashMap::new()),
-        }))
+        });
+        // GenTL 1.6 §6.4.4: consumers query STREAM_INFO_PAYLOAD_SIZE after
+        // opening the stream and before DSStartAcquisition. Resolve the
+        // mandatory PayloadSize feature now; the first GVSP leader would be
+        // too late (ld-style pre-start checks see 0 and refuse to start).
+        if let Some(size) = device.payload_size() {
+            stream.core.set_expected_payload_size(size);
+        }
+        Ok(stream)
     }
 
     /// Receiver thread running on any channel?
@@ -639,6 +647,12 @@ impl GevDataStream {
     /// fails the start, matching the historical single-channel behavior.
     pub fn start(self: &Arc<Self>) -> GentlResult<()> {
         let device = self.parent.upgrade().ok_or(GentlError::InvalidHandle)?;
+        // A ROI/PixelFormat change between stream open and start changes
+        // PayloadSize (GigE Vision 3.0 §37.5.3): re-read before the stream
+        // channel opens so a pre-start DSGetInfo query is current.
+        if let Some(size) = device.payload_size() {
+            self.core.set_expected_payload_size(size);
+        }
         // GVRSP-only devices were rejected at device open; the match stays
         // as the dispatch point for a future GVRSP (RoCEv2) backend.
         match device.transport {

@@ -118,6 +118,11 @@ pub struct GevDevice {
     /// Shared with the heartbeat thread; `GvcpClient` documents that
     /// sharing needs external synchronization.
     pub client: Arc<Mutex<GvcpClient>>,
+    /// Cached location of the GenICam `PayloadSize` feature register.
+    /// Outer `None` = not probed yet; inner `None` = the device XML has no
+    /// usable `PayloadSize` feature, so the size stays unknown until the
+    /// first GVSP leader.
+    pub payload_reg: Mutex<Option<Option<crate::payload::PayloadReg>>>,
     pub stop_heartbeat: Arc<AtomicBool>,
     pub heartbeat_thread: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Stream IDs with a live `DS_HANDLE`; guards `DevOpenDataStream`

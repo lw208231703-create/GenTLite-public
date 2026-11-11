@@ -42,6 +42,10 @@ pub struct StreamRegs {
     pub scps: u32,
     pub scpd: u32,
     pub scda: u32,
+    /// Device timestamp tick frequency (Hz) for the SCPD inter-packet delay
+    /// unit. 0 = the downstream device exposes no tick frequency; the delay
+    /// then has no defined unit (GigE Vision §36.59) and is not applied.
+    pub tick_freq: u64,
 }
 
 impl Default for StreamRegs {
@@ -53,8 +57,20 @@ impl Default for StreamRegs {
             scps: reg::scps_make(1500),
             scpd: 0,
             scda: 0,
+            tick_freq: 0,
         }
     }
+}
+
+/// Inter-packet delay requested by SCPD, in the timestamp tick unit
+/// (§36.59). 0 scpd or 0 tick frequency = no delay (the register has no
+/// effect when the timestamp counter is unsupported, §36.59).
+pub fn packet_delay(scpd: u32, tick_freq: u64) -> Duration {
+    if scpd == 0 || tick_freq == 0 {
+        return Duration::ZERO;
+    }
+    let nanos = u128::from(scpd) * 1_000_000_000u128 / u128::from(tick_freq);
+    Duration::from_nanos(nanos.min(u128::from(u64::MAX)) as u64)
 }
 
 /// Payload bytes per packet derived from a virtual SCPS0 value: packet_size
@@ -79,6 +95,10 @@ struct RelayInner {
     regs: Arc<Mutex<StreamRegs>>,
     /// Live driver threads; `None` while the virtual channel is closed.
     run: Mutex<Option<RelayRun>>,
+    /// A frame has been transmitted on the current channel open. SCPSx is
+    /// not writable once transmission is active (§36.58): plain writes and
+    /// test-packet requests both answer GEV_STATUS_BUSY.
+    transmitting: Arc<AtomicBool>,
     back: SharedBack,
     frames_relayed: Arc<AtomicU32>,
     factory: Mutex<SessionFactory>,
@@ -119,10 +139,38 @@ pub struct Relay {
 
 impl Relay {
     pub fn new(back: SharedBack, stream_enabled: bool, factory: SessionFactory) -> Self {
+        // SCPD's unit is the device timestamp tick (§36.59). Read it once
+        // from the downstream bootstrap; a device without it (or a U3V back,
+        // which has no GigE tick register) leaves 0 and the delay is not
+        // applied.
+        let tick_freq = match back.lock() {
+            Ok(mut guard) => match (
+                guard.read_reg(reg::TIMESTAMP_TICK_FREQ_HIGH),
+                guard.read_reg(reg::TIMESTAMP_TICK_FREQ_LOW),
+            ) {
+                (Ok(hi), Ok(lo)) => (u64::from(hi) << 32) | u64::from(lo),
+                _ => 0,
+            },
+            Err(_) => 0,
+        };
+        Self::with_tick_freq(back, stream_enabled, factory, tick_freq)
+    }
+
+    fn with_tick_freq(
+        back: SharedBack,
+        stream_enabled: bool,
+        factory: SessionFactory,
+        tick_freq: u64,
+    ) -> Self {
+        let regs = StreamRegs {
+            tick_freq,
+            ..StreamRegs::default()
+        };
         Self {
             inner: Arc::new(RelayInner {
-                regs: Arc::new(Mutex::new(StreamRegs::default())),
+                regs: Arc::new(Mutex::new(regs)),
                 run: Mutex::new(None),
+                transmitting: Arc::new(AtomicBool::new(false)),
                 back,
                 frames_relayed: Arc::new(AtomicU32::new(0)),
                 factory: Mutex::new(factory),
@@ -182,6 +230,7 @@ impl Relay {
             .take();
         let was_open = run.is_some();
         drop(run); // RelayRun::drop stops and joins the threads.
+        self.inner.transmitting.store(false, Ordering::Relaxed);
         if was_open {
             self.with_regs_mut(|r| r.scp = 0);
             let result = self.inner.back.lock().map(|mut b| b.close_stream());
@@ -253,15 +302,19 @@ impl Relay {
         Ok(())
     }
 
-    /// SCPSx write (spec §36.58). The value is stored locally and decides
-    /// the packet size of the blocks the virtual channel emits; the read
-    /// back value is exactly what was written (R-562st local version — the
-    /// virtual transmitter always honors the requested size). Unlike a real
-    /// device, plain writes are accepted while streaming and adopted per
-    /// frame (the virtual channel is the gateway's own transmitter; noted
-    /// in the design doc). The fire_test_packet bit is self-cleared on
-    /// store; firing an actual test packet is not implemented (v1).
+    /// SCPSx write (spec §36.58). While transmission is active on the
+    /// channel the register is not writable: the write is rejected with
+    /// GEV_STATUS_BUSY, for plain size writes and test-packet requests
+    /// alike (§11.7 also says a test packet requested during regular
+    /// streaming should answer BUSY). Before the first GVSP frame the
+    /// §11.7 negotiation window is open, so the write is accepted and the
+    /// value decides the blocks the virtual channel emits. The
+    /// fire_test_packet bit is self-cleared on store; the front fires the
+    /// test packet while the channel is open and not yet transmitting.
     fn write_scps(&self, value: u32) -> Result<(), u16> {
+        if self.inner.transmitting.load(Ordering::Relaxed) {
+            return Err(GEV_STATUS_BUSY);
+        }
         self.with_regs_mut(|r| r.scps = value & !reg::SCPS_FIRE_TEST_PACKET);
         Ok(())
     }
@@ -300,9 +353,11 @@ impl Relay {
         let (frame_tx, frame_rx) = sync_channel(RING_DEPTH);
         let frames_relayed = Arc::clone(&self.inner.frames_relayed);
         let tx_stop = stop.clone();
+        let transmitting = Arc::clone(&self.inner.transmitting);
+        transmitting.store(false, Ordering::Relaxed);
         let tx_handle = match std::thread::Builder::new()
             .name("vgige-relay-tx".into())
-            .spawn(move || driver_tx(tx_stop, session, frame_rx, frames_relayed))
+            .spawn(move || driver_tx(tx_stop, session, frame_rx, frames_relayed, transmitting))
         {
             Ok(handle) => handle,
             Err(_) => {
@@ -382,10 +437,15 @@ fn driver_tx(
     mut session: Box<dyn FrameSession>,
     frame_rx: Receiver<CanonicalFrame>,
     frames_relayed: Arc<AtomicU32>,
+    transmitting: Arc<AtomicBool>,
 ) {
     while !stop.load(Ordering::Relaxed) {
         match frame_rx.recv_timeout(POLL) {
             Ok(frame) => {
+                // §36.58: from the first transmitted frame on, SCPSx is not
+                // writable. Set before send so a concurrent SCPSx write is
+                // ordered after (BUSY) rather than slipping into the gap.
+                transmitting.store(true, Ordering::Relaxed);
                 session.send_frame(frame);
                 frames_relayed.fetch_add(1, Ordering::Relaxed);
             }
@@ -409,5 +469,15 @@ mod tests {
         // The default virtual SCPS0 is a plain 1500 (no flag bits).
         assert_eq!(StreamRegs::default().scps, reg::scps_make(1500));
         assert_eq!(virtual_payload_chunk(StreamRegs::default().scps), 1452);
+    }
+
+    #[test]
+    fn scpd_delay_uses_timestamp_ticks() {
+        // §36.59: delay = scpd ticks / tick frequency.
+        assert_eq!(packet_delay(0, 125_000_000), Duration::ZERO);
+        assert_eq!(packet_delay(125, 125_000_000), Duration::from_micros(1));
+        assert_eq!(packet_delay(5, 1_000_000_000), Duration::from_nanos(5));
+        // No tick frequency: the register has no effect.
+        assert_eq!(packet_delay(1000, 0), Duration::ZERO);
     }
 }

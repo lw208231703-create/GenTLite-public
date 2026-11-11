@@ -37,6 +37,7 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
 | Chunk / Buffer Parts / Composite / Stacked | GenTL 可选特性，当前 NOT_IMPLEMENTED |
 | 断线检测与自动恢复 | 控制面心跳存在，完整恢复流程未闭合 |
 | `TL_INFO_PATHNAME` | 已实现（旧审计报告中的缺口已过时） |
+| `STREAM_INFO_PAYLOAD_SIZE` 启动前取值 | 打开数据流时从设备 XML 的 `PayloadSize` 特性解析到 `IntReg`/`MaskedIntReg`，再经 GVCP 读取；`local:` First URL（含 zip）支持，解析失败才回退到首帧 leader |
 
 ### 通用 U3V producer
 
@@ -72,8 +73,17 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
 
 - 对客户端呈现的是 GigE Vision 设备；SCP/SCPS/SCPS 流通道、GVSP legacy 1.2
   输出、XML/寄存器透传已验证。
+- GigE 人格的 XML 会补齐标准传输节点 `GevSCPSPacketSize`、`GevSCPHostPort`、
+  `GevSCDA`、`GevSCPD`，映射到虚拟通道 0 的真实寄存器；真实 GigE 相机 XML
+  已有的节点不重复注入，U3V 人格不注入。
+- `SCPSx` 在通道开始发送 GVSP 帧后按 §36.58 拒绝写入并返回
+  `GEV_STATUS_BUSY`（普通包长写和 test-packet 请求都一样）；首个 GVSP 帧
+  之前的 §11.7 协商窗口仍允许写。`SCPD` 的包间延迟在设备提供时间戳 tick
+  频率时按 §36.59 生效，tick 频率为 0 时该寄存器无定义单位。
 - 不声明 PACKETRESEND 能力，因此不发送重传请求是合规的“支持子集”。
 - 单通道、无多 tap、无 GVRSP；这些是可选/未实现能力。
+- 仍存缺口（不在本轮三项修复内）：流式中非零写 `SCPx` 当前会重开通道，
+  R-586cd 要求返回 `GEV_STATUS_BUSY`；流式中写 `SCDAx` 未按 R-588cd 拒绝。
 - 不能宣称完整覆盖 GigE Vision 3.0 全部可选特性。
 
 ## 对外可以说 / 不能说

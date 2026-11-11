@@ -115,6 +115,7 @@ impl GevDevice {
             test_data_supported,
             packet_resend_supported,
             client,
+            payload_reg: Mutex::new(None),
             stop_heartbeat: stop,
             heartbeat_thread: Mutex::new(Some(thread)),
             opened_streams: Mutex::new(HashSet::new()),
@@ -146,6 +147,51 @@ impl GevDevice {
                 let _ = c.write_reg(registers::CCP, 0);
             }
         }
+    }
+
+    /// Current `PayloadSize` feature value, resolved through the device XML
+    /// and read over GVCP. `None` when the XML has no followable feature or
+    /// the register read fails; callers keep their previous value / the
+    /// first-leader fallback.
+    ///
+    /// The feature location (address/length/endianness) is cached after the
+    /// first successful XML parse, but the register itself is re-read on
+    /// every call: `PayloadSize` is a function of Width/Height/PixelFormat
+    /// (GigE Vision 3.0 §37.5.3), so a ROI change before streaming must be
+    /// visible to the next `STREAM_INFO_PAYLOAD_SIZE` query.
+    pub fn payload_size(&self) -> Option<usize> {
+        let reg = self.payload_reg()?;
+        let mut bytes = vec![0u8; reg.length];
+        self.read_mem(u64::from(reg.address), &mut bytes).ok()?;
+        crate::payload::decode_payload_value(&reg, &bytes)
+    }
+
+    fn payload_reg(&self) -> Option<crate::payload::PayloadReg> {
+        let cached = self.payload_reg.lock().ok()?.clone();
+        if let Some(reg) = cached {
+            return reg;
+        }
+        let url = {
+            let client = self.client.lock().ok()?;
+            client.xml_url().ok()?
+        };
+        // Unsupported URL schemes are permanent for this device: cache the
+        // absent feature instead of re-reading the First URL on every query.
+        if !url.starts_with("local:") && !url.starts_with("Local:") {
+            if let Ok(mut cache) = self.payload_reg.lock() {
+                *cache = Some(None);
+            }
+            return None;
+        }
+        // A read failure is not cached: the next query may succeed. An XML
+        // that parses but has no usable feature caches `None` (absent).
+        let xml = crate::payload::fetch_xml(&url, |addr, buf| self.read_mem(u64::from(addr), buf))?;
+        let text = String::from_utf8_lossy(&xml);
+        let found = crate::payload::parse_payload_reg(&text);
+        if let Ok(mut cache) = self.payload_reg.lock() {
+            *cache = Some(found.clone());
+        }
+        found
     }
 }
 

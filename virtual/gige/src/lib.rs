@@ -16,13 +16,17 @@
 
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use gentl_core::GentlResult;
 use gentl_gvcp::gvsp::*;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 use gentl_gvcp::DeviceHandler;
-use vgige_core::{virtual_payload_chunk, CanonicalFrame, FrameSession, RegisterSpace, SharedBack, StreamRegs};
+use vgige_core::{
+    packet_delay, virtual_payload_chunk, CanonicalFrame, FrameSession, RegisterSpace, SharedBack,
+    StreamRegs,
+};
 
 /// Identity overrides for the up-facing NIC: the virtual device claims
 /// this IP and MAC (the down camera's stay hidden from the client).
@@ -180,8 +184,7 @@ fn build_test_packet(total: u32) -> Option<Vec<u8>> {
 
 /// GVSP 3.0 encoding session: one UDP sender socket plus the virtual
 /// channel's register file (destination and slice size are re-read per
-/// frame, matching the v1 relay semantics where mid-stream SCPS0 writes
-/// take effect on the next frame).
+/// frame; SCPS0 cannot change once the first frame was sent, §36.58).
 pub struct GvspSession {
     socket: Option<UdpSocket>,
     regs: Arc<Mutex<StreamRegs>>,
@@ -207,11 +210,12 @@ impl GvspSession {
 
 impl FrameSession for GvspSession {
     fn open(&mut self, _payload_hint: usize) -> Result<(), String> {
-        // The GVSP front re-reads the virtual SCPS0 every send_frame (the
-        // v1 semantics adopt mid-stream writes per frame), so the open-time
-        // hint is informational here; fronts with a fixed slice (a U3V
-        // gadget MTU) consume it directly — that second use is why the
-        // parameter exists on the trait.
+        // The GVSP front re-reads the virtual SCPS0 every send_frame, but
+        // the relay rejects SCPS writes once transmission is active
+        // (§36.58), so the value is fixed for the lifetime of the send.
+        // The open-time hint is informational here; fronts with a fixed
+        // slice (a U3V gadget MTU) consume it directly — that second use is
+        // why the parameter exists on the trait.
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|e| e.to_string())?;
         self.socket = Some(socket);
         Ok(())
@@ -219,12 +223,10 @@ impl FrameSession for GvspSession {
 
     fn send_frame(&mut self, frame: CanonicalFrame) {
         let Some(socket) = &self.socket else { return };
-        let (target, chunk) = {
+        let (target, chunk, delay) = {
             let regs = self.regs.lock().expect("vgige relay regs poisoned");
-            let target = SocketAddr::from((
-                Ipv4Addr::from(regs.scda),
-                reg::scp_host_port(regs.scp),
-            ));
+            let target =
+                SocketAddr::from((Ipv4Addr::from(regs.scda), reg::scp_host_port(regs.scp)));
             let chunk = if self.legacy {
                 reg::scps_packet_size(regs.scps)
                     .checked_sub(GVSP_LEGACY_HEADERS_OVERHEAD)
@@ -233,7 +235,8 @@ impl FrameSession for GvspSession {
             } else {
                 virtual_payload_chunk(regs.scps)
             };
-            (target, chunk)
+            let delay = packet_delay(regs.scpd, regs.tick_freq);
+            (target, chunk, delay)
         };
         if target.port() == 0 {
             return; // channel closing; nothing to address.
@@ -245,6 +248,7 @@ impl FrameSession for GvspSession {
                 self.next_block_id,
                 &frame,
                 chunk,
+                delay,
                 &mut self.scratch,
             );
         } else {
@@ -254,6 +258,7 @@ impl FrameSession for GvspSession {
                 self.next_block_id,
                 &frame,
                 chunk,
+                delay,
                 &mut self.scratch,
             );
         }
@@ -274,6 +279,7 @@ fn send_block(
     block_id: u64,
     frame: &CanonicalFrame,
     chunk: usize,
+    delay: Duration,
     scratch: &mut Vec<u8>,
 ) {
     let leader = ImageLeader {
@@ -294,16 +300,16 @@ fn send_block(
     if socket.send_to(scratch, target).is_err() {
         return;
     }
-    let mut packet_id = 1u32;
-    for data in frame.payload.chunks(chunk) {
-        scratch.clear();
-        push_header(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
-        scratch.extend_from_slice(data);
-        if socket.send_to(scratch, target).is_err() {
-            return;
-        }
-        packet_id += 1;
-    }
+    let packet_id = send_payloads(
+        socket,
+        target,
+        block_id,
+        &frame.payload,
+        chunk,
+        delay,
+        false,
+        scratch,
+    );
     scratch.clear();
     push_header(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
     scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
@@ -319,6 +325,7 @@ fn send_block_legacy(
     block_id: u64,
     frame: &CanonicalFrame,
     chunk: usize,
+    delay: Duration,
     scratch: &mut Vec<u8>,
 ) {
     let leader = ImageLeader {
@@ -339,20 +346,56 @@ fn send_block_legacy(
     if socket.send_to(scratch, target).is_err() {
         return;
     }
-    let mut packet_id = 1u32;
-    for data in frame.payload.chunks(chunk) {
-        scratch.clear();
-        push_header_legacy(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
-        scratch.extend_from_slice(data);
-        if socket.send_to(scratch, target).is_err() {
-            return;
-        }
-        packet_id += 1;
-    }
+    let packet_id = send_payloads(
+        socket,
+        target,
+        block_id,
+        &frame.payload,
+        chunk,
+        delay,
+        true,
+        scratch,
+    );
     scratch.clear();
     push_header_legacy(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
     scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
     let _ = socket.send_to(scratch, target);
+}
+
+/// Send the payload packets of one block, honoring the SCPD inter-packet
+/// delay (§36.59: delay expressed in timestamp ticks, converted by
+/// [`packet_delay`]). Returns the next packet id (the trailer's).
+#[allow(clippy::too_many_arguments)]
+fn send_payloads(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    block_id: u64,
+    payload: &[u8],
+    chunk: usize,
+    delay: Duration,
+    legacy: bool,
+    scratch: &mut Vec<u8>,
+) -> u32 {
+    let mut packet_id = 1u32;
+    let mut chunks = payload.chunks(chunk).peekable();
+    while let Some(data) = chunks.next() {
+        scratch.clear();
+        if legacy {
+            push_header_legacy(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
+        } else {
+            push_header(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
+        }
+        scratch.extend_from_slice(data);
+        if socket.send_to(scratch, target).is_err() {
+            return packet_id;
+        }
+        packet_id += 1;
+        // §36.59: delay *between* packets, not after the last one.
+        if chunks.peek().is_some() && !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+    }
+    packet_id
 }
 
 /// Append a 1.2 legacy GVSP header (8 bytes).

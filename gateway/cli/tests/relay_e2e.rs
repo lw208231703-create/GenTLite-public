@@ -69,7 +69,7 @@ fn start(legacy_stream: bool) -> Stack {
     CameraBack::write_reg(&mut back, reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).expect("CCP(EA) downstream");
     let back: SharedBack = Arc::new(Mutex::new(back));
     let raw_xml = back.lock().unwrap().fetch_xml().expect("fetch camera XML");
-    let xml = Arc::new(XmlMerger::new(&raw_xml, None).expect("merge camera XML"));
+    let xml = Arc::new(XmlMerger::new_with_endian(&raw_xml, None, true).expect("merge camera XML"));
     let relay = Relay::new(
         Arc::clone(&back),
         true,
@@ -282,6 +282,23 @@ fn custom_window_and_injected_xml() {
     assert!(text.contains("VgigeVersionReg"));
     assert!(text.contains("<IntReg Name=\"WidthReg\""), "camera node preserved");
     assert!(text.contains("DeviceModelName"), "camera identity nodes preserved");
+    // The GigE personality carries the standard transport nodes even though
+    // the down camera is a (GigE) sim whose XML does not: the virtual
+    // channel is what serves these registers.
+    for (node, addr) in [
+        ("GevSCPSPacketSize", 0x0D04u32),
+        ("GevSCPHostPort", 0x0D00),
+        ("GevSCDA", 0x0D18),
+        ("GevSCPD", 0x0D08),
+    ] {
+        assert!(text.contains(&format!("Name=\"{node}\"")), "missing {node}");
+        let reg_name = format!("{node}_Reg");
+        let at = text.find(&format!("Name=\"{reg_name}\"")).unwrap();
+        assert!(
+            text[at..at + 240].contains(&format!("Address>0x{addr:08X}</Address>")),
+            "{reg_name} is not mapped to 0x{addr:08X}"
+        );
+    }
 
     // First URL readback matches the served URL.
     let mut slot512 = [0u8; 512];
@@ -373,6 +390,66 @@ fn stream_relay_reemits_as_30_from_a_12_camera() {
     assert!(
         rx.recv_from(&mut buf).is_err(),
         "datagrams arriving after the channel closed"
+    );
+}
+
+#[test]
+fn scps_write_while_streaming_is_busy() {
+    let s = start(false);
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    // Pre-open configuration is allowed (§11.7 window); the recv helper
+    // expects the same 300-byte payload packets as the other stream test.
+    s.remote
+        .write_reg(
+            reg::SCPS0,
+            reg::scps_make(300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32),
+        )
+        .unwrap();
+
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    rx.set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCP0, reg::scp_make(rx.local_addr().unwrap().port()))
+        .unwrap();
+
+    // One complete block proves transmission is active on the channel.
+    let _ = recv_block(&rx);
+    let before = s.remote.read_reg(reg::SCPS0).unwrap();
+
+    // §36.58: write access is not possible while streaming. Both a plain
+    // size write and a test-packet request answer GEV_STATUS_BUSY and leave
+    // the register unchanged (no mid-stream packet-size switch).
+    assert_eq!(
+        gev(s.remote
+            .write_reg(reg::SCPS0, reg::scps_make(2000))
+            .unwrap_err()),
+        GEV_STATUS_BUSY
+    );
+    assert_eq!(
+        gev(s.remote
+            .write_reg(
+                reg::SCPS0,
+                reg::scps_make(2000)
+                    | reg::SCPS_FIRE_TEST_PACKET
+                    | reg::SCPS_DO_NOT_FRAGMENT
+            )
+            .unwrap_err()),
+        GEV_STATUS_BUSY
+    );
+    assert_eq!(s.remote.read_reg(reg::SCPS0).unwrap(), before);
+
+    // Closing the channel ends transmission; the same write is accepted
+    // again for the next session.
+    s.remote.write_reg(reg::SCP0, 0).unwrap();
+    s.remote
+        .write_reg(reg::SCPS0, reg::scps_make(2000))
+        .unwrap();
+    assert_eq!(
+        reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
+        2000
     );
 }
 
