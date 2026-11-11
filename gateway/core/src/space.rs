@@ -120,6 +120,10 @@ pub struct RegisterSpace {
     /// hidden from the client).
     up_ip: u32,
     up_mac: [u8; 6],
+    /// Virtual device bootstrap identity: spec version (major<<16|minor) and
+    /// the up-facing subnet mask. Kept coherent with the discovery payload.
+    spec_version: u32,
+    subnet_mask: u32,
     /// Virtual First URL slot content (512 bytes, NUL padded).
     url_slot: Arc<[u8; 512]>,
     ccp: Arc<Mutex<CcpState>>,
@@ -139,6 +143,8 @@ impl Clone for RegisterSpace {
             xml: Arc::clone(&self.xml),
             up_ip: self.up_ip,
             up_mac: self.up_mac,
+            spec_version: self.spec_version,
+            subnet_mask: self.subnet_mask,
             url_slot: Arc::clone(&self.url_slot),
             ccp: Arc::clone(&self.ccp),
             slots: Arc::clone(&self.slots),
@@ -170,6 +176,8 @@ impl RegisterSpace {
             xml,
             up_ip: u32::from(up_ip),
             up_mac,
+            spec_version: 0x0002_0002,
+            subnet_mask: 0,
             url_slot: Arc::new(url_slot),
             ccp: Arc::new(Mutex::new(CcpState::default())),
             slots: Arc::new(Mutex::new([0; CUSTOM_SLOTS])),
@@ -183,6 +191,14 @@ impl RegisterSpace {
     /// 1 = OK, 2 = NG).
     pub fn set_ai_result(&self, v: u32) {
         self.ai_result.store(v, Ordering::Relaxed);
+    }
+
+    /// Keep the bootstrap registers (Version / subnet) coherent with the
+    /// discovery identity. Called before the register space is shared with
+    /// the front; the defaults are GigE 2.2 and mask 0.
+    pub fn set_bootstrap(&mut self, spec_version: u32, subnet_mask: Ipv4Addr) {
+        self.spec_version = spec_version;
+        self.subnet_mask = u32::from(subnet_mask);
     }
 
     /// Business-layer hook: set the AI_Score slot (anomaly score x1000).
@@ -290,6 +306,14 @@ impl RegisterSpace {
         }
         // Virtualized bootstrap registers.
         match addr {
+            reg::VERSION => return Ok(self.spec_version),
+            reg::DEVICE_MODE => return Ok(0x8000_0001),
+            reg::NET_IF_CAPABILITY => {
+                return Ok(reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA)
+            }
+            reg::NET_IF_CONFIGURATION => return Ok(reg::IP_CFG_PERSISTENT_IP),
+            reg::CURRENT_SUBNET_MASK => return Ok(self.subnet_mask),
+            reg::NUM_NETWORK_INTERFACES => return Ok(1),
             reg::CCP => return Ok(self.ccp_read()),
             reg::HEARTBEAT_TIMEOUT => {
                 return Ok(self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms)
@@ -350,6 +374,17 @@ impl RegisterSpace {
         if addr == reg::CCP {
             return self.ccp_write(value, None);
         }
+        if matches!(
+            addr,
+            reg::VERSION
+                | reg::DEVICE_MODE
+                | reg::NET_IF_CAPABILITY
+                | reg::NET_IF_CONFIGURATION
+                | reg::CURRENT_SUBNET_MASK
+                | reg::NUM_NETWORK_INTERFACES
+        ) {
+            return Err(GEV_STATUS_WRITE_PROTECT);
+        }
         if addr == reg::HEARTBEAT_TIMEOUT {
             self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms = value.max(500);
             return Ok(());
@@ -409,7 +444,13 @@ impl RegisterSpace {
         let virtual_reg = reg::stream_channel_addr(addr).is_some()
             || matches!(
                 addr,
-                reg::CCP
+                reg::VERSION
+                    | reg::DEVICE_MODE
+                    | reg::NET_IF_CAPABILITY
+                    | reg::NET_IF_CONFIGURATION
+                    | reg::CURRENT_SUBNET_MASK
+                    | reg::NUM_NETWORK_INTERFACES
+                    | reg::CCP
                     | reg::HEARTBEAT_TIMEOUT
                     | reg::NUM_STREAM_CHANNELS
                     | reg::DEVICE_MAC_HIGH
@@ -449,7 +490,13 @@ impl RegisterSpace {
         let virtual_reg = reg::stream_channel_addr(addr).is_some()
             || matches!(
                 addr,
-                reg::CCP
+                reg::VERSION
+                    | reg::DEVICE_MODE
+                    | reg::NET_IF_CAPABILITY
+                    | reg::NET_IF_CONFIGURATION
+                    | reg::CURRENT_SUBNET_MASK
+                    | reg::NUM_NETWORK_INTERFACES
+                    | reg::CCP
                     | reg::HEARTBEAT_TIMEOUT
                     | reg::NUM_STREAM_CHANNELS
                     | reg::DEVICE_MAC_HIGH

@@ -21,6 +21,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use gentl_gvcp::registers as reg;
 use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSource};
 
 /// Default synthetic stream geometry: 1280x1024 Mono16. Width, height,
@@ -69,8 +70,20 @@ pub const REG_GAIN: u32 = 0x0004_1018;
 pub const REG_FRAME_RATE: u32 = 0x0004_101C;
 pub const REG_ACQUISITION_START: u32 = 0x0004_0000;
 pub const REG_ACQUISITION_STOP: u32 = 0x0004_0004;
+/// Dynamic block payload in bytes (8-byte XML register; READREG returns the
+/// low 32 bits for hosts that probe it without READMEM).
+pub const REG_PAYLOAD: u32 = 0x0004_0008;
 /// SFNC 2.x AcquisitionMode: Continuous = 2.
 pub const REG_ACQUISITION_MODE: u32 = 0x0004_000C;
+pub const REG_TRIGGER_MODE: u32 = 0x0004_0010;
+pub const REG_DEVICE_UPTIME: u32 = 0x0004_1020;
+pub const REG_DEVICE_TEMPERATURE: u32 = 0x0004_1024;
+pub const REG_TL_PARAMS_LOCKED: u32 = 0x0004_1028;
+
+/// Device timestamp counter unit advertised through the GigE bootstrap
+/// registers. The null frame source timestamps frames in microseconds, so
+/// 1 MHz makes the GVSP leader timestamps valid tick counts.
+pub const TIMESTAMP_TICK_FREQ_HZ: u32 = 1_000_000;
 
 /// Minimal but GenApi-legal device description (v1 demo — placeholder
 /// GUIDs in the simulator's style; SmartCamera nodes come from the
@@ -78,7 +91,7 @@ pub const REG_ACQUISITION_MODE: u32 = 0x0004_000C;
 pub const NULL_XML: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <RegisterDescription xmlns=\"http://www.genicam.org/GenApi/Version_1_1\" \
 xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \
-ModelName=\"GenTLite Virtual\" VendorName=\"GenTLite\" \
+ModelName=\"GenTLiteVirtual\" VendorName=\"GenTLite\" \
 ToolTip=\"GenTLite null camera: camera-less gateway demo\" StandardNameSpace=\"None\" \
 SchemaMajorVersion=\"1\" SchemaMinorVersion=\"1\" SchemaSubMinorVersion=\"0\" \
 MajorVersion=\"1\" MinorVersion=\"0\" SubMinorVersion=\"1\" \
@@ -99,11 +112,12 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20     <pFeature>Width</pFeature><pFeature>Height</pFeature>\n\
 \x20     <pFeature>OffsetX</pFeature><pFeature>OffsetY</pFeature>\n\
 \x20     <pFeature>PixelFormat</pFeature><pFeature>PayloadSize</pFeature>\n\
-\x20     <pFeature>ExposureTimeAbs</pFeature><pFeature>Gain</pFeature>\n\
+\x20     <pFeature>ExposureTimeAbs</pFeature><pFeature>ExposureTime</pFeature><pFeature>Gain</pFeature>\n\
 \x20     <pFeature>FrameRate</pFeature><pFeature>AcquisitionFrameRate</pFeature>\n\
 \x20     <pFeature>AcquisitionStart</pFeature><pFeature>AcquisitionStop</pFeature>\n\
 \x20     <pFeature>AcquisitionMode</pFeature><pFeature>TriggerMode</pFeature>\n\
-\x20     <pFeature>SmartCamera</pFeature>\n\
+\x20     <pFeature>DeviceUptime</pFeature><pFeature>DeviceTemperature</pFeature>\n\
+\x20     <pFeature>TLParamsLocked</pFeature><pFeature>SmartCamera</pFeature>\n\
 \x20   </Category>\n\
 \x20 </Group>\n\
 \x20 <String Name=\"DeviceVendorName\" NameSpace=\"Standard\"><Value>GenTLite</Value></String>\n\
@@ -165,6 +179,10 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
 \x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>0</Min><Max>100000</Max><Unit>us</Unit>\n\
 \x20   </Float>\n\
+\x20   <Float Name=\"ExposureTime\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>0</Min><Max>100000</Max><Unit>us</Unit>\n\
+\x20   </Float>\n\
 \x20   <IntReg Name=\"ExposureTimeAbs_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041014</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
@@ -215,7 +233,6 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   <Enumeration Name=\"TriggerMode\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Trigger Mode</DisplayName><Visibility>Beginner</Visibility>\n\
 \x20     <EnumEntry Name=\"Off\" NameSpace=\"Standard\"><DisplayName>Off</DisplayName><Value>0</Value></EnumEntry>\n\
-\x20     <EnumEntry Name=\"On\" NameSpace=\"Standard\"><DisplayName>On</DisplayName><Value>1</Value></EnumEntry>\n\
 \x20     <pValue>TriggerModeReg</pValue>\n\
 \x20   </Enumeration>\n\
 \x20   <IntReg Name=\"TriggerModeReg\" NameSpace=\"Custom\">\n\
@@ -228,6 +245,34 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </Integer>\n\
 \x20   <IntReg Name=\"PayloadSize_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00040008</Address><Length>8</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort>\n\
+\x20     <pInvalidator>Width</pInvalidator>\n\
+\x20     <pInvalidator>Height</pInvalidator>\n\
+\x20     <pInvalidator>PixelFormat</pInvalidator>\n\
+\x20     <Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"DeviceUptime\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Device Uptime</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>DeviceUptime_Reg</pValue><Min>0</Min><Max>9223372036854775807</Max><Unit>ms</Unit>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"DeviceUptime_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041020</Address><Length>8</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Float Name=\"DeviceTemperature\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>Device Temperature</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>DeviceTemperature_Reg</pValue><Unit>C</Unit>\n\
+\x20   </Float>\n\
+\x20   <FloatReg Name=\"DeviceTemperature_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041024</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Endianess>LittleEndian</Endianess>\n\
+\x20   </FloatReg>\n\
+\x20   <Integer Name=\"TLParamsLocked\" NameSpace=\"Standard\">\n\
+\x20     <DisplayName>TL Params Locked</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>TLParamsLocked_Reg</pValue><Min>0</Min><Max>1</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"TLParamsLocked_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041028</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20 </Group>\n\
@@ -236,6 +281,8 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 /// The synthetic camera: a writable register view plus a pattern stream.
 pub struct NullBack {
     regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
+    /// Device clock for `DeviceUptime` and the bootstrap timestamp counter.
+    epoch: Instant,
 }
 
 impl NullBack {
@@ -251,7 +298,11 @@ impl NullBack {
                 (REG_GAIN, GAIN),
                 (REG_FRAME_RATE, FRAME_RATE),
                 (REG_ACQUISITION_MODE, 2), // SFNC Continuous
+                (REG_TRIGGER_MODE, 0),     // Off; the synthetic source is free-running
+                (REG_DEVICE_TEMPERATURE, 25.0f32.to_bits()),
+                (REG_TL_PARAMS_LOCKED, 0),
             ]))),
+            epoch: Instant::now(),
         }
     }
 }
@@ -268,6 +319,22 @@ impl CameraBack for NullBack {
     }
 
     fn read_reg(&mut self, addr: u32) -> Result<u32, u16> {
+        match addr {
+            // 8-byte XML registers: READREG has no 64-bit form, so serve the
+            // low 32 bits here and the full value through read_block.
+            REG_PAYLOAD => return Ok(self.payload_size()? as u32),
+            REG_DEVICE_UPTIME => return Ok(self.epoch.elapsed().as_millis() as u32),
+            reg::TIMESTAMP_TICK_FREQ_HIGH => return Ok(0),
+            reg::TIMESTAMP_TICK_FREQ_LOW => return Ok(TIMESTAMP_TICK_FREQ_HZ),
+            reg::TIMESTAMP_VALUE_HIGH => {
+                let ticks = self.epoch.elapsed().as_micros() as u64;
+                return Ok((ticks >> 32) as u32);
+            }
+            reg::TIMESTAMP_VALUE_LOW => {
+                return Ok(self.epoch.elapsed().as_micros() as u64 as u32);
+            }
+            _ => {}
+        }
         Ok(self.regs.lock().expect("null regs lock").get(&addr).copied().unwrap_or(0))
     }
 
@@ -283,6 +350,11 @@ impl CameraBack for NullBack {
             REG_ACQUISITION_MODE => {
                 // Only Continuous (SFNC value 2) is supported.
                 regs.insert(addr, 2);
+            }
+            REG_TRIGGER_MODE => {
+                // No trigger source/software-trigger command is implemented;
+                // keep the synthetic source free-running and report Off.
+                regs.insert(addr, 0);
             }
             REG_WIDTH | REG_HEIGHT => {
                 regs.insert(addr, value.clamp(1, 4096));
@@ -304,15 +376,22 @@ impl CameraBack for NullBack {
             REG_FRAME_RATE => {
                 regs.insert(addr, value.clamp(1, 240));
             }
+            REG_TL_PARAMS_LOCKED => {
+                regs.insert(addr, u32::from(value != 0));
+            }
             _ => {}
         }
         Ok(())
     }
 
     fn read_block(&mut self, addr: u32, len: u32) -> Result<Vec<u8>, u16> {
-        if addr == 0x0004_0008 && (len == 4 || len == 8) {
+        if addr == REG_PAYLOAD && (len == 4 || len == 8) {
             let payload = self.payload_size()?.to_le_bytes();
             return Ok(payload[..len as usize].to_vec());
+        }
+        if addr == REG_DEVICE_UPTIME && (len == 4 || len == 8) {
+            let uptime = (self.epoch.elapsed().as_millis() as u64).to_le_bytes();
+            return Ok(uptime[..len as usize].to_vec());
         }
         if len == 4 {
             return self.read_reg(addr).map(|v| v.to_le_bytes().to_vec());
@@ -524,6 +603,11 @@ mod tests {
         assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
         assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), HEIGHT);
         assert_eq!(back.read_reg(REG_PIXEL_FORMAT).unwrap(), PFNC_MONO16);
+        assert_eq!(back.read_reg(REG_PAYLOAD).unwrap(), PAYLOAD as u32);
+        assert_eq!(
+            back.read_reg(reg::TIMESTAMP_TICK_FREQ_LOW).unwrap(),
+            TIMESTAMP_TICK_FREQ_HZ
+        );
         assert_eq!(back.read_reg(0x0FF0).unwrap(), 0);
         back.write_reg(0x0FF0, 42).unwrap();
         assert_eq!(back.read_reg(0x0FF0).unwrap(), 0, "unknown writes are no-ops");
@@ -559,7 +643,7 @@ mod tests {
         let xml = back.fetch_xml().unwrap();
         let text = String::from_utf8(xml).unwrap();
         assert!(text.contains("</RegisterDescription>"));
-        assert!(text.contains("ModelName=\"GenTLite Virtual\""));
+        assert!(text.contains("ModelName=\"GenTLiteVirtual\""));
         for node in ["Width_Reg", "Height_Reg", "OffsetX_Reg", "OffsetY_Reg", "ExposureTimeAbs_Reg", "Gain_Reg", "FrameRate_Reg", "AcquisitionMode", "TriggerMode", "TriggerModeReg", "AcquisitionFrameRate"] {
             assert!(text.contains(node), "missing {node}");
         }

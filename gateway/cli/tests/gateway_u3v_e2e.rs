@@ -430,13 +430,14 @@ fn start() -> Stack {
         true,
         Box::new(|regs| Box::new(GvspSession::new(regs))),
     );
-    let space = RegisterSpace::new(
+    let mut space = RegisterSpace::new(
         Arc::clone(&back),
         Arc::clone(&xml),
         Ipv4Addr::LOCALHOST,
         UP_MAC,
         relay,
     );
+    space.set_bootstrap(0x0002_0002, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -480,9 +481,10 @@ fn register_passthrough_and_virtualized_identity() {
     let on_camera = s.down.lock().unwrap().read_reg(VENDOR_WIDTH as u32).unwrap();
     assert_eq!(on_camera, 128, "write landed on the fake camera");
 
-    // ABRM GenCP version passes through verbatim (LE-decoded by the U3V
-    // side, re-encoded BE for the GigE hop — same numeric value).
-    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0001_0003);
+    // The virtual GigE device reports the GigE spec version of its own
+    // identity (2.2), not the downstream U3V GenCP version: the latter is
+    // not a valid GigE VERSION register value.
+    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0002_0002);
 
     // Identity virtualization is local to the register space: the up NIC
     // replaces the camera.

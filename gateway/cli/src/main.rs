@@ -388,7 +388,7 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
         !args.no_stream,
         Box::new(|regs| Box::new(GvspSession::new(regs))),
     );
-    let space = vgige_core::RegisterSpace::new(
+    let mut space = vgige_core::RegisterSpace::new(
         Arc::clone(&back),
         Arc::clone(&xml),
         args.up,
@@ -412,6 +412,10 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
     // the two fronts serve different register byte orders.
     identity.model_name = format!("{} GigE", identity.model_name);
     identity.serial_number = format!("{}-GE", identity.serial_number);
+    space.set_bootstrap(
+        (u32::from(identity.spec_version_major) << 16) | u32::from(identity.spec_version_minor),
+        link.mask,
+    );
     let front = GigEFront::new(identity, space);
 
     // Standard GigE discovery uses limited/subnet broadcast, which a socket

@@ -86,10 +86,28 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
   不是 PFNC 值）；Null XML、GVSP leader、GenTL BufferInfo 三处一致。
   MVS 只识别标准值，旧值会让 16-bit 流显示为花屏；修正后 MVS 原生 GigE
   已按 `pf=0x01100007` 取流，原始数据与生成图逐字一致。
+- Bootstrap 寄存器与 discovery 身份已对齐：`VERSION=0x00020002`、
+  `DEVICE_MODE=0x80000001`、`NET_IF_CAPABILITY=0x5`、
+  `NET_IF_CONFIGURATION=0x1`、`CURRENT_SUBNET_MASK` 为对外网口掩码、
+  `NUM_NETWORK_INTERFACES=1`。时间戳 tick 频率为 1 MHz，Null 帧
+  leader 时间戳（µs）与 tick 单位一致；`DeviceUptime` /
+  `DeviceTemperature` / `TLParamsLocked` 已补齐。
+- `PayloadSize` 节点带 `Width`/`Height`/`PixelFormat` invalidator；
+  `PayloadSize_Reg` 的 READREG 返回低 32 位，READMEM 返回完整 8 字节。
+- `TriggerMode` 只声明 `Off`：Null 源是自由运行，不伪造未实现的 `On`
+  触发语义。
+- 2026-11-11 链路复核：MVS SDK 读取 Width/Height/PayloadSize/
+  DeviceUptime/TLParamsLocked/GevSCPSPacketSize/GevSCPD/ExposureTime/
+  ExposureTimeAbs/Gain/FrameRate/AcquisitionFrameRate/DeviceTemperature
+  均与寄存器一致；GVSP 抓包为 1.2 leader（36 B）、`pf=0x01100007`、
+  1280×1024、payload 2,621,440 B、packet_id 连续、SCPS=1500 时最大
+  数据报 UDP payload 1472 B、trailer height 1024、时间戳 33,333 tick
+  （1 MHz）对应 30 fps。
 - 不声明 PACKETRESEND 能力，因此不发送重传请求是合规的“支持子集”。
 - 单通道、无多 tap、无 GVRSP；这些是可选/未实现能力。
-- 仍存缺口（不在本轮三项修复内）：流式中非零写 `SCPx` 当前会重开通道，
-  R-586cd 要求返回 `GEV_STATUS_BUSY`；流式中写 `SCDAx` 未按 R-588cd 拒绝。
+- 仍存缺口（不在本轮修复内）：流式中非零写 `SCPx` 当前会重开通道，
+  R-586cd 要求返回 `GEV_STATUS_BUSY`；流式中写 `SCDAx` 未按 R-588cd 拒绝；
+  超出 XML 范围的 `SCPSx` 原始写没有按 R-562st 回写取整值。
 - 不能宣称完整覆盖 GigE Vision 3.0 全部可选特性。
 
 ## 对外可以说 / 不能说

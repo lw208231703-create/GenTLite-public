@@ -6,4 +6,5 @@ license.workspace = true
 edition.workspace = true
 
 [dependencies]
+gentl-gvcp = { path = "../../gentl/gvcp" }
 vgige-core = { path = "../../gateway/core" }

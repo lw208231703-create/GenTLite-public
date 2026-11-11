@@ -75,13 +75,14 @@ fn start(legacy_stream: bool) -> Stack {
         true,
         Box::new(|regs| Box::new(GvspSession::new(regs))),
     );
-    let space = RegisterSpace::new(
+    let mut space = RegisterSpace::new(
         Arc::clone(&back),
         Arc::clone(&xml),
         Ipv4Addr::LOCALHOST,
         UP_MAC,
         relay,
     );
+    space.set_bootstrap(0x0002_0002, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -125,8 +126,26 @@ fn register_passthrough_and_virtualized_identity() {
     assert_eq!(
         s.remote.read_reg(reg::VERSION).unwrap(),
         0x0002_0002,
-        "bootstrap Version passes through verbatim"
+        "virtual device advertises its identity version"
     );
+    assert_eq!(
+        s.remote.read_reg(reg::DEVICE_MODE).unwrap(),
+        0x8000_0001,
+        "transmitter class + deprecated bit (2.x identity)"
+    );
+    assert_eq!(
+        s.remote.read_reg(reg::NET_IF_CAPABILITY).unwrap(),
+        reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA
+    );
+    assert_eq!(
+        s.remote.read_reg(reg::NET_IF_CONFIGURATION).unwrap(),
+        reg::IP_CFG_PERSISTENT_IP
+    );
+    assert_eq!(
+        s.remote.read_reg(reg::CURRENT_SUBNET_MASK).unwrap(),
+        u32::from(Ipv4Addr::new(255, 0, 0, 0))
+    );
+    assert_eq!(s.remote.read_reg(reg::NUM_NETWORK_INTERFACES).unwrap(), 1);
 
     // Virtualized identity: the up-facing IP/MAC replace the camera's.
     assert_eq!(
