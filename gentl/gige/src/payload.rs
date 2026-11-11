@@ -89,7 +89,7 @@ pub fn parse_payload_reg(xml: &str) -> Option<PayloadReg> {
                 address,
                 length,
                 big_endian,
-                mask: parse_mask(inner),
+                mask: parse_mask(inner, length, big_endian),
             });
         }
         name = child_text(inner, "pValue")?.trim();
@@ -129,14 +129,39 @@ pub fn decode_payload_value(reg: &PayloadReg, bytes: &[u8]) -> Option<usize> {
     usize::try_from(value).ok().filter(|size| *size > 0)
 }
 
-fn parse_mask(inner: &str) -> Option<(u8, u8)> {
+fn parse_mask(inner: &str, length: usize, big_endian: bool) -> Option<(u8, u8)> {
+    let bits = length.checked_mul(8)?;
+    if bits > 64 {
+        return None;
+    }
+    let bits = bits as u8;
     if let Some(bit) = child_text(inner, "Bit") {
         let bit = bit.trim().parse::<u8>().ok()?;
-        return Some((bit, bit));
+        if bit >= bits {
+            return None;
+        }
+        // GenICam numbers big-endian register bits MSB-first (bit 0 is the
+        // MSB); normalize the mask to ordinary little-endian bit positions.
+        let normal = if big_endian { bits - 1 - bit } else { bit };
+        return Some((normal, normal));
     }
-    let lsb = child_text(inner, "LSB")?.trim().parse::<u8>().ok()?;
-    let msb = child_text(inner, "MSB")?.trim().parse::<u8>().ok()?;
-    (lsb <= msb).then_some((lsb, msb))
+    let raw_lsb = child_text(inner, "LSB")?.trim().parse::<u8>().ok()?;
+    let raw_msb = child_text(inner, "MSB")?.trim().parse::<u8>().ok()?;
+    if raw_lsb >= bits || raw_msb >= bits {
+        return None;
+    }
+    if big_endian {
+        // The reference implementation requires LSB >= MSB for BigEndian.
+        if raw_lsb < raw_msb {
+            return None;
+        }
+        Some((bits - 1 - raw_lsb, bits - 1 - raw_msb))
+    } else {
+        if raw_msb < raw_lsb {
+            return None;
+        }
+        Some((raw_lsb, raw_msb))
+    }
 }
 
 /// Find an element by tag and `Name` attribute, returning its inner text.
@@ -327,13 +352,34 @@ mod tests {
               <Length>4</Length>
               <LSB>4</LSB>
               <MSB>19</MSB>
-              <Endianess>BigEndian</Endianess>
+              <Endianess>LittleEndian</Endianess>
             </MaskedIntReg>
         "#;
         let reg = parse_payload_reg(xml).expect("PayloadSize resolved");
         assert_eq!(reg.mask, Some((4, 19)));
-        let raw = (12345u32 << 4).to_be_bytes();
+        let raw = (12345u32 << 4).to_le_bytes();
         assert_eq!(decode_payload_value(&reg, &raw), Some(12345));
+    }
+
+    #[test]
+    fn masked_big_endian_uses_msb_first_numbering() {
+        // Low 16 bits of a big-endian 32-bit register are printed bits
+        // 16..31: LSB=31, MSB=16 (the ordering the GenApi reference
+        // implementation requires). The high flags must be ignored.
+        let xml = r#"
+            <Integer Name="PayloadSize"><pValue>PayloadReg</pValue></Integer>
+            <MaskedIntReg Name="PayloadReg">
+              <Address>0x1234</Address>
+              <Length>4</Length>
+              <LSB>31</LSB>
+              <MSB>16</MSB>
+              <Endianess>BigEndian</Endianess>
+            </MaskedIntReg>
+        "#;
+        let reg = parse_payload_reg(xml).expect("PayloadSize resolved");
+        assert_eq!(reg.mask, Some((0, 15)));
+        let raw = 0x4000_3039u32.to_be_bytes();
+        assert_eq!(decode_payload_value(&reg, &raw), Some(0x3039));
     }
 
     #[test]

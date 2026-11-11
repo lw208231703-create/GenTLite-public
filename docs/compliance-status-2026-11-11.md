@@ -75,7 +75,9 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
   输出、XML/寄存器透传已验证。
 - GigE 人格的 XML 会补齐标准传输节点 `GevSCPSPacketSize`、`GevSCPHostPort`、
   `GevSCDA`、`GevSCPD`，映射到虚拟通道 0 的真实寄存器；真实 GigE 相机 XML
-  已有的节点不重复注入，U3V 人格不注入。
+  已有的节点不重复注入，U3V 人格不注入。`MaskedIntReg` 对 big-endian 采用
+  GenICam 的 MSB-first 编号：低 16 位写作 `LSB=31` / `MSB=16`，写反会被
+  GenApi 参考实现以“LSB must be greater or equal than MSB”拒绝加载。
 - `SCPSx` 在通道开始发送 GVSP 帧后按 §36.58 拒绝写入并返回
   `GEV_STATUS_BUSY`（普通包长写和 test-packet 请求都一样）；首个 GVSP 帧
   之前的 §11.7 协商窗口仍允许写。`SCPD` 的包间延迟在设备提供时间戳 tick

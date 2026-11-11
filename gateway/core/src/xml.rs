@@ -181,8 +181,11 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
             "65535",
         );
         // packet_size is the low 16 bits; the FIRE/DF flags above it are
-        // not part of the SFNC packet-size feature.
-        gige_masked_reg(&mut fragment, "GevSCPSPacketSize_Reg", reg::SCPS0, 0, 15);
+        // not part of the SFNC packet-size feature. GenICam numbers the bits
+        // of a big-endian register MSB-first (bit 0 is the MSB), so the low
+        // 16 bits are printed bits 16..31: LSB=31, MSB=16. The reference
+        // GenApi implementation rejects LSB < MSB for BigEndian registers.
+        gige_masked_reg(&mut fragment, "GevSCPSPacketSize_Reg", reg::SCPS0, 31, 16);
         nodes += 1;
     }
     if !has_node(&xml, "GevSCPHostPort") {
@@ -195,7 +198,7 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
             "0",
             "65535",
         );
-        gige_masked_reg(&mut fragment, "GevSCPHostPort_Reg", reg::SCP0, 0, 15);
+        gige_masked_reg(&mut fragment, "GevSCPHostPort_Reg", reg::SCP0, 31, 16);
         nodes += 1;
     }
     if !has_node(&xml, "GevSCDA") {
@@ -502,10 +505,11 @@ mod tests {
         }
         // The packet-size/host-port fields are masked to their 16-bit fields
         // (the surrounding SCP/SCPS flag bits are not part of the feature).
+        // Big-endian GenICam numbering is MSB-first: LSB=31, MSB=16.
         assert!(out.contains("<MaskedIntReg Name=\"GevSCPSPacketSize_Reg\""));
         assert!(out.contains("<MaskedIntReg Name=\"GevSCPHostPort_Reg\""));
-        assert_eq!(out.matches("<LSB>0</LSB>").count(), 2);
-        assert_eq!(out.matches("<MSB>15</MSB>").count(), 2);
+        assert_eq!(out.matches("<LSB>31</LSB>").count(), 2);
+        assert_eq!(out.matches("<MSB>16</MSB>").count(), 2);
         assert_eq!(m.node_count(), 9, "5 built-in + 4 transport nodes");
     }
 
