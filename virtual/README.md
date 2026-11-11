@@ -7,7 +7,7 @@ look like a camera to a host.
 
 | Path | Purpose |
 |---|---|
-| `gige/` | virtual GigE Vision device: GVCP device handler + legacy GVSP 1.2 transmitter |
+| `gige/` | virtual GigE Vision 3.0 device: GVCP device handler + GVSP 3.0 EI=1 transmitter |
 | `u3v/` | virtual USB3 Vision device: GenCP/SIRM state machine + Linux FunctionFS gadget |
 | `null/` | camera-less synthetic source: built-in XML, Mono8/Mono16 test pattern, frame pacing |
 

@@ -437,7 +437,7 @@ fn start() -> Stack {
         UP_MAC,
         relay,
     );
-    space.set_bootstrap(0x0001_0002, Ipv4Addr::new(255, 0, 0, 0));
+    space.set_bootstrap(0x0003_0000, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -481,10 +481,10 @@ fn register_passthrough_and_virtualized_identity() {
     let on_camera = s.down.lock().unwrap().read_reg(VENDOR_WIDTH as u32).unwrap();
     assert_eq!(on_camera, 128, "write landed on the fake camera");
 
-    // The virtual GigE device reports the GigE spec version of its own
-    // identity (1.2 legacy GVSP), not the downstream U3V GenCP version:
-    // the latter is not a valid GigE VERSION register value.
-    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0001_0002);
+    // The virtual GigE device reports its own 3.0 extended GVSP identity,
+    // not the downstream U3V GenCP version: the latter is not a valid GigE
+    // VERSION register value.
+    assert_eq!(s.remote.read_reg(0x0000).unwrap(), 0x0003_0000);
 
     // Identity virtualization is local to the register space: the up NIC
     // replaces the camera.
@@ -554,7 +554,7 @@ fn stream_relay_u3v_camera_to_gige_client() {
     s.remote
         .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
         .unwrap();
-    let total = 300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32;
+    let total = 300 + reg::GVSP_HEADERS_OVERHEAD as u32;
     s.remote.write_reg(reg::SCPS0, reg::scps_make(total)).unwrap();
 
     let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();

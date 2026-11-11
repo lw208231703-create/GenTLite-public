@@ -82,7 +82,7 @@ fn start(legacy_stream: bool) -> Stack {
         UP_MAC,
         relay,
     );
-    space.set_bootstrap(0x0001_0002, Ipv4Addr::new(255, 0, 0, 0));
+    space.set_bootstrap(0x0003_0000, Ipv4Addr::new(255, 0, 0, 0));
     let identity = assemble_identity(
         &back,
         &UpIdentity {
@@ -125,8 +125,8 @@ fn register_passthrough_and_virtualized_identity() {
     assert_eq!(s.remote.read_reg(REG_WIDTH).unwrap(), W);
     assert_eq!(
         s.remote.read_reg(reg::VERSION).unwrap(),
-        0x0001_0002,
-        "virtual device advertises the 1.2 legacy GVSP identity"
+        0x0003_0000,
+        "virtual device advertises the 3.0 extended GVSP identity"
     );
     assert_eq!(
         s.remote.read_reg(reg::DEVICE_MODE).unwrap(),
@@ -343,7 +343,7 @@ fn stream_relay_reemits_as_30_from_a_12_camera() {
     s.remote
         .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
         .unwrap();
-    let total = 300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32;
+    let total = 300 + reg::GVSP_HEADERS_OVERHEAD as u32;
     s.remote.write_reg(reg::SCPS0, reg::scps_make(total)).unwrap();
     assert_eq!(
         reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
@@ -423,7 +423,7 @@ fn scps_write_while_streaming_is_busy() {
     s.remote
         .write_reg(
             reg::SCPS0,
-            reg::scps_make(300 + GVSP_LEGACY_HEADERS_OVERHEAD as u32),
+            reg::scps_make(300 + reg::GVSP_HEADERS_OVERHEAD as u32),
         )
         .unwrap();
 
@@ -519,7 +519,7 @@ fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
             other => panic!("unexpected packet format {other}"),
         }
     };
-    // The virtual SCPS0 asks for 336 total (legacy 36-byte overhead)
+    // The virtual SCPS0 asks for 348 total (3.0 48-byte overhead)
     // -> 300-byte payload packets.
     assert!(
         max_payload_packet <= 300,

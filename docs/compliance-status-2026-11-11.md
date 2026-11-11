@@ -71,8 +71,8 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
 
 ### Linux 虚拟 GigE（`virtual/gige`）
 
-- 对客户端呈现的是 GigE Vision 设备；SCP/SCPS/SCPS 流通道、GVSP legacy 1.2
-  输出、XML/寄存器透传已验证。
+- 对客户端呈现的是 GigE Vision 3.0 设备；SCP/SCPS/SCPS 流通道、GVSP 3.0
+  EI=1 输出、XML/寄存器透传已验证。
 - GigE 人格的 XML 会补齐标准传输节点 `GevSCPSPacketSize`、`GevSCPHostPort`、
   `GevSCDA`、`GevSCPD`，映射到虚拟通道 0 的真实寄存器；真实 GigE 相机 XML
   已有的节点不重复注入，U3V 人格不注入。`MaskedIntReg` 对 big-endian 采用
@@ -82,17 +82,17 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
   `GEV_STATUS_BUSY`（普通包长写和 test-packet 请求都一样）；首个 GVSP 帧
   之前的 §11.7 协商窗口仍允许写。`SCPD` 的包间延迟在设备提供时间戳 tick
   频率时按 §36.59 生效，tick 频率为 0 时该寄存器无定义单位。
-- 虚拟 GigE 声称 GigE Vision 1.2（`VERSION=0x00010002`、
-  `DEVICE_MODE=0x80000001`：big-endian + UTF-8 + transmitter），因为前端
-  发送的是 1.2 legacy GVSP（8 B 头 / 36 B leader）。此前 `VERSION=0x00020002`
-  时 NI-IMAQdx 能打开设备但按 2.x 解析并丢弃 1.2 包，表现为 `GetImageData`
-  超时；改为 1.2 后 NI 与 MVS 都正常取流。discovery 版本、`VERSION` 寄存器
-  和 `DEVICE_MODE` 保持一致。
+- 虚拟 GigE 声称 GigE Vision 3.0（`VERSION=0x00030000`、
+  `DEVICE_MODE=0x80000001`：big-endian + UTF-8 + transmitter），前端发送
+  3.0 EI=1 GVSP（20 B 头 / 40 B leader）。`VERSION`、discovery 版本和实际
+  线格式一致；NI-IMAQdx 26.8 与 MVS 均已用 3.0 形式取流验证。
+  （此前 `VERSION=0x00020002` + 1.2 legacy 包的版本/线格式不一致会让
+  NI-IMAQdx 能打开设备但丢弃数据包，表现为 `GetImageData` 超时。）
 - 虚拟 Null 相机的 `Mono16` PFNC 值已修正为 `0x01100007`（旧 `0x01100001`
   不是 PFNC 值）；Null XML、GVSP leader、GenTL BufferInfo 三处一致。
   MVS 只识别标准值，旧值会让 16-bit 流显示为花屏；修正后 MVS 原生 GigE
   已按 `pf=0x01100007` 取流，原始数据与生成图逐字一致。
-- Bootstrap 寄存器与 discovery 身份已对齐：`VERSION=0x00020002`、
+- Bootstrap 寄存器与 discovery 身份已对齐：`VERSION=0x00030000`、
   `DEVICE_MODE=0x80000001`、`NET_IF_CAPABILITY=0x5`、
   `NET_IF_CONFIGURATION=0x1`、`CURRENT_SUBNET_MASK` 为对外网口掩码、
   `NUM_NETWORK_INTERFACES=1`。时间戳 tick 频率为 1 MHz，Null 帧

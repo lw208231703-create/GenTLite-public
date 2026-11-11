@@ -2,12 +2,11 @@
 //! remote client sees. [`GigEFront`] adapts [`RegisterSpace`] to
 //! `gentl_gvcp`'s [`DeviceHandler`] (discovery identity, register/memory
 //! dispatch) for [`GvcpServer`]; [`GvspSession`] is the [`FrameSession`]
-//! that re-emits relayed frames as legacy 1.2-form GVSP blocks by default
-//! (8-byte header, 36-byte leader body, 8-byte trailer), block_id from 1
+//! that re-emits relayed frames as GigE Vision 3.0 GVSP blocks (20-byte
+//! extended header, 40-byte leader body, 8-byte trailer), block_id from 1
 //! per channel open (R-259st), sliced to the virtual SCPS0 (§36.58
-//! total-size semantics). `VGIGE_GVSP_3_0=1` opts into the 20-byte
-//! extended form. NI-IMAQdx only accepts the legacy form from a 2.x
-//! device, hence the default.
+//! total-size semantics). The virtual device claims GigE Vision 3.0 to
+//! match that wire form.
 //!
 //! Roadmap: a USB3 Vision gadget front (Step 3) implements `FrameSession`
 //! against a gadget device and owns a different device model — it will not
@@ -43,13 +42,11 @@ pub struct UpIdentity {
 /// via the back's native bootstrap ([`CameraBack::fetch_identity`]), the
 /// up-facing IP/MAC/mask applied, and the network-shaped fields the
 /// virtual device owns synthesized:
-/// - `spec_version`: the virtual device emits the GigE Vision 1.2 legacy
-///   GVSP form (8-byte header, 36-byte leader body), so it claims 1.2 even
-///   when the downstream camera is newer. A 2.2 identity with a 1.2 stream
-///   makes strict hosts (NI-IMAQdx) discard the packets.
+/// - `spec_version`: the virtual device emits the GigE Vision 3.0 extended
+///   GVSP form (20-byte header, 40-byte leader body), so it claims 3.0.
 /// - `device_mode`: big-endian + UTF-8 + transmitter. In 1.2 printed bit 0
 ///   is the endianess bit (1 = big-endian) and printed bits 24-31 are the
-///   character-set index (1 = UTF-8); the same MSB stays the 2.x
+///   character-set index (1 = UTF-8); the same MSB stays the 2.x/3.0
 ///   deprecated always-1 bit.
 /// - `ip_config_options/current`: the up NIC is configured by the
 ///   gateway host, so the claim is persistent-IP + LLA / persistent-IP
@@ -64,10 +61,10 @@ pub fn assemble_identity(back: &SharedBack, up: &UpIdentity) -> GentlResult<Disc
         .fetch_identity()
         .map_err(gentl_core::GentlError::GevStatus)?;
     Ok(DiscoveryInfo {
-        // The GVSP front is 1.2-form; the downstream camera's native
-        // version (possibly 2.x/3.0) is not what the virtual wire speaks.
-        spec_version_major: 1,
-        spec_version_minor: 2,
+        // The GVSP front is 3.0-form; the downstream camera's native
+        // version is not what the virtual wire speaks.
+        spec_version_major: 3,
+        spec_version_minor: 0,
         device_mode: 0x8000_0001,
         mac: up.mac,
         ip_config_options: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
@@ -197,8 +194,9 @@ pub struct GvspSession {
     regs: Arc<Mutex<StreamRegs>>,
     /// Per-channel-open block sequence (R-259st: restarts at 1).
     next_block_id: u64,
-    /// Emit the 1.2 8-byte header form (the default). Set
-    /// `VGIGE_GVSP_3_0=1` to emit the extended 20-byte form instead.
+    /// Emit the 1.2 legacy 8-byte-header form instead of the 3.0 extended
+    /// form. The default is 3.0; the virtual device advertises 3.0, so the
+    /// two must not be mixed on one channel.
     legacy: bool,
     scratch: Vec<u8>,
 }
@@ -209,7 +207,7 @@ impl GvspSession {
             socket: None,
             regs,
             next_block_id: 1,
-            legacy: std::env::var_os("VGIGE_GVSP_3_0").is_none(),
+            legacy: false,
             scratch: Vec::with_capacity(65_535),
         }
     }
@@ -324,8 +322,9 @@ fn send_block(
 }
 
 /// Emit one block in the 1.2 legacy form: 8-byte common header, 36-byte
-/// leader body, payload, 8-byte trailer body. Receivers that predate the
-/// extended GVSP header (NI-IMAQdx among them) only accept this form.
+/// leader body, payload, 8-byte trailer body. This is a fallback path only:
+/// the virtual device advertises 3.0 and uses [`send_block`] by default, so
+/// a session must not mix the two forms.
 fn send_block_legacy(
     socket: &UdpSocket,
     target: SocketAddr,

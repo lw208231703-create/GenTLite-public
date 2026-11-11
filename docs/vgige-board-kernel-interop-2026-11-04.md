@@ -162,21 +162,21 @@ NI 数据目录：
 - `cam5.iid`
 - `XML\GenTLite__Virtual_NULL-0001_*.xml`
 
-### 3.3 NI 需要 GVSP 1.2 legacy 头
+### 3.3 NI 的 GVSP 3.0/1.2 选择（2026-11-11 更正）
 
-现象：
+历史记录：
 
-- 使用 GVSP 3.0 扩展头（20 字节、EI=1）时，NI 能建立流但没有帧。
-- 切换为 1.2 legacy（8 字节头、36 字节 leader body）后 NI 正常。
+- 旧虚拟设备声明 2.2 + 发送 1.2 legacy 时，NI 能建立流但没有帧。
+- 当时切换为 1.2 legacy（8 字节头、36 字节 leader body）后 NI 正常。
 
-处理：
+2026-11-11 复核后的正确结论：
 
-- `GvspSession` 默认 legacy 1.2。
-- 需要 3.0 时设置环境变量：
-
-```bash
-VGIGE_GVSP_3_0=1
-```
+- 关键不是“NI 只支持 1.2”，而是 **VERSION 声明必须与实际 GVSP 线格式一致**。
+- 虚拟 GigE 现在统一声明 GigE Vision 3.0，并发送 3.0 EI=1（20 B 头、
+  40 B leader）；NI-IMAQdx 26.8 实测 31 帧、`LostPacketCount=0`，MVS
+  同样正常。
+- `VGIGE_GVSP_3_0` 环境变量已移除；3.0 是默认。legacy 发送路径仅作为
+  fallback 保留，不能与 3.0 身份混用。
 
 ### 3.4 legacy 包长算错导致斜条纹
 

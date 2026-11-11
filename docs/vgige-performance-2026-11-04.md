@@ -4,11 +4,14 @@
 目标是确认第一轮优化后的 30 fps 余量、各传输路径的上限，以及是否值得继续做
 jumbo / 零拷贝。
 
+> 2026-11-11 更新：虚拟 GigE 现默认 GVSP 3.0 EI=1（`VERSION=3.0`），
+> 不再默认 legacy 1.2；本文性能数据仍是同 payload/帧率下的历史记录。
+
 ## 1. 环境与口径
 
 - 板端：Orange Pi 5 Plus，8 核，vendor `6.1.115-rk35xx`。
 - U3V：Type-C `super-speed`，`vgige.service`，Null 后端。
-- GigE：1 Gbps 链路，板端 MTU `1500`，`vgige-gige.service`，legacy GVSP 1.2。
+- GigE：1 Gbps 链路，板端 MTU `1500`，`vgige-gige.service`；GVSP 3.0 EI=1（本文采集时为 legacy 1.2）。
 - 图像：`1280×1024 Mono16`，payload `2,621,440` B。
 - 接收端：Windows，自写 GenTL producer。
   - `gentl_gige.dll` 直接走 GVSP/GVCP。
@@ -101,7 +104,8 @@ jumbo / 零拷贝。
 
 ## 6. 决策
 
-- 保持 legacy GVSP 1.2 和 1500 MTU 为默认，NI 兼容路径不变。
+- 当时保持 legacy GVSP 1.2 + 1500 MTU 作为默认；2026-11-11 起虚拟 GigE
+  默认 GVSP 3.0 EI=1，1500 MTU 不变，NI-IMAQdx 26.8 与 MVS 均已复验。
 - 暂不启用 jumbo：当前 1 Gbps 已满速，收益是 CPU 而非帧率，且需要
   交换机/双端 MTU 同时支持。
 - 已做安全的 frame ownership 转移和 `FramePayload` 回收池；未做
