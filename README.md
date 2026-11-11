@@ -79,10 +79,10 @@ and dependency direction.
   supported-subset implementation, not a claim of complete GigE Vision 3.0 /
   USB3 Vision 1.2 compliance. See
   `docs/compliance-status-2026-11-11.md`.
-- Third-party host status: NI MAX/NI-IMAQdx works; MVS and LD can display the
-  virtual camera's 8-bit stream but have incomplete 16-bit display support.
-  The producer's XML, GVSP leader and GenTL BufferInfo all declare
-  `Mono16 = 0x01100001`. See `docs/interop-matrix.md` and
+- Third-party host status: NI MAX/NI-IMAQdx works; MVS native GigE opens the
+  virtual camera and receives Mono16 tagged with the standard PFNC value
+  `0x01100007` (the old `0x01100001` was not PFNC and made MVS display the
+  16-bit stream as a garbled image). See `docs/interop-matrix.md` and
   `docs/vgige-board-kernel-interop-2026-11-04.md`.
 
 ## License

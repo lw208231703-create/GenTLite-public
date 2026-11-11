@@ -30,7 +30,7 @@ pub const HEIGHT: u32 = 1024;
 pub const BYTES_PER_PIXEL: usize = 2;
 pub const PAYLOAD: usize = WIDTH as usize * HEIGHT as usize * BYTES_PER_PIXEL;
 pub const PFNC_MONO8: u32 = 0x0108_0001;
-pub const PFNC_MONO16: u32 = 0x0110_0001;
+pub const PFNC_MONO16: u32 = 0x0110_0007;
 pub const EXPOSURE_US: u32 = 10_000;
 pub const GAIN: u32 = 0;
 pub const FRAME_RATE: u32 = 30;
@@ -81,9 +81,9 @@ xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \
 ModelName=\"GenTLite Virtual\" VendorName=\"GenTLite\" \
 ToolTip=\"GenTLite null camera: camera-less gateway demo\" StandardNameSpace=\"None\" \
 SchemaMajorVersion=\"1\" SchemaMinorVersion=\"1\" SchemaSubMinorVersion=\"0\" \
-MajorVersion=\"1\" MinorVersion=\"0\" SubMinorVersion=\"0\" \
+MajorVersion=\"1\" MinorVersion=\"0\" SubMinorVersion=\"1\" \
 ProductGuid=\"5a1f3c8e-2b7d-4e9a-9c4d-1e2f3a4b5c6d\" \
-VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
+VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20 <Port Name=\"Device\" NameSpace=\"Standard\">\n\
 \x20   <ToolTip>The GenCP device port (implemented by the GenTL producer).</ToolTip>\n\
 \x20 </Port>\n\
@@ -151,7 +151,7 @@ VersionGuid=\"6b2e4d9f-3c8a-5f1b-8d5e-2f3a4b5c6d7e\">\n\
 \x20       <DisplayName>Mono8</DisplayName><Value>0x01080001</Value>\n\
 \x20     </EnumEntry>\n\
 \x20     <EnumEntry Name=\"Mono16\" NameSpace=\"Standard\">\n\
-\x20       <DisplayName>Mono16</DisplayName><Value>0x01100001</Value>\n\
+\x20       <DisplayName>Mono16</DisplayName><Value>0x01100007</Value>\n\
 \x20     </EnumEntry>\n\
 \x20     <pValue>PixelFormatReg</pValue>\n\
 \x20   </Enumeration>\n\

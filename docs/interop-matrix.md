@@ -25,8 +25,11 @@
     `docs/vgige-performance-2026-11-04.md`。
 - MVS / LD：
   - 8-bit 虚拟图像可显示。
-  - 16-bit 能收流但不显示；不是 pixel-format 缺失（XML、GVSP、GenTL
-    BufferInfo 均为 `Mono16 = 0x01100001`），是宿主底层 16-bit 显示/转换限制。
+  - 16-bit 曾显示花屏/不显示；根因是旧 Null 后端把 `Mono16` 写成
+    `0x01100001`（非 PFNC），MVS 只识别标准 `Mono16 = 0x01100007`，
+    收到未知格式后按错误布局显示。2026-11-11 已把 Null XML/GVSP/GenTL
+    三处统一为 `0x01100007`，MVS SDK 验证 `pf=0x01100007`、
+    2,621,440 B、`lost=0`，原始 16-bit 数据与生成图逐字一致。
   - LD 同一设备重复三次是旧 CTI/缓存重复枚举；当前 CTI 只枚举 1 个设备。
 - NI test packet：设备侧 `SCPS fire_test_packet` 已实现；NI 5/5 帧通过。
 - 驱动互斥：U3V 同一时间只能绑定 NI-IMAQdx 或 WinUSB；当前 PC 侧为

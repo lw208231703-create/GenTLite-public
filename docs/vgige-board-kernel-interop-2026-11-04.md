@@ -21,7 +21,7 @@
   systemd、udev 和 helper scripts；仅 `START=1` 时重启服务。
 - Windows 验证：NI GigE/U3V 各 5/5；GenTL GigE Mono16 5/5 与生成图
   0 差异；GenTL GigE Mono8 5/5 与生成图 0 差异；GenTL U3V 5/5，
-  Mono16 `pf=0x01100001`。
+  Mono16 `pf=0x01100007`（2026-11-11 修正，旧记录误写为 0x01100001）。
 - 性能基准（Null 后端，端到端）：30 fps 板端 CPU 约单核 10–16%；
   GigE 1 Gbps 上限约 44.7 fps / 117 MB/s；U3V 上限约
   95 fps / 249 MB/s。无 incomplete、FrameID 缺口或 stream underrun。
@@ -222,7 +222,7 @@ AcquisitionAttributes::PacketSize = "1500"
 配置：
 
 - `1280×1024 Mono16`
-- PFNC `Mono16 = 0x01100001`
+- PFNC `Mono16 = 0x01100007`（2026-11-11 修正；旧值 0x01100001 非 PFNC）
 - 每帧 `2,621,440` 字节
 - 默认 30 fps
 - GigE 约 `79 MB/s`，1Gb 链路可跑
@@ -244,13 +244,20 @@ AcquisitionAttributes::PacketSize = "1500"
 
 ## 5. MVS / LD 的 16-bit 限制
 
+> **2026-11-11 更正**：旧记录把 `Mono16` 写成 `0x01100001`，这不是 PFNC
+> 值；标准 `Mono16 = 0x01100007`。MVS 只识别标准值，收到 `0x01100001`
+> 后按未知像素格式显示，表现为“花屏/不显示”。已把 Null XML、GVSP leader、
+> GenTL BufferInfo 三处统一为 `0x01100007`，并用 MVS SDK 验证：
+> `PixelFormat=0x01100007`、`enPixelType=0x01100007`、2,621,440 B、
+> `lost=0`，原始 16-bit 数据与生成图逐字一致。以下为修正前的历史观察。
+
 - MVS 和 LD 对虚拟相机的 8-bit 图像可显示，16-bit 图像能收流但不显示。
 - 核对了数据侧：
-  - GigE XML `PixelFormat = Mono16`，值 `0x01100001`；
-  - GVSP leader `pixel_format = 0x01100001`；
-  - GenTL BufferInfo `pf = 0x01100001`；
+  - GigE XML `PixelFormat = Mono16`，值 `0x01100007`；
+  - GVSP leader `pixel_format = 0x01100007`；
+  - GenTL BufferInfo `pf = 0x01100007`；
   - PayloadSize `2,621,440`。
-- 因此不是虚拟相机没声明像素格式，而是这两个软件底层的 16-bit 显示/转换路径支持不完整。
+- 因此不是虚拟相机没声明像素格式；旧值 `0x01100001` 才是宿主无法识别的根因。
 - MVS 日志曾出现 `Get XML Translate DomDocument Failed`；尝试过 `StandardNameSpace=GEV`、GenApi 1.0，未解决显示问题，已回退这些兼容性修改。
 - LD 出现同一设备重复三个，是加载了旧 CTI/缓存重复枚举；当前 CTI 验证只枚举一个设备。
 
