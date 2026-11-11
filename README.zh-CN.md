@@ -66,6 +66,9 @@ GenTL producer 的源码由 Linux 和 Windows 共用，区别只在最终打包�
     `docs/vgige-performance-2026-11-04.md`。
 - GenTL CTI 打包：`cargo cti` 在 Windows（`.dll`）和 Linux（`.so`）都能
   生成 `.cti`；两平台的 `TL_INFO_PATHNAME` 都能返回实际加载路径。
+- 规范状态：GigE/U3V/GenTL 核心路径已审计，但当前是“核心路径合规 +
+  明确支持子集”，不能宣称完全符合 GigE Vision 3.0 / USB3 Vision 1.2
+  全部条款。详见 `docs/compliance-status-2026-11-11.md`。
 - 第三方宿主：NI MAX/NI-IMAQdx 正常；MVS、LD 可显示 8-bit 虚拟图像，
   但 16-bit 显示支持不完整。producer 的 XML、GVSP leader 和 GenTL
   BufferInfo 均明确声明 `Mono16 = 0x01100001`。详见

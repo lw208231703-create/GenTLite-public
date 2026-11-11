@@ -75,6 +75,10 @@ and dependency direction.
 - GenTL CTI packaging: `cargo cti` produces `.cti` twins on both Windows
   (`.dll`) and Linux (`.so`), and `TL_INFO_PATHNAME` reports the loaded CTI
   path on both platforms.
+- Standards status: the core GigE/U3V/GenTL paths are audited, but this is a
+  supported-subset implementation, not a claim of complete GigE Vision 3.0 /
+  USB3 Vision 1.2 compliance. See
+  `docs/compliance-status-2026-11-11.md`.
 - Third-party host status: NI MAX/NI-IMAQdx works; MVS and LD can display the
   virtual camera's 8-bit stream but have incomplete 16-bit display support.
   The producer's XML, GVSP leader and GenTL BufferInfo all declare
