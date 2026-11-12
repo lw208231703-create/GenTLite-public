@@ -1,6 +1,6 @@
 //! Wire codec for the USB3 Vision control/event/stream formats and the
 //! GenCP command layer inside them. Pure functions only — every fact here
-//! is traced to the spec in notes/u3v-wirefacts.md (U3V 1.2 / GenCP 1.3.1
+//! is traced to the spec in docs/u3v-wirefacts.md (U3V 1.2 / GenCP 1.3.1
 //! chapter numbers).
 //!
 //! Byte order: all bootstrap registers and protocol fields are
@@ -14,7 +14,7 @@
 pub const PREFIX_CONTROL: u32 = 0x4356_3355;
 /// U3V event-channel prefix: ASCII "U3VE" with `U` in the LSB (§4.1.3.1).
 // Event-channel codec: implemented and unit-tested, but no GenTL event
-// delivery consumes it yet (notes/OPEN-QUESTIONS.md UQ7).
+// delivery consumes it yet (docs/OPEN-QUESTIONS.md UQ7).
 #[allow(dead_code)]
 pub const PREFIX_EVENT: u32 = 0x4556_3355;
 /// U3V uses no postfix (R-31cd, §4.1.3.1).

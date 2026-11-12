@@ -1,5 +1,5 @@
 //! GVSP fake-image transmitter of the simulated camera (spec Part 3 §22–26;
-//! notes/gvcp-wirefacts.md "GVSP" section). M3-4a: one
+//! docs/gvcp-wirefacts.md "GVSP" section). M3-4a: one
 //! [`StreamScheduler`] per camera — a single thread that stripe-schedules
 //! whole frames across every open stream channel:
 //!
@@ -16,7 +16,7 @@
 //!
 //! Simplifications vs a real camera (documented):
 //! - Blocks are emitted continuously while any channel is open; there is
-//!   no AcquisitionStart gating (notes/OPEN-QUESTIONS.md Q15).
+//!   no AcquisitionStart gating (docs/OPEN-QUESTIONS.md Q15).
 //! - The inter-packet delay (SCPDx, spec §36.59) is a plain thread sleep
 //!   in timestamp-counter units (the sim clock ticks at 1 MHz, so µs).
 //! - Packet resend (PACKETRESEND_CMD) is not implemented (M3 scope).
@@ -107,7 +107,7 @@ impl StreamParams {
     ///
     /// An unwritten (0) or absurdly small (< headers) packet_size falls
     /// back to [`DEFAULT_PAYLOAD`] (a real device rounds to the nearest
-    /// supported size instead, R-562st — see notes/OPEN-QUESTIONS.md Q21).
+    /// supported size instead, R-562st — see docs/OPEN-QUESTIONS.md Q21).
     pub fn new(stream: &StreamConfig, scps0: u32, scpd0: u32) -> Self {
         let mut params = StreamParams {
             width: stream.width,
@@ -792,7 +792,7 @@ mod tests {
         None
     }
 
-    /// §11.7/§24.5 (notes/OPEN-QUESTIONS.md Q33): a fire-carrying SCPS0
+    /// §11.7/§24.5 (docs/OPEN-QUESTIONS.md Q33): a fire-carrying SCPS0
     /// write is accepted even while the channel streams (a plain write
     /// stays BUSY) and fires exactly one test datagram — UDP length
     /// size-28 (IP 20 + UDP 8), GVSP block_id field 0. The register

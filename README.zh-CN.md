@@ -40,7 +40,8 @@ gentl/       通用 GenTL producer：core、GVCP、GigE、U3V、simulator、
 gateway/     Linux 中转网关：relay core、相机 backends、CLI
 virtual/     虚拟相机前端：GigE、U3V 和 Null 源
 board/       Orange Pi 板端部署资产
-docs/        规范、互操作和性能记录
+docs/        工程记录（设计、互操作、性能、决策）
+notes/       规范原文（仅本地；AIA/A3/EMVA 版权）
 scripts/     共享构建/部署脚本
 ```
 

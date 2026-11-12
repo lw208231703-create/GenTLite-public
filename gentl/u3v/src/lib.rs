@@ -11,7 +11,7 @@
 //! The built artifact is the cdylib (`gentl_u3v.dll` on Windows,
 //! `libgentl_u3v.so` on Linux); the `.cti` rename happens at packaging
 //! time (M5 release flow). The USB backend is split per OS (Phase B,
-//! notes/PENDING.md "Linux 可移植"): SetupAPI + WinUSB on Windows,
+//! docs/PENDING.md "Linux 可移植"): SetupAPI + WinUSB on Windows,
 //! rusb/libusb on Unix — behind the shared `usbio::UsbPipe` endpoint
 //! surface, with control/cti/stream/descriptors platform-independent.
 
@@ -29,7 +29,7 @@ use gentl_core::{
     last_error, set_error, set_last_error, to_handle, GentlError, GentlResult,
 };
 
-// Module wiring after the Phase B USB-backend split (notes/PENDING.md
+// Module wiring after the Phase B USB-backend split (docs/PENDING.md
 // "Linux 可移植"): control/cti/stream/packets/descriptors/types are
 // platform-independent — the endpoint surface behind them is the
 // `usbio::UsbPipe` trait. discovery and the usbio backend internals are
@@ -1912,7 +1912,7 @@ pub extern "C" fn GCRegisterEvent(
         if i_event_id != EVENT_NEW_BUFFER {
             // §6.3.7.6: NOT_IMPLEMENTED also covers event types not valid
             // for the module. Device-event delivery (EVENT_FEATURE_INVALIDATE
-            // over the DEI) is a follow-up (notes/OPEN-QUESTIONS.md UQ7).
+            // over the DEI) is a follow-up (docs/OPEN-QUESTIONS.md UQ7).
             return not_implemented("event type");
         }
         let module = match ds.register_event(i_event_id) {

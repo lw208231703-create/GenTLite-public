@@ -1,7 +1,7 @@
 //! vgige-back-u3v: the [`CameraBack`]/[`FrameSource`] adapter for USB3
 //! Vision cameras, built on the `gentl-u3v` client facade. This unlocks
 //! the gateway matrix cell "GigE front ← U3V camera" (roadmap Step 2,
-//! notes/linux-vgige-design.md §8): remote GigE Vision clients see and
+//! docs/linux-vgige-design.md §8): remote GigE Vision clients see and
 //! control a U3V camera through the virtual device — register access
 //! proxies 1:1 onto GenCP addresses (the served XML is the camera's own,
 //! whose IntReg addresses are GenCP addresses), and the U3V image stream
@@ -24,7 +24,7 @@
 //! INVALID_HEADER, 0x800F WRONG_CONFIG), the generic 0x8FFF, and the U3V
 //! technology namespace (0xA0xx/0xA1xx, R-38cd) have no GigE meaning:
 //! they are passed through numerically as well (a GigE client treats any
-//! 0x8xxx/0xAxxx status as an error) and logged once — QoI, notes/
+//! 0x8xxx/0xAxxx status as an error) and logged once — QoI, docs/
 //! OPEN-QUESTIONS.md Q38. Local failures (USB I/O, malformed wire data,
 //! window timeout) map to the generic Appendix B.21 status 0x8FFF, the
 //! same policy as the GigE back (its camera-unreachable case).

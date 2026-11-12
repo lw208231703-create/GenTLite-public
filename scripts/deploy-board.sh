@@ -32,7 +32,7 @@ REMOTE_N=$(ssh "$HOST" "cd $WS && find crates vgige -type f ! -path '*/target/*'
 if [ "$LOCAL_N" != "$REMOTE_N" ]; then
     echo "FILE COUNT MISMATCH: local=$LOCAL_N remote=$REMOTE_N — NOT building." >&2
     echo "(A partial tar extraction once produced a ghost build failure;" >&2
-    echo " this check exists because of that, see notes/u3v-gadget-bringup-pitfalls.md)" >&2
+    echo " this check exists because of that, see docs/u3v-gadget-bringup-pitfalls.md)" >&2
     exit 1
 fi
 echo "    file counts match: $LOCAL_N"

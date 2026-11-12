@@ -14,7 +14,7 @@
 //!   (channel 0; other channels answer GEV_STATUS_INVALID_ADDRESS like a
 //!   device without them, §36.57).
 //!
-//! CCP is the simulator's simplified model (notes/OPEN-QUESTIONS.md Q7):
+//! CCP is the simulator's simplified model (docs/OPEN-QUESTIONS.md Q7):
 //! no peer identity at this layer, so a repeated identical request while
 //! occupied is accepted (R-069cd applied to any writer), 0 releases, EA
 //! grants take priority over CA.

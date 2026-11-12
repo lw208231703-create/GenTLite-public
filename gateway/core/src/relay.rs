@@ -7,7 +7,7 @@
 //! session. Closing (SCP0 = 0) stops the threads and cascades the
 //! downstream close (R-091ca). All wire-specific knowledge lives behind
 //! the three traits; this module only owns the channel register file and
-//! the thread structure (notes/linux-vgige-design.md §4).
+//! the thread structure (docs/linux-vgige-design.md §4).
 //!
 //! v1 (design note §5): channel 0 only; no PACKETRESEND scheduling towards
 //! the remote client (the virtual device does not advertise the capability
@@ -273,7 +273,7 @@ impl Relay {
             // A non-zero write with the host_port field at 0 carries no
             // port (the pre-Q31 "<<16" layout mistake). Reject loudly so a
             // wrong layout fails at the device instead of silently closing
-            // the channel (notes/OPEN-QUESTIONS.md Q14/Q31).
+            // the channel (docs/OPEN-QUESTIONS.md Q14/Q31).
             return Err(GEV_STATUS_INVALID_PARAMETER);
         }
         let open = self

@@ -229,7 +229,7 @@ fn align_up(v: u64, alignment: u64) -> u64 {
 /// Figure 5-2): total = required aligned up; TS = min(512 KiB, total);
 /// count = total / TS; final1 = remainder; final2 = 0. All values are
 /// multiples of the SIRM alignment. (The spec example additionally
-/// assumes a 1 KB/64 KB WinUSB granularity; see notes/OPEN-QUESTIONS.md
+/// assumes a 1 KB/64 KB WinUSB granularity; see docs/OPEN-QUESTIONS.md
 /// UQ9 — only the alignment rule is normative.)
 fn plan_geometry(
     required_payload: u64,

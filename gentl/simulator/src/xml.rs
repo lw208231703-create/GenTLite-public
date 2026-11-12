@@ -1,7 +1,7 @@
 //! Minimal GenICam device description (GenApi Schema 1.1) for the sim.
 //!
 //! Conventions follow the SFNC 2.7 reference XML and the GenApi Schema 1.1
-//! XSD (docs/GenICam_Package_2025.10): node element order matches the XSD
+//! XSD (notes/GenICam_Package_2025.10): node element order matches the XSD
 //! sequences, register-backed features go through `*Reg` helper nodes in the
 //! Custom namespace referenced by `<pValue>`/`<pPort>`, and the sim's user
 //! register area addresses come from `crate::regmap`.

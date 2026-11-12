@@ -1,11 +1,11 @@
-//! USB I/O backend abstraction (Phase B Linux port, notes/PENDING.md
+//! USB I/O backend abstraction (Phase B Linux port, docs/PENDING.md
 //! "Linux 可移植"): [`UsbPipe`] is the minimal endpoint surface that
 //! control.rs (GenCP transactions) and stream.rs (the SIRM receiver)
 //! actually need — bulk read/write with timeouts, error-recovery flush,
 //! pipe policy, and the endpoint MPS. Per-OS implementations live in
 //! winusb.rs (the pre-port WinUSB code, behavior unchanged) and
 //! libusb.rs (rusb). The OS-independent piece-accumulation read layer
-//! (notes/OPEN-QUESTIONS.md UQ16 — exact-size accumulation for planned
+//! (docs/OPEN-QUESTIONS.md UQ16 — exact-size accumulation for planned
 //! payload pieces, size-capped accumulation for leader/trailer, ZLP
 //! skip, short-transaction termination) lives here verbatim from
 //! stream.rs, now unit-testable against a scripted mock on both

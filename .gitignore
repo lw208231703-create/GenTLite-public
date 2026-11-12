@@ -7,8 +7,7 @@ Cargo.lock
 *.cti
 
 # Third-party reference documents (AIA/A3, EMVA copyrights) — local only
-/docs/*.pdf
-/docs/GenICam_Package_2025.10/
+/notes/
 
 # Camera bring-up captures (test artifacts)
 /camera_dump.xml
@@ -28,7 +27,5 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
-# Engineering records (internal decision log, spec fact tables) — local only
-/notes/
 # Internal compliance/audit reports — local only
 /compliance/

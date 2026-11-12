@@ -195,7 +195,7 @@ fn cancel_pending(winusb: WINUSB_INTERFACE_HANDLE, pipe: u8, event: HANDLE) {
 /// directly to the USB core stack, eliminating the inter-request gaps that
 /// some host controllers (laptops in particular) exhibit and that throttle
 /// high-bandwidth streams (field-proven on a bulk UVC device; see
-/// notes/OPEN-QUESTIONS.md UQ16 and notes/PENDING.md R1 — including the
+/// docs/OPEN-QUESTIONS.md UQ16 and docs/PENDING.md R1 — including the
 /// request-length alignment contract exercised here).
 ///
 /// Contract the receiver relies on (MSDN): with RAW_IO every request

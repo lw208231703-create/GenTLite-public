@@ -1,7 +1,7 @@
 //! GVSP receiver: per-datagram reassembly of image blocks (leader +
 //! payload packets + trailer) into announced buffers, plus the receive
 //! thread reading the stream socket. Wire format: the GVSP section of
-//! notes/gvcp-wirefacts.md (spec §24–25), codec in `gentl_gvcp::gvsp`.
+//! docs/gvcp-wirefacts.md (spec §24–25), codec in `gentl_gvcp::gvsp`.
 //!
 //! Reassembly is zero-copy: payload bytes are written directly into the
 //! buffer reserved at the leader; core finalizes at the trailer. Packet
@@ -370,7 +370,7 @@ impl GvspReassembler {
         // independent) and completion is decided by the trailer. The
         // expected byte count is unknown, so the size check at the trailer
         // is skipped for such frames — a truncated tail is undetectable
-        // (capability loss, notes/OPEN-QUESTIONS.md Q21). begin_frame(0)
+        // (capability loss, docs/OPEN-QUESTIONS.md Q21). begin_frame(0)
         // disables the up-front size gate; capacity is still enforced per
         // packet below (a buffer that cannot hold the frame is dropped at
         // the trailer).

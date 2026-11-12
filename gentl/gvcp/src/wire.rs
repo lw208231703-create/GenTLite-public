@@ -1,5 +1,5 @@
 //! GVCP message headers and payloads. All multi-byte fields are big-endian
-//! (spec §15.3). Layouts: notes/gvcp-wirefacts.md.
+//! (spec §15.3). Layouts: docs/gvcp-wirefacts.md.
 
 pub const GVCP_KEY: u8 = 0x42;
 pub const GVCP_PORT: u16 = 3956;
@@ -7,7 +7,7 @@ pub const GVCP_PORT: u16 = 3956;
 /// GVCP flag byte: ACKNOWLEDGE. The spec's header example (3.0 Figure 15-8)
 /// sends commands with flag 0x01; Aravis and pyGigEVision use the same value.
 /// A non-compliant clone camera was also observed answering flag 0x80 (likely
-/// ignoring the bit entirely) — see notes/OPEN-QUESTIONS.md Q27.
+/// ignoring the bit entirely) — see docs/OPEN-QUESTIONS.md Q27.
 pub const FLAG_ACK: u8 = 0x01;
 
 // Command / acknowledge codes (spec §16 dictionary)

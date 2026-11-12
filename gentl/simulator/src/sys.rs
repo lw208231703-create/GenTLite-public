@@ -1,4 +1,4 @@
-//! OS backend abstraction (Phase A Linux port, notes/PENDING.md "Linux
+//! OS backend abstraction (Phase A Linux port, docs/PENDING.md "Linux
 //! 可移植"): the per-socket IP don't-fragment option for the §24.5 test
 //! packet ("The don't fragment bit must also be set in the IP Header").
 //! One API, two implementations behind `cfg(windows)` / `cfg(unix)`; the

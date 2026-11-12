@@ -26,5 +26,5 @@
   EF/05 兜底，闭环完整。
 - 保留项：configfs 设备类 EF/02/01（U3V Table 3-1 规范性要求，已修复）。
 - 归档备选：f_u3v.ko 树外模块（客户点名要求原生发现时再评估）。
-- 证据：notes/u3v-gadget-bringup-pitfalls.md "Aravis 互通测试结论"（发现关
+- 证据：docs/u3v-gadget-bringup-pitfalls.md "Aravis 互通测试结论"（发现关
   过、打开关精确死于 GUID/CS）。

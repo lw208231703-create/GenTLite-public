@@ -1,4 +1,4 @@
-//! OS backend abstraction (Phase A Linux port, notes/PENDING.md "Linux
+//! OS backend abstraction (Phase A Linux port, docs/PENDING.md "Linux
 //! 可移植"): host-side operations the producer needs but std does not
 //! expose — NIC enumeration, socket receive-buffer sizing, receiver-thread
 //! CPU affinity. One API per operation, two implementations selected by

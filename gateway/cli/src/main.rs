@@ -309,7 +309,7 @@ fn main() {
     };
     // Every later GigE startup failure path must release the CCP: an
     // orphaned exclusive lock wedges these cameras until power-cycle
-    // (real-machine finding 2026-10-19/22, notes/OPEN-QUESTIONS.md Q35
+    // (real-machine finding 2026-10-19/22, docs/OPEN-QUESTIONS.md Q35
     // family). The end-of-main release is kept as defense in depth; a
     // second CCP=0 is a harmless ignored error. U3V: no equivalent exists.
     #[cfg(feature = "back-gige")]

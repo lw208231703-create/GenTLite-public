@@ -2,7 +2,7 @@
 //! mode (no `GENTLITE_GEV_PACKET_SIZE` — automatic test-packet search).
 //!
 //! The sim's GVSP emitter accepts fire-carrying SCPS0 writes while its
-//! auto-stream runs (notes/OPEN-QUESTIONS.md Q33), so the producer's
+//! auto-stream runs (docs/OPEN-QUESTIONS.md Q33), so the producer's
 //! negotiation runs there in full: the sim delivers every test packet on
 //! loopback and the search converges to the sim's upper bound. The
 //! assertions below are deliberately robust to where exactly it

@@ -44,7 +44,8 @@ gentl/       universal GenTL producer: core, GVCP, GigE, U3V, simulator,
 gateway/     Linux relay gateway: relay core, camera backends, CLI
 virtual/     virtual-camera fronts: GigE, U3V and the Null source
 board/       Orange Pi deployment assets
-docs/        specifications, interoperability and performance records
+docs/        engineering records (design, interoperability, performance, decisions)
+notes/       specifications (local only; AIA/A3/EMVA copyrights)
 scripts/     shared build/deployment helpers
 ```
 

@@ -16,7 +16,7 @@ use std::net::Ipv4Addr;
 use gentl_simulator::{SimCamera, SimConfig, StreamingProtocol};
 
 /// Fixed identity; the C++ consumer locates the sim by its device ID
-/// (the MAC string, notes/OPEN-QUESTIONS Q4).
+/// (the MAC string, docs/OPEN-QUESTIONS Q4).
 const MAC: [u8; 6] = [0x00, 0x11, 0x22, 0x33, 0x44, 0x55];
 
 fn parse_port() -> u16 {
