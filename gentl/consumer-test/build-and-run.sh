@@ -65,7 +65,7 @@ if [ -z "$PORT" ]; then
 fi
 echo "==> sim_server on UDP $PORT (pid $SIM_BG_PID)"
 
-# Producer-side hooks for the loopback camera (docs/OPEN-QUESTIONS Q11).
+# Producer-side hooks for the loopback camera (docs/00-governance/OPEN-QUESTIONS.md Q11).
 export GENTLITE_GVCP_PORT="$PORT"
 export GENTLITE_DISCOVERY_TARGETS="127.0.0.1:$PORT"
 # GenApi runtime DLLs (GenApi_MD_VC141_v3_5.dll and its deps) live here.

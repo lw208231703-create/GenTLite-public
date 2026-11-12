@@ -1,6 +1,6 @@
 //! GigE Vision bootstrap register map (interface #0).
 //! Source: GigE Vision 3.0 spec, Table 36-1 "Bootstrap Registers"
-//! (see docs/gvcp-wirefacts.md). Addresses are 32-bit aligned.
+//! (see docs/10-protocol/gvcp-wirefacts.md). Addresses are 32-bit aligned.
 
 /// Version: two most-significant bytes = major, two least = minor.
 pub const VERSION: u32 = 0x0000;
@@ -264,7 +264,7 @@ mod tests {
         // The 1.2 factory default (§27.46): DF set, size 576 in the low half.
         assert_eq!(scps_packet_size(0x4000_0240), 576);
         // An unwritten register reads as total size 0 (payload fallback is
-        // the producer's job, see docs/OPEN-QUESTIONS.md).
+        // the producer's job, see docs/00-governance/OPEN-QUESTIONS.md).
         assert_eq!(scps_packet_size(0), 0);
     }
 

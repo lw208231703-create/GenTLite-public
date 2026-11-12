@@ -67,7 +67,7 @@ jumbo / 零拷贝。
   搬运。后续把 payload transfer 从 256 KiB 调到 512 KiB：单次 900 帧
   约 100.1 fps / 262.5 MB/s，1800 帧长测约 95.1 fps / 249.2 MB/s；
   640 KiB / 1 MiB 会 EPIPE。瓶颈定位详见
-  `docs/u3v-bandwidth-2026-11-04.md`。
+  `docs/40-performance/u3v-bandwidth-2026-11-04.md`。
 
 ### U3V + GigE 并发（30 fps）
 

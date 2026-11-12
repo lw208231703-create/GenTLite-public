@@ -148,10 +148,10 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
 - `compliance/spec-audit/u3v-audit.md`
 - `compliance/spec-audit/u3v-3.2-raw.txt`
 - `compliance/preflight-gige-u3v.md`
-- `docs/gvcp-wirefacts.md`
-- `docs/u3v-wirefacts.md`
-- `docs/OPEN-QUESTIONS.md`
-- `docs/remaining-work-checklist.md`
+- `docs/10-protocol/gvcp-wirefacts.md`
+- `docs/10-protocol/u3v-wirefacts.md`
+- `docs/00-governance/OPEN-QUESTIONS.md`
+- `docs/00-governance/remaining-work-checklist.md`
 - `notes/GigE Vision v1.2.pdf`
 - `notes/GigE-Vision-Specification-3-0-00a.pdf`
 - `notes/USB3_Vision_Specification_V1.2.pdf`

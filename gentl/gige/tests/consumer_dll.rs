@@ -9,7 +9,7 @@
 //! The device under test is `gentl_simulator::SimCamera` on loopback,
 //! reached through the producer's documented test hooks
 //! (`GENTLITE_GVCP_PORT`, `GENTLITE_DISCOVERY_TARGETS`; see
-//! `tests/control_plane.rs` and docs/OPEN-QUESTIONS.md Q11). The same
+//! `tests/control_plane.rs` and docs/00-governance/OPEN-QUESTIONS.md Q11). The same
 //! test loads the Linux cdylib (`libgentl_gige.so`) on Unix targets —
 //! libloading resolves the exports either way.
 

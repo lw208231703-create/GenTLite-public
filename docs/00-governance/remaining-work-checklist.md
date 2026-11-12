@@ -36,14 +36,14 @@
 | C1 | gentl-gige GVSP resend/ARQ | ✅ 已有 | `GENTLITE_GEV_RESEND` 开关及门控 |
 | C2 | gentl-gige 多通道接收 | ✅ 已有 | `GENTLITE_GEV_STREAM_CHANNELS`，默认 8 通道 |
 | C3 | U3V 事件接收 | ✅ 完成 | DEI 事件泵和 `EVENT_REMOTE_DEVICE` 已接线并实测 |
-| C4 | Windows U-A 异常路径收尾 | 待明确 | 保留 PENDING 旧项，需先定义具体异常场景 |
+| C4 | Windows U-A 异常路径收尾 | 待明确 | 保留 docs/00-governance/PENDING.md 旧项，需先定义具体异常场景 |
 | C5 | pylon/MVS/Halcon + 我方 CTI + 真实相机 | 待真机/授权 | 分宿主记录发现、打开、GenApi 和采图结果 |
 | C6 | 真实相机矩阵回归 | 待真机 | 多品牌 GigE/U3V、不同帧格式和传输参数 |
 | C7 | CTI 被第三方 GenTL 宿主加载 | ✅ 无真机完成 | LDVision 显式加载、打开、参数和采图通过；真机宿主矩阵随 C5 |
 
 ## D. 兼容性/规范工程
 
-- ✅ D1 互通矩阵已填入 GenApi、LDVision、Aravis、pylon、MVS 实测结果与边界（`docs/interop-matrix.md`）。
+- ✅ D1 互通矩阵已填入 GenApi、LDVision、Aravis、pylon、MVS 实测结果与边界（`docs/30-validation/interop-matrix.md`）。
 - D2 f_fs CS 白名单上游 issue/补丁查询：随 A1 关闭，不再作为主线工作。
 - ✅ D3 板端部署、重启、帧率设置、虚拟 GigE 压测和远程事件脚本已就位。
 - 未提交修改保留在工作区；不得把“已验证”自动等同于“已 commit/push”。

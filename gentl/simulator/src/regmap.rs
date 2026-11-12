@@ -10,7 +10,7 @@
 //! Simplifications vs a real device (M1 scope, documented):
 //! - No peer identity: the GVCP `DeviceHandler` trait carries no (ip, port)
 //!   context, so the CCP state machine cannot distinguish the primary
-//!   application from a stranger (docs/OPEN-QUESTIONS.md Q7). Writing 0
+//!   application from a stranger (docs/00-governance/OPEN-QUESTIONS.md Q7). Writing 0
 //!   always releases, and a repeated identical request while occupied is
 //!   accepted (R-069cd applied to any writer).
 //! - Reads are never blocked while a peer holds exclusive access (the
@@ -318,7 +318,7 @@ impl SimRegMap {
         // convention: the register holds the *total* packet size (bits
         // 16-31) including the IP/UDP/GVSP headers of the configured
         // header form (48-byte budget at 3.0, 36-byte at 1.2 legacy —
-        // 1.2 §27.46; see docs/gvcp-wirefacts.md and Q28); 1400 payload +
+        // 1.2 §27.46; see docs/10-protocol/gvcp-wirefacts.md and Q28); 1400 payload +
         // headers keeps the IPv4 total under the 1500-byte MTU. Every
         // stream channel starts with the same default.
         let default_scps =
@@ -516,7 +516,7 @@ impl DeviceHandler for SimRegMap {
             // §36.38 / R-667cd / Table 36-2. Write access is disabled while
             // any GVSP stream channel is open; selecting a protocol the
             // device does not support (or a reserved value 2-3, see
-            // docs/OPEN-QUESTIONS.md Q29) returns GEV_STATUS_INVALID_PARAMETER.
+            // docs/00-governance/OPEN-QUESTIONS.md Q29) returns GEV_STATUS_INVALID_PARAMETER.
             if i.channels.iter().any(|c| reg::scp_host_port(c[W_SCP]) != 0) {
                 return Err(GEV_STATUS_BUSY);
             }
@@ -529,7 +529,7 @@ impl DeviceHandler for SimRegMap {
             let supported = match mode {
                 reg::SCONF_PROTOCOL_GVSP => gvsp_ok,
                 reg::SCONF_PROTOCOL_GVRSP => gvrsp_ok,
-                // Reserved values 2-3: rejected (docs/OPEN-QUESTIONS.md Q29).
+                // Reserved values 2-3: rejected (docs/00-governance/OPEN-QUESTIONS.md Q29).
                 _ => false,
             };
             if !supported {
@@ -629,7 +629,7 @@ impl SimRegMap {
     /// actually send — clamp to the sim's continuous size domain and floor
     /// the payload to a pixel multiple ([`crate::emitter::round_packet_size`]).
     ///
-    /// fire_test_packet (§11.7/§24.5, docs/OPEN-QUESTIONS.md Q33): a
+    /// fire_test_packet (§11.7/§24.5, docs/00-governance/OPEN-QUESTIONS.md Q33): a
     /// write carrying the fire bit is accepted at any time and fires
     /// exactly one test packet of the rounded size towards (SCDAx, SCPx
     /// host_port); the stored value has the fire bit self-cleared
@@ -683,7 +683,7 @@ impl SimRegMap {
             // port — e.g. the pre-Q31 "<<16" layout mistake (a bare port
             // shifted out of the low 16 bits). Reject it loudly so a wrong
             // layout fails at the device instead of silently closing the
-            // channel (docs/OPEN-QUESTIONS.md Q14/Q31).
+            // channel (docs/00-governance/OPEN-QUESTIONS.md Q14/Q31).
             return Err(GEV_STATUS_INVALID_PARAMETER);
         }
         let key = x as u16;
@@ -1109,7 +1109,7 @@ mod tests {
             Err(GEV_STATUS_BUSY)
         );
         m.write_reg(reg::SCP0, 0).unwrap();
-        // Reserved protocol values 2-3 are rejected (docs/OPEN-QUESTIONS.md Q29).
+        // Reserved protocol values 2-3 are rejected (docs/00-governance/OPEN-QUESTIONS.md Q29).
         assert_eq!(
             m.write_reg(
                 reg::STREAMING_CONFIGURATION,

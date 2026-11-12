@@ -207,7 +207,7 @@ impl ControlChannel for GevDevice {
     /// GEV_STATUS_NOT_IMPLEMENTED (§19), which triggers the per-register
     /// READREG (§16.3) fallback. No address-range heuristics: the spec
     /// (1.2 §14.5 / 3.0 §16.5) defines no register-file/memory split, and
-    /// observed devices partition differently (docs/OPEN-QUESTIONS Q24).
+    /// observed devices partition differently (docs/00-governance/OPEN-QUESTIONS.md Q24).
     fn read_mem(&self, addr: u64, buf: &mut [u8]) -> GentlResult<()> {
         if buf.is_empty() {
             return Ok(());

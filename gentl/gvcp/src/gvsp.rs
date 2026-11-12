@@ -1,7 +1,7 @@
 //! GVSP (GigE Vision Streaming Protocol) packet codec — image payload type.
 //! Shared by the producer's receiver (gentl-gige) and the simulator's
 //! transmitter so both sides cannot drift apart. Facts: the GVSP section of
-//! docs/gvcp-wirefacts.md (spec §24–25).
+//! docs/10-protocol/gvcp-wirefacts.md (spec §24–25).
 //!
 //! Two header forms are coded here:
 //! - the 3.0 form (§24.2): 20 bytes, Extended ID bit set, 64-bit block_id;

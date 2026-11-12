@@ -11,7 +11,7 @@
 1. **协议主动权在用户态**：功能实现不改内核源码；内核侧只接受硬件配置
    类改动（设备树 overlay）。树外模块（.ko）是"记录过的备选"，不主动做。
 2. **一切以规范文本为准**：实现引用条款号（§/R/CR），规范沉默处记录
-   裁定（OPEN-QUESTIONS），禁止猜。
+   裁定（docs/00-governance/OPEN-QUESTIONS.md），禁止猜。
 3. **兼容性正解 = 宿主加载我们的 CTI**（GenTL 标准支持多 producer），
    而不是让设备去兼容所有第三方 producer 的发现逻辑。
 
@@ -26,5 +26,5 @@
   EF/05 兜底，闭环完整。
 - 保留项：configfs 设备类 EF/02/01（U3V Table 3-1 规范性要求，已修复）。
 - 归档备选：f_u3v.ko 树外模块（客户点名要求原生发现时再评估）。
-- 证据：docs/u3v-gadget-bringup-pitfalls.md "Aravis 互通测试结论"（发现关
+- 证据：docs/20-design/u3v-gadget-bringup-pitfalls.md "Aravis 互通测试结论"（发现关
   过、打开关精确死于 GUID/CS）。

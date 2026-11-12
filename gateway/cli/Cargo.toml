@@ -34,7 +34,7 @@ gentl-gvcp = { path = "../../gentl/gvcp" }
 
 [target.'cfg(unix)'.dependencies]
 # SIGINT/SIGTERM shutdown flag (src/signal.rs) and getifaddrs NIC lookup
-# (src/netid.rs); same standing as gentl-gige's unix backend (docs/PENDING.md
+# (src/netid.rs); same standing as gentl-gige's unix backend (docs/00-governance/PENDING.md
 # "Linux 可移植").
 libc = "0.2"
 

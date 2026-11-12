@@ -157,7 +157,7 @@
 
 ## Q14. SCPx/SCPSx 寄存器语义：sim 用"原始值"约定，与规范 §36.57/§36.58 的位布局不同 `[RESOLVED]`
 - **涉及**：gentl-simulator regmap/emitter、gentl-gige receiver（对接约定）、
-  docs/gvcp-wirefacts.md（记载与规范冲突，待回填修正）
+  docs/10-protocol/gvcp-wirefacts.md（记载与规范冲突，待回填修正）
 - **规范出处**：GV 3.0 §11.7（"bit 16 to 31 provides the packet size"；test packet
   总大小 "including IP and UDP headers"）、§36.57 SCPx（bits 16-31 = host_port，
   bit0 = direction 只读）、§36.58 SCPSx（"total packet size, including all headers
@@ -356,7 +356,7 @@ Basler 等其它 consumer 同样受益。
 ## U3V 疑问（M4，2026-10-12）
 
 > U3V producer（crates/gentl-u3v）实施中规范未覆盖或需要人裁定的点。
-> 线格式事实见 docs/u3v-wirefacts.md。
+> 线格式事实见 docs/10-protocol/u3v-wirefacts.md。
 
 ### UQ1. U3V 匹配代码：0xEF/0x02 是设备级，接口级是 0xEF/0x05
 - **涉及**：discovery.rs 匹配规则、README 计划表
@@ -489,7 +489,7 @@ Basler 等其它 consumer 同样受益。
   三重确认（§3.2.5）。REG_MULTI_SZ 曾只读首段导致漏匹配，已修。
 - **驱动绑定**：相机绑海康私有 MvisionUSB 驱动时枚举可见但 openable=false
   （与 LDVision 实测行为一致）——GenTL producer 经 WinUSB 打开，需要设备
-  绑定 WinUSB 驱动（解绑方法见 PENDING/报告）。
+  绑定 WinUSB 驱动（解绑方法见 docs/00-governance/PENDING.md 与报告）。
 
 ## UQ13. Windows 上 U3V 设备打开的绑定相关路径链（真机驱动，2026-10-13）
 - **涉及**：gentl-u3v discovery.rs `device_interface_paths` / `open_device`
@@ -591,7 +591,7 @@ Basler 等其它 consumer 同样受益。
   曝光读写、恢复 30/30）+ RAW_IO 10000/10000 + 非 RAW_IO 5000/5000 A/B +
   回归 106 全绿。附带发现：该相机 Size 写入会复位 Offset（写序：先 Size
   后 Offset；恢复时先 Offset 清零再 Size）。完整档（overlapped 读池）
-  仍挂 PENDING R1 按触发条件执行
+  仍挂 docs/00-governance/PENDING.md R1 按触发条件执行
 
 ## Q29. Streaming Configuration 写保留值（streaming_protocol = 2-3）的设备行为
 - **涉及**：gentl-simulator regmap（§36.38 写语义）
@@ -823,11 +823,11 @@ flag 0x01 与 0x80 对同一相机的 READREG/WRITEREG **都应答**（flag_prob
      传 0 语义不同，显式规避）。
   4. **SO_RCVBUF 读回**：Linux 会把请求钳到 `net.core.rmem_max` 且按内核
      记账翻倍读回——"读回值才是真实生效值"的契约两平台一致（压测基线需
-     先把 rmem_max/wmem_max 提到 32MB，已记入 gige-100g-rx-design.md §8）。
+     先把 rmem_max/wmem_max 提到 32MB，已记入 docs/20-design/gige-100g-rx-design.md §8）。
   5. **consumer_dll 回归测试双平台化**：同一测试在 Unix 加载
      `libgentl_gige.so`（libloading 跨平台），导出完整性 + 端到端控制面
      在 Linux 得到与 Windows 等价的验证。
-- **遗留（Phase B）**：gentl-u3v 的 rusb/libusb 后端（docs/PENDING.md
+- **遗留（Phase B）**：gentl-u3v 的 rusb/libusb 后端（docs/00-governance/PENDING.md
   "Linux 可移植"）。
 
 ## Q35 补充（2026-10-22，相机 00:30:53:9b:db:6c @192.168.1.89）：IP 分片是控制面失能的确切触发器
@@ -857,7 +857,7 @@ flag 0x01 与 0x80 对同一相机的 READREG/WRITEREG **都应答**（flag_prob
   `usbio/mod.rs`
 - **规范出处**：U3V 1.2 §3 只规定设备侧描述符与 Device Info（R-1cd：
   GUID 是设备身份）；**主机侧枚举/持久标识规范沉默**——全部按 QoI 裁定
-  记录（代码内同名 QoI 注释；事实细节回填 docs/u3v-wirefacts.md
+  记录（代码内同名 QoI 注释；事实细节回填 docs/10-protocol/u3v-wirefacts.md
   "Linux 后端事实"节）。
 - **裁定**：
   1. **Root hub 呈现**：libusb 枚举设备不建模 hub。按"当前有设备的
@@ -1068,7 +1068,7 @@ flag 0x01 与 0x80 对同一相机的 READREG/WRITEREG **都应答**（flag_prob
   非 RAW_IO 设置时机（start 时/open 时都试过）、非 set_raw_io 本身（关掉也复现）。
   嫌疑指向 xHCI/WinUSB 驱动层对该 dwc3 设备的传输故障处理（可能含选择性挂起误触发），
   **需 USB 分析仪级工具或换 USB 口/线/宿主对照实验**，禁止再盲改。记入 backlog：
-  PENDING 新增"U3V 前端长跑 EPIPE 根因调查"。
+  docs/00-governance/PENDING.md 新增"U3V 前端长跑 EPIPE 根因调查"。
 - **本次试错沉淀（都已回滚到成功态，勿重蹈）**：
   1. WinUSB 读挂起复用（staging pending）方案引发 n=0/短应答/内存错误——**已整体
      放弃**；流管道读保持经典 cancel-on-timeout（audit B11）。
@@ -1096,4 +1096,4 @@ flag 0x01 与 0x80 对同一相机的 READREG/WRITEREG **都应答**（flag_prob
   HS→ Orange Pi 5 Plus 虚拟 U3V 相机，GenCP+SIRM 全链路）。**U3V gadget 前端整机
   验证完成，2×2 矩阵收官。**
 
-（踩坑全记录归档：见 docs/u3v-gadget-bringup-pitfalls.md——按内核/FF协议/Windows宿主/线程健壮性/调试纪律五层整理，含最终可用配置快照。）
+（踩坑全记录归档：见 docs/20-design/u3v-gadget-bringup-pitfalls.md——按内核/FF协议/Windows宿主/线程健壮性/调试纪律五层整理，含最终可用配置快照。）

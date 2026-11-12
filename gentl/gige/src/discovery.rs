@@ -4,7 +4,7 @@
 //! Windows, getifaddrs on Unix). Discovery
 //! sends DISCOVERY_CMD to each interface's directed broadcast address
 //! (`ip | !subnet_mask`) plus the limited broadcast `255.255.255.255:3956`
-//! (docs/gvcp-wirefacts.md §16.1). Test hook: `GENTLITE_DISCOVERY_TARGETS`
+//! (docs/10-protocol/gvcp-wirefacts.md §16.1). Test hook: `GENTLITE_DISCOVERY_TARGETS`
 //! (comma-separated `ip:port`) adds unicast targets whose replies are
 //! attached without subnet filtering (loopback devices are not reachable
 //! via broadcast and 127.0.0.0/8 has no GenTL interface). Stream hook:
@@ -39,7 +39,7 @@ pub struct NicInfo {
 /// `ProducerGEV.cti`, 2026-10-12): ID = vendor-scoped module name,
 /// DISPLAYNAME = clean user-facing "GigE Vision". MVS uses "GigE Vision"
 /// for both. Both are single aggregate interfaces spanning all NICs
-/// (docs/OPEN-QUESTIONS Q3).
+/// (docs/00-governance/OPEN-QUESTIONS.md Q3).
 pub const AGGREGATE_IFACE_ID: &str = "GenTLite GEV GenTL Interface Module";
 pub const AGGREGATE_IFACE_DISPLAY_NAME: &str = "GigE Vision";
 

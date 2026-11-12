@@ -2,7 +2,7 @@
 # Restart the vgige daemon on the board: clean teardown + fresh start.
 # WARNING: this re-enumerates the USB gadget on the Windows host; after
 # repeated failures Windows may disable the device (then a cable replug
-# or PC reboot is needed — see docs/u3v-gadget-bringup-pitfalls.md #21).
+# or PC reboot is needed — see docs/20-design/u3v-gadget-bringup-pitfalls.md #21).
 #
 # Usage: bash scripts/board-restart.sh [host]   (default 192.168.137.55)
 set -euo pipefail

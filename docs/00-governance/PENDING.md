@@ -2,7 +2,7 @@
 
 > 状态截至 2026-11-04。协议栈纯规范零非标兼容；workspace 测试全绿。
 > GigE 模拟链路 + U3V 海康真机已毕业；以下事项按优先级排列。
-> 每条注明：前置条件、验收标准、关联 OPEN-QUESTIONS。
+> 每条注明：前置条件、验收标准、关联 docs/00-governance/OPEN-QUESTIONS.md。
 
 ## 〇、2026-11-04 vgige 虚拟相机里程碑
 
@@ -15,7 +15,7 @@
 - GenTLite GigE/U3V 5 帧与 NI、模拟端逐字节 0 差异；
 - `u3vffs` vendor 模块、DTB overlay、systemd/udev 恢复资产归档到
   `board/orangepi5plus/`；
-- 完整踩坑记录：`docs/vgige-board-kernel-interop-2026-11-04.md`。
+- 完整踩坑记录：`docs/30-validation/vgige-board-kernel-interop-2026-11-04.md`。
 
 待收尾：
 
@@ -69,7 +69,7 @@
 | M3-1 | **GVSP 丢包重传** | ✅ 2026-10-19：§16.7 全套——能力门控（R-197ca，GVCP Capability 0x4）+ fire-and-forget PACKETRESEND（CR-198ca/CR-201cd，GvcpClient::packet_resend）+ 乱序窗口重传（§16.7.3 QoI：1ms 初始 / 20ms 重发 / 100ms 保留，env 可调）+ 尾部缺口登记（trailer packet_id = 末包+1，R-264st）+ CR-204st/Table 19-1 标记 + CR-205st 错误包按不可恢复 + RESEND_RANGE_ERROR（CO-206st）+ S-6 重复包查重销账 + S-7 trailer block_id 不符即弃销账；sim 端块缓存重发 + 0x800C 错误包 + `set_packet_drop` 丢包注入；集成测试 resend.rs（注入 (1,3)/(1,7) 两缺口，块 1 完整恢复） | Q16/Q20 |
 | M3-2 | **包大小协商（§11.7）** | ✅ 2026-10-16：test packet 二分（挂接点 `GevDataStream::start`）；`GENTLITE_GEV_PACKET_SIZE` 固定值模式；SCPS 写被拒 → FIRE-only 回退（Q33）；测试包判定 = block_id 0 + 总包长匹配 + test_data 能力的 LFSR 校验（§24.5/§24.5.1，QoI）；sim 发测试包 + 取整 clamp | Q16/Q33 |
 | M3-3 | **断线检测与恢复** | 心跳超时、控制通道重建、流复位（S-1/S-2 一并处理） | — |
-| M3-4 | **多网卡/多相机并发** | ~~多流通道扇出~~ ✅ 2026-10-16（单 DS 内扇出 K 通道，每通道 socket+线程；sim 整帧轮转；`GENTLITE_GEV_STREAM_CHANNELS` 默认 8）。~~剩余：SO_RCVBUF/绑核~~ ✅ 2026-10-16（M3-2 A 档：`GENTLITE_GEV_RCVBUF_KB` 默认 4096 读回存 ChannelCtx；`GENTLITE_GEV_RX_CORES` 接收线程亲和；connect/SIO_UDP_CONNRESET 动机不成立，不做——stream.rs 模块注释）。剩余：多 tap 相机 per-channel 槽。架构：docs/gige-100g-rx-design.md | — |
+| M3-4 | **多网卡/多相机并发** | ~~多流通道扇出~~ ✅ 2026-10-16（单 DS 内扇出 K 通道，每通道 socket+线程；sim 整帧轮转；`GENTLITE_GEV_STREAM_CHANNELS` 默认 8）。~~剩余：SO_RCVBUF/绑核~~ ✅ 2026-10-16（M3-2 A 档：`GENTLITE_GEV_RCVBUF_KB` 默认 4096 读回存 ChannelCtx；`GENTLITE_GEV_RX_CORES` 接收线程亲和；connect/SIO_UDP_CONNRESET 动机不成立，不做——stream.rs 模块注释）。剩余：多 tap 相机 per-channel 槽。架构：docs/20-design/gige-100g-rx-design.md | — |
 | M3-5 | ~~性能对比报告~~ ✅ 2026-10-19 初版：合规/m3-5-perf-report.md。60fps 同帧率下 GenTLite ≈10% 单核（1.37ms/帧）零丢失 vs MVS 进程 ≈0.5%（内核驱动接收，口径差异已注明）；系统级同口径复测留作可选后续 | 依赖 P1 |
 | M3-6 | **FrameSink 签名贯通** | 未知格式 `SIZE_FILLED=0` 贯通真实字节数 | Q22 |
 | M3-7 | **DeviceHandler peer 上下文** | sim CCP 完整语义 | Q7 |
@@ -86,7 +86,7 @@
 | UQ9 | 传输粒度特性 | 1MiB TS 已验证可用；高带宽下的粒度调优属 RAW_IO 完整档 | R1 |
 | — | GenDC payload 模式 | 干净拒绝（UQ8）；真机有需求再实现 | UQ8 |
 
-## 五、RAW_IO 优化（PENDING R1）
+## 五、RAW_IO 优化（PENDING.md R1）
 
 - **最小档：已完成并真机验证**（2026-10-14）：RAW_IO 策略 + MPS 对齐请求 + 非对齐片暂存拷贝；100/200 帧复验通过（见 UQ16）
 - **完整档（挂起）**：overlapped 读池 2-4 在途，进一步消除块间空隙；触发条件：高带宽 U3V 相机实测丢帧/吞吐不足
@@ -95,7 +95,7 @@
 
 | 项 | 说明 | 预估 |
 |---|---|---|
-| **Linux 可移植** | **Phase A ✅ 2026-10-21（GigE 链路 + 公共 crate）**：sys 后端抽象落地（`gentl-gige/src/sys.rs`、`gentl-simulator/src/sys.rs`，cfg 双实现，Windows 代码原样搬入零行为变化）；gentl-u3v 加 Linux 编译桩（枚举空/打开 NOT_IMPLEMENTED，运行时安全）；windows-sys 移入 `[target.'cfg(windows)'.dependencies]`，unix 侧加 libc；consumer_dll 测试双平台（Linux 加载 `libgentl_gige.so` 全量导出回归）。双端验证：Windows 132 测试全绿 0 警告；板子（Orange Pi 5 Plus aarch64）122 测试全绿 0 警告（差 10 = u3v WinUSB 专属 9 + mask_from_prefix 1，均按预期跳过）；aarch64 环回基线入库 docs/gige-100g-rx-design.md §8（22.1–22.2 Gbit/s / 0.17 Mpps）。**Phase B ✅ 2026-10-23 代码完成（U3V rusb/libusb 后端）**：`usbio` 重组为 `UsbPipe` trait（最小面：bulk 读写/flush/策略/MPS）+ `winusb.rs`（WinUSB 原样迁入）+ `libusb.rs`（rusb，链系统 libusb）；control/stream 完全平台无关（GenCP 事务/SIRM 重组经 trait 收发）；Linux 发现按 §3 描述符层一次匹配，Device Info 重序列化喂共享解析器（`descriptors.rs` 双端单测）；UQ16 累积读层下沉 usbio/mod.rs 并新增 8 个 MockPipe 单测双端运行；Linux 宿主侧 QoI 裁定记 OPEN-QUESTIONS Q37，事实回填 u3v-wirefacts.md "Linux 后端事实"节。Windows 150 测试全绿 0 警告（143 基线 + 7 新增）。**遗留：~~板子 aarch64 构建+测试验证~~ ✅ 2026-10-23 晚补齐：板端 0 警告 0 错误（rsproxy 镜像配置于板子 /root/.cargo/config.toml，rusb 链系统 libusb-1.0.28）；`cargo test -p gentl-u3v` 29/29 全绿（packets 10 + descriptors 3 + usbio 累积层 8 + control 2 + stream 2 + lib 2 + linux-discovery 2）；vgige 四 crate 11/11（core 4/back 1/cli 2/relay_e2e 4）；zopfli 0.8.1 钉完好**。**剩余唯一遗留：真机验收待海康相机插板子 USB3 口**（`lsusb` 应见 `2bdf:` 前缀 VID；然后 `cargo run --release --example grab_u3v` 自枚举自抓图（默认 50 帧，自动选第一台），或 `grab_u3v <GUID> 100` 抓 100 帧；或 `dump_cti target/release/libgentl_u3v.so` 看枚举/GUID） | 3-4 天 |
+| **Linux 可移植** | **Phase A ✅ 2026-10-21（GigE 链路 + 公共 crate）**：sys 后端抽象落地（`gentl-gige/src/sys.rs`、`gentl-simulator/src/sys.rs`，cfg 双实现，Windows 代码原样搬入零行为变化）；gentl-u3v 加 Linux 编译桩（枚举空/打开 NOT_IMPLEMENTED，运行时安全）；windows-sys 移入 `[target.'cfg(windows)'.dependencies]`，unix 侧加 libc；consumer_dll 测试双平台（Linux 加载 `libgentl_gige.so` 全量导出回归）。双端验证：Windows 132 测试全绿 0 警告；板子（Orange Pi 5 Plus aarch64）122 测试全绿 0 警告（差 10 = u3v WinUSB 专属 9 + mask_from_prefix 1，均按预期跳过）；aarch64 环回基线入库 docs/20-design/gige-100g-rx-design.md §8（22.1–22.2 Gbit/s / 0.17 Mpps）。**Phase B ✅ 2026-10-23 代码完成（U3V rusb/libusb 后端）**：`usbio` 重组为 `UsbPipe` trait（最小面：bulk 读写/flush/策略/MPS）+ `winusb.rs`（WinUSB 原样迁入）+ `libusb.rs`（rusb，链系统 libusb）；control/stream 完全平台无关（GenCP 事务/SIRM 重组经 trait 收发）；Linux 发现按 §3 描述符层一次匹配，Device Info 重序列化喂共享解析器（`descriptors.rs` 双端单测）；UQ16 累积读层下沉 usbio/mod.rs 并新增 8 个 MockPipe 单测双端运行；Linux 宿主侧 QoI 裁定记 docs/00-governance/OPEN-QUESTIONS.md Q37，事实回填 docs/10-protocol/u3v-wirefacts.md "Linux 后端事实"节。Windows 150 测试全绿 0 警告（143 基线 + 7 新增）。**遗留：~~板子 aarch64 构建+测试验证~~ ✅ 2026-10-23 晚补齐：板端 0 警告 0 错误（rsproxy 镜像配置于板子 /root/.cargo/config.toml，rusb 链系统 libusb-1.0.28）；`cargo test -p gentl-u3v` 29/29 全绿（packets 10 + descriptors 3 + usbio 累积层 8 + control 2 + stream 2 + lib 2 + linux-discovery 2）；vgige 四 crate 11/11（core 4/back 1/cli 2/relay_e2e 4）；zopfli 0.8.1 钉完好**。**剩余唯一遗留：真机验收待海康相机插板子 USB3 口**（`lsusb` 应见 `2bdf:` 前缀 VID；然后 `cargo run --release --example grab_u3v` 自枚举自抓图（默认 50 帧，自动选第一台），或 `grab_u3v <GUID> 100` 抓 100 帧；或 `dump_cti target/release/libgentl_u3v.so` 看枚举/GUID） | 3-4 天 |
 | GenTL 可选特性 | chunk(v1.3)/parts(v1.5)/composite(v1.6)——桩合法返回 NOT_IMPLEMENTED，真机有需求再填 | 按需 |
 | M5 社区化 | 英文文档、语义化版本发布、camera_prj 切换吃狗粮 | 按 README M5 |
 
@@ -104,7 +104,7 @@
 M1 ✅ / M2 模拟链路 ✅（100 帧零丢帧）/ M4 ✅（海康真机 200/200 + 规范复核）/
 预飞审计双路径 ✅（不合规项全修复）/ RAW_IO 最小档 ✅ / Basler 风格命名对齐 ✅
 
-## 八、智能相机网关（vgige，台账 docs/linux-vgige-design.md）
+## 八、智能相机网关（vgige，台账 docs/20-design/linux-vgige-design.md）
 
 ### GW-1. v1 ✅ 2026-10-22（单体 linux-vgige，真机毕业）
 - **内容**：Orange Pi 双网口盒子智能相机网关——对外网口 `GvcpServer::start_bound(up_ip, …)` 扮演虚拟 GigE 设备，对内 GVCP 常驻 CCP(EA) 驱动真机（DownGuard 孤儿守卫 + EA 后 1s 稳定窗，Q35 族）

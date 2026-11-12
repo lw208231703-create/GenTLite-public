@@ -18,8 +18,8 @@
 //! the existing pub(crate) one. The one sibling piece is
 //! `read_block_alloc` — the memory-sink counterpart of stream.rs's
 //! zero-copy `read_block` (same §5.2.1.3 walk and R-127sr short-piece
-//! semantics, `Vec` payload instead of a DsCore reservation; docs/
-//! OPEN-QUESTIONS.md Q38).
+//! semantics, `Vec` payload instead of a DsCore reservation;
+//! docs/00-governance/OPEN-QUESTIONS.md Q38).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};

@@ -19,7 +19,7 @@
 //!
 //! Seam discipline: no plugin registries, no dynamic discovery — a trait
 //! exists only where a concrete second implementation is planned
-//! (docs/linux-vgige-design.md, roadmap).
+//! (docs/20-design/linux-vgige-design.md, roadmap).
 
 pub mod back;
 pub mod frame;

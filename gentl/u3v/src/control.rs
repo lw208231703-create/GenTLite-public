@@ -2,7 +2,7 @@
 //! bootstrap-register walk (ABRM §4.2.1 / SBRM §4.2.2) that turns an
 //! opened USB device into a usable control channel.
 //!
-//! Transaction discipline (spec-traced, see docs/u3v-wirefacts.md):
+//! Transaction discipline (spec-traced, see docs/10-protocol/u3v-wirefacts.md):
 //! - request_id starts at 0 after connect (R-35ch) and increments per
 //!   command; the acknowledge must echo it (GenCP §4.3.1).
 //! - The host never sends more per command than the Maximum Command
@@ -106,7 +106,7 @@ impl GenCpClient {
                 // pipe (e.g. we timed out but the device answered later).
                 // Flush the IN pipe so the next exchange starts clean;
                 // full endpoint-halt re-synchronization (§4.1.4.1.2) is a
-                // follow-up (docs/OPEN-QUESTIONS.md UQ6) — on Linux the
+                // follow-up (docs/00-governance/OPEN-QUESTIONS.md UQ6) — on Linux the
                 // flush maps to clear_halt (see UsbPipe::flush).
                 self.in_pipe.flush();
                 e
@@ -556,7 +556,7 @@ impl ControlChannel for U3vDevice {
     }
 
     /// `Local:<model>.xml;<address>;<size>` of the first manifest entry
-    /// (GenApi local-URL convention, see docs/OPEN-QUESTIONS.md UQ4).
+    /// (GenApi local-URL convention, see docs/00-governance/OPEN-QUESTIONS.md UQ4).
     fn xml_url(&self) -> GentlResult<String> {
         let c = self
             .client

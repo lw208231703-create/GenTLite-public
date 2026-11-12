@@ -2,7 +2,7 @@
 
 This directory captures the board-specific changes used by the vgige
 virtual U3V / GigE setup. It complements
-`docs/vgige-board-kernel-interop-2026-11-04.md`.
+`docs/30-validation/vgige-board-kernel-interop-2026-11-04.md`.
 
 ## Target
 
@@ -175,5 +175,5 @@ cat /sys/class/udc/fc000000.usb/current_speed   # super-speed
 modinfo u3vffs
 ```
 
-See `docs/vgige-board-kernel-interop-2026-11-04.md` for the full pitfall log,
+See `docs/30-validation/vgige-board-kernel-interop-2026-11-04.md` for the full pitfall log,
 GigE endian/XML/GVSP fixes, 16-bit Null behavior, and Windows driver notes.

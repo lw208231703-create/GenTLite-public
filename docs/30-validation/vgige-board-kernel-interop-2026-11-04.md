@@ -25,7 +25,7 @@
 - 性能基准（Null 后端，端到端）：30 fps 板端 CPU 约单核 10–16%；
   GigE 1 Gbps 上限约 44.7 fps / 117 MB/s；U3V 上限约
   95 fps / 249 MB/s。无 incomplete、FrameID 缺口或 stream underrun。
-  详见 `docs/vgige-performance-2026-11-04.md`。
+  详见 `docs/40-performance/vgige-performance-2026-11-04.md`。
 
 ## 1. 当前状态
 

@@ -294,7 +294,7 @@ fn data_stream_end_to_end() {
     assert_eq!(scda0, Ipv4Addr::LOCALHOST.octets(), "SCDA0 = loopback");
 
     // The sim now streams frames at us continuously (no AcquisitionStart
-    // gating, sim OPEN-QUESTIONS Q15).
+    // gating, sim docs/00-governance/OPEN-QUESTIONS.md Q15).
 
     // Timeout path is not deterministic here (frames arrive immediately);
     // probe a short wait and fold a popped event back into the pool.

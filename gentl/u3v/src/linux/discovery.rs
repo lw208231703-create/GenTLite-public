@@ -1,12 +1,12 @@
 //! USB device discovery on Linux/Unix via rusb/libusb (Phase B,
-//! docs/PENDING.md "Linux 可移植"): U3V matching per spec §3 at the
+//! docs/00-governance/PENDING.md "Linux 可移植"): U3V matching per spec §3 at the
 //! descriptor level — Linux sees the real descriptors, so the Windows
 //! two-level registry dance (Q12: device-level compatible ID, then
 //! interface-child confirmation) collapses into one check. Device IDs:
 //! the Device Info GUID when the device opens (R-1cd), else a
 //! session-scoped `VID:PID:bus:address` fallback with ACCESS_STATUS =
 //! NOACCESS (QoI — the serial string is unreadable without opening;
-//! docs/OPEN-QUESTIONS.md Q37).
+//! docs/00-governance/OPEN-QUESTIONS.md Q37).
 
 use std::sync::Arc;
 

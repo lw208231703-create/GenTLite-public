@@ -1,16 +1,16 @@
-//! Discovery result types shared by both USB backends (docs/PENDING.md
+//! Discovery result types shared by both USB backends (docs/00-governance/PENDING.md
 //! "Linux 可移植" Phase B): the Windows SetupAPI discovery and the Linux
 //! rusb discovery produce the same shapes, consumed by the (shared) cti
 //! module and the GenTL surface in lib.rs.
 
 /// One USB root hub = one GenTL Interface (LDVision-style presentation,
-/// docs/OPEN-QUESTIONS.md UQ3).
+/// docs/00-governance/OPEN-QUESTIONS.md UQ3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RootHubInfo {
     /// Root hub identifier. Windows: the CM device instance ID
     /// (`USB\ROOT_HUB30\4&...`). Linux: synthesized as
     /// `USB\ROOT_HUB30\BUS<n>` from the libusb bus number (QoI — libusb
-    /// does not model root hubs; see docs/OPEN-QUESTIONS.md Q37).
+    /// does not model root hubs; see docs/00-governance/OPEN-QUESTIONS.md Q37).
     pub instance_id: String,
     /// Bus-reported description, e.g. "USB 根集线器(USB 3.0)".
     pub display: String,
@@ -37,7 +37,7 @@ pub struct DeviceIdentity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FoundDevice {
     /// GenTL device ID: the U3V GUID when readable, else
-    /// "VID:PID:Serial" from the instance path (docs/OPEN-QUESTIONS UQ2).
+    /// "VID:PID:Serial" from the instance path (docs/00-governance/OPEN-QUESTIONS.md UQ2).
     /// Linux fallback appends the session-scoped bus:address because the
     /// serial string is unreadable without opening (QoI, Q37).
     pub id: String,

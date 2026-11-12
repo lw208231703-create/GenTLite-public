@@ -17,7 +17,7 @@ use crate::usbio::InterfaceSet;
 /// System (TL) module: one per process, created by `TLOpen`.
 pub struct TlSystem {
     /// One GenTL Interface per USB root hub (LDVision-style, see
-    /// docs/OPEN-QUESTIONS.md UQ3).
+    /// docs/00-governance/OPEN-QUESTIONS.md UQ3).
     pub interfaces: Mutex<Vec<Arc<U3vInterface>>>,
     /// IDs of interfaces with a live `IF_HANDLE`.
     pub opened_interfaces: Mutex<HashSet<String>>,
@@ -69,7 +69,7 @@ impl U3vInterface {
 /// Device access level requested through `IFOpenDevice`. U3V 1.2 has no
 /// exclusive-access mechanism (ABRM Access Privilege is "not used by this
 /// standard"), so Exclusive currently behaves like Control — see
-/// docs/OPEN-QUESTIONS.md UQ5.
+/// docs/00-governance/OPEN-QUESTIONS.md UQ5.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum DeviceAccess {
     Monitor,

@@ -10,7 +10,7 @@
 
 **接口级 class code 是 0xEF/0x05/0x00-0x02，不是 0xEF/0x02**（0xEF/0x02/0x01 是
 *设备级* 代码，因 IAD 存在；README 早期行与任务简报有误，已按规范更正，见
-OPEN-QUESTIONS UQ1）。
+docs/00-governance/OPEN-QUESTIONS.md UQ1）。
 
 | 描述符 | class/subclass/protocol | 出处 |
 |---|---|---|
@@ -326,7 +326,7 @@ Transfer Size × SI Payload Transfer Count）→ final transfer1 → final trans
 # 真机实测补充（2026-10-13，海康 MV-CS016-10UC / Hikrobot，VID_2BDF&PID_0001）
 
 ## Windows 设备打开（规范不规定，实测链）
-见 OPEN-QUESTIONS UQ13。要点：复合父设备句柄 CreateFile 可开但
+见 docs/00-governance/OPEN-QUESTIONS.md UQ13。要点：复合父设备句柄 CreateFile 可开但
 WinUsb_Initialize 拒绝（error 8）；必须打开 MI_00 控制接口的设备接口路径；
 Zadig 风格 INF 用自定义 DeviceInterfaceGUID，需 DeviceClasses 注册表扫描兜底。
 

@@ -27,7 +27,12 @@ GenTLite-public/
 │   ├── u3v/                # virtual U3V gadget
 │   └── null/               # synthetic camera source
 ├── board/                  # Orange Pi deployment assets
-├── docs/                   # engineering records (design, interop, performance)
+├── docs/                   # engineering records
+│   ├── 00-governance/      # charter, decisions, pending work
+│   ├── 10-protocol/        # compliance and wire facts
+│   ├── 20-design/          # architecture and implementation design
+│   ├── 30-validation/      # interop, stress and board bring-up
+│   └── 40-performance/     # performance and bandwidth snapshots
 ├── notes/                  # specifications (local only; AIA/A3/EMVA copyrights)
 ├── scripts/                # shared build/deploy helpers
 ├── Cargo.toml              # workspace members
@@ -65,5 +70,6 @@ without creating a second protocol stack.
 | change virtual GigE/U3V output | `virtual/gige/`, `virtual/u3v/` |
 | change the synthetic test pattern | `virtual/null/` |
 | deploy on Orange Pi | `board/orangepi5plus/` |
+| browse the engineering docs | `docs/README.md` |
 | read the protocol specifications | `notes/` (local only; AIA/A3/EMVA copyrights) |
 | run the hardware-free tests | `cargo test --workspace` |

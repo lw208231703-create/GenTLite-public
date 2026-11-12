@@ -2,13 +2,13 @@
 //! GVCP control channel (SCDAx/SCPx), one local receiver thread per
 //! channel, and the registered-event bookkeeping behind EVENT_HANDLE.
 //!
-//! Channel rules (docs/gvcp-wirefacts.md, spec §11.5/§36.57): the primary
+//! Channel rules (docs/10-protocol/gvcp-wirefacts.md, spec §11.5/§36.57): the primary
 //! application opens a channel by writing SCDAx (destination IP) and then
 //! SCPx with host_port in the low 16 bits (spec §36.57, MSB-first print
 //! numbering — identical in GigE 1.2 §27.45; Q31). host_port != 0 activates,
 //! 0 closes, and SCPx must be the last stream channel register written when
 //! opening. Pure spec-only behavior: a device that ignores the spec encoding
-//! fails the readback check with a clear error (docs/OPEN-QUESTIONS Q31).
+//! fails the readback check with a clear error (docs/00-governance/OPEN-QUESTIONS.md Q31).
 //!
 //! M3-4a multi-stream fan-out: the single GenTL DataStream ("Stream0",
 //! GenTL surface unchanged) drives K GVSP channels, each with its own UDP
@@ -42,7 +42,7 @@
 //! packet — QoI: the operator override is trusted). Details:
 //! [`open_channel`].
 //!
-//! A-tier host-side tuning (spec-silent, QoI — docs/gige-100g-rx-design.md
+//! A-tier host-side tuning (spec-silent, QoI — docs/20-design/gige-100g-rx-design.md
 //! §8): a deep SO_RCVBUF on every stream socket (`GENTLITE_GEV_RCVBUF_KB`,
 //! default 4096) and optional receiver-thread CPU affinity
 //! (`GENTLITE_GEV_RX_CORES`). Deliberately not done: `connect()`ing the
@@ -103,7 +103,7 @@ fn desired_packet_size() -> u32 {
 
 /// Stream socket SO_RCVBUF request in KiB from `GENTLITE_GEV_RCVBUF_KB`
 /// (default 4096). QoI host-side tuning: the GigE RX design notes
-/// (docs/gige-100g-rx-design.md §8) list deep receive buffers as a
+/// (docs/20-design/gige-100g-rx-design.md §8) list deep receive buffers as a
 /// countermeasure against burst drops; the spec is silent on host tuning.
 fn desired_rcvbuf_kb() -> u32 {
     const DEFAULT_KB: u32 = 4096;
@@ -189,7 +189,7 @@ struct ChannelCtx {
 impl ChannelCtx {
     fn new(index: u16, socket: UdpSocket) -> Self {
         // A-tier receive tuning (QoI — the spec is silent on host socket
-        // options; docs/gige-100g-rx-design.md §8 motivates deep receive
+        // options; docs/20-design/gige-100g-rx-design.md §8 motivates deep receive
         // buffers). Applied before the channel opens so the negotiation
         // window already benefits.
         let so_rcvbuf = apply_so_rcvbuf(&socket, desired_rcvbuf_kb());
@@ -473,7 +473,7 @@ fn drain_socket(socket: &UdpSocket) {
 /// SCPx back: a device may refuse or silently adjust the register, and a
 /// host_port of 0 means the channel did not open. Spec-only: no
 /// non-compliant-device fallback (project decision 2026-10-12,
-/// docs/OPEN-QUESTIONS Q25).
+/// docs/00-governance/OPEN-QUESTIONS.md Q25).
 ///
 /// The receiver's payload stride is inferred from each block's first
 /// payload packet (see [`crate::gvsp_receiver::GvspReassembler`]), so the

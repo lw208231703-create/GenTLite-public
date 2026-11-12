@@ -44,7 +44,7 @@ gentl/       universal GenTL producer: core, GVCP, GigE, U3V, simulator,
 gateway/     Linux relay gateway: relay core, camera backends, CLI
 virtual/     virtual-camera fronts: GigE, U3V and the Null source
 board/       Orange Pi deployment assets
-docs/        engineering records (design, interoperability, performance, decisions)
+docs/        engineering records (governance, design, validation, performance)
 notes/       specifications (local only; AIA/A3/EMVA copyrights)
 scripts/     shared build/deployment helpers
 ```
@@ -52,7 +52,7 @@ scripts/     shared build/deployment helpers
 The GenTL producer source is shared by Linux and Windows; only the packaged
 artifact differs (`lib*.so -> .cti` vs `*.dll -> .cti`). Platform-specific
 build notes live under `gentl/platforms/`. See
-[`docs/repository-layout.md`](docs/repository-layout.md) for the full tree
+[`docs/20-design/repository-layout.md`](docs/20-design/repository-layout.md) for the full tree
 and dependency direction.
 
 ## Status
@@ -72,19 +72,19 @@ and dependency direction.
     Mono8 while NI and GenTL can use Mono16.
   - Performance at 30 fps: about 10–16% of one board CPU core. GigE saturates
     at 44.7 fps / 117 MB/s (1 Gbps); U3V reaches about 95 fps / 249 MB/s.
-    See `docs/vgige-performance-2026-11-04.md`.
+    See `docs/40-performance/vgige-performance-2026-11-04.md`.
 - GenTL CTI packaging: `cargo cti` produces `.cti` twins on both Windows
   (`.dll`) and Linux (`.so`), and `TL_INFO_PATHNAME` reports the loaded CTI
   path on both platforms.
 - Standards status: the core GigE/U3V/GenTL paths are audited, but this is a
   supported-subset implementation, not a claim of complete GigE Vision 3.0 /
   USB3 Vision 1.2 compliance. See
-  `docs/compliance-status-2026-11-11.md`.
+  `docs/10-protocol/compliance-status-2026-11-11.md`.
 - Third-party host status: NI MAX/NI-IMAQdx works; MVS native GigE opens the
   virtual camera and receives Mono16 tagged with the standard PFNC value
   `0x01100007` (the old `0x01100001` was not PFNC and made MVS display the
-  16-bit stream as a garbled image). See `docs/interop-matrix.md` and
-  `docs/vgige-board-kernel-interop-2026-11-04.md`.
+  16-bit stream as a garbled image). See `docs/30-validation/interop-matrix.md` and
+  `docs/30-validation/vgige-board-kernel-interop-2026-11-04.md`.
 
 ## License
 

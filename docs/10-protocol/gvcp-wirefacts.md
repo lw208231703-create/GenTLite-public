@@ -7,7 +7,7 @@
 | 字节 | 字段 | 说明 |
 |---|---|---|
 | 0 | key | 固定 0x42 |
-| 1 | flag | ACKNOWLEDGE=0x80（lsb 编号 bit7=msb；规范图为 msb 先行编号、§15.1 示例字面写 0x01——两种编码真机均见使用，见 OPEN-QUESTIONS Q27），bit0-3 命令特定，其余保留 0 |
+| 1 | flag | ACKNOWLEDGE=0x80（lsb 编号 bit7=msb；规范图为 msb 先行编号、§15.1 示例字面写 0x01——两种编码真机均见使用，见 docs/00-governance/OPEN-QUESTIONS.md Q27），bit0-3 命令特定，其余保留 0 |
 | 2-3 | command | u16 BE，命令码 |
 | 4-5 | length | u16 BE，**载荷字节数（不含头）** |
 | 6-7 | req_id | u16 BE，应用生成，从 1 递增，不得为 0 |

@@ -40,7 +40,7 @@ gentl/       通用 GenTL producer：core、GVCP、GigE、U3V、simulator、
 gateway/     Linux 中转网关：relay core、相机 backends、CLI
 virtual/     虚拟相机前端：GigE、U3V 和 Null 源
 board/       Orange Pi 板端部署资产
-docs/        工程记录（设计、互操作、性能、决策）
+docs/        工程记录（治理、设计、验收、性能）
 notes/       规范原文（仅本地；AIA/A3/EMVA 版权）
 scripts/     共享构建/部署脚本
 ```
@@ -48,7 +48,7 @@ scripts/     共享构建/部署脚本
 GenTL producer 的源码由 Linux 和 Windows 共用，区别只在最终打包产物
 （`lib*.so -> .cti` 与 `*.dll -> .cti`）；平台构建说明放在
 `gentl/platforms/`。完整目录树和依赖方向见
-[`docs/repository-layout.md`](docs/repository-layout.md)。
+[`docs/20-design/repository-layout.md`](docs/20-design/repository-layout.md)。
 
 ## 状态
 
@@ -64,16 +64,16 @@ GenTL producer 的源码由 Linux 和 Windows 共用，区别只在最终打包�
     可选 Mono16。
   - 30 fps 板端 CPU 约单核 10–16%；GigE 在 1 Gbps 下最高约 44.7 fps /
     117 MB/s，U3V 最高约 95 fps / 249 MB/s。详见
-    `docs/vgige-performance-2026-11-04.md`。
+    `docs/40-performance/vgige-performance-2026-11-04.md`。
 - GenTL CTI 打包：`cargo cti` 在 Windows（`.dll`）和 Linux（`.so`）都能
   生成 `.cti`；两平台的 `TL_INFO_PATHNAME` 都能返回实际加载路径。
 - 规范状态：GigE/U3V/GenTL 核心路径已审计，但当前是“核心路径合规 +
   明确支持子集”，不能宣称完全符合 GigE Vision 3.0 / USB3 Vision 1.2
-  全部条款。详见 `docs/compliance-status-2026-11-11.md`。
+  全部条款。详见 `docs/10-protocol/compliance-status-2026-11-11.md`。
 - 第三方宿主：NI MAX/NI-IMAQdx 正常；MVS 原生 GigE 已按标准 PFNC
   `Mono16 = 0x01100007` 打开并取流（旧值 `0x01100001` 非 PFNC，MVS 会把
-  16-bit 流显示成花屏）。详见 `docs/interop-matrix.md` 与
-  `docs/vgige-board-kernel-interop-2026-11-04.md`。
+  16-bit 流显示成花屏）。详见 `docs/30-validation/interop-matrix.md` 与
+  `docs/30-validation/vgige-board-kernel-interop-2026-11-04.md`。
 
 ## 许可
 

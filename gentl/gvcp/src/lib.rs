@@ -1,6 +1,6 @@
 //! GVCP (GigE Vision Control Protocol) wire implementation.
 //!
-//! Contract: docs/gvcp-wirefacts.md (extracted from the GigE Vision spec).
+//! Contract: docs/10-protocol/gvcp-wirefacts.md (extracted from the GigE Vision spec).
 //! Both the producer's control channel (gentl-gige) and the software
 //! camera (gentl-simulator) build on this crate so the two sides can never
 //! disagree on the wire format.

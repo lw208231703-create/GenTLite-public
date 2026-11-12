@@ -2,7 +2,7 @@
 
 Orange Pi 5 Plus 上把 Linux 板子模拟成 USB3 Vision 相机的完整 bring-up 过程。
 最终状态：**grab_u3v 500/500 帧 × 背靠背两连跑全绿**。本文按层归档全部坑位：
-症状 → 根因 → 修法。对应 Q&A 见 `OPEN-QUESTIONS.md` Q39 补充二~五。
+症状 → 根因 → 修法。对应 Q&A 见 `docs/00-governance/OPEN-QUESTIONS.md` Q39 补充二~五。
 
 ## 最终可用配置快照（复现基线）
 

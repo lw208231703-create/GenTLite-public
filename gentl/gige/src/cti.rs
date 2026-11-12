@@ -79,7 +79,7 @@ impl GevInterface {
 
 /// One device entry in an interface's device list.
 pub struct DeviceEntry {
-    /// GenTL device ID (MAC string, see docs/OPEN-QUESTIONS Q4).
+    /// GenTL device ID (MAC string, see docs/00-governance/OPEN-QUESTIONS.md Q4).
     pub id: String,
     pub discovery: DiscoveryInfo,
 }

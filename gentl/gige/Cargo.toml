@@ -35,7 +35,7 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [target.'cfg(unix)'.dependencies]
-# Phase A Linux port (docs/PENDING.md "Linux 可移植"): getifaddrs NIC
+# Phase A Linux port (docs/00-governance/PENDING.md "Linux 可移植"): getifaddrs NIC
 # enumeration, SO_RCVBUF, sched_setaffinity (see src/sys.rs).
 libc = "0.2"
 

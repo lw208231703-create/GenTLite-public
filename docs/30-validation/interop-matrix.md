@@ -22,7 +22,7 @@
   - Null 相机同时提供 Mono8/Mono16；MVS/LD 可用 Mono8，NI/GenTL 可用 Mono16。
   - 性能：30 fps 板端 CPU 约单核 10–16%；GigE 上限约 44.7 fps /
     117 MB/s（1 Gbps），U3V 上限约 95 fps / 249 MB/s。详见
-    `docs/vgige-performance-2026-11-04.md`。
+    `docs/40-performance/vgige-performance-2026-11-04.md`。
 - MVS / LD：
   - 8-bit 虚拟图像可显示。
   - 16-bit 曾显示花屏/不显示；根因是旧 Null 后端把 `Mono16` 写成
@@ -34,7 +34,7 @@
 - NI test packet：设备侧 `SCPS fire_test_packet` 已实现；NI 5/5 帧通过。
 - 驱动互斥：U3V 同一时间只能绑定 NI-IMAQdx 或 WinUSB；当前 PC 侧为
   NI-IMAQdx，GenTL U3V 需临时切 WinUSB。
-- 详细记录：`docs/vgige-board-kernel-interop-2026-11-04.md`。
+- 详细记录：`docs/30-validation/vgige-board-kernel-interop-2026-11-04.md`。
 
 ## 维度 1：第三方宿主 + 我们的 CTI + 真实相机
 

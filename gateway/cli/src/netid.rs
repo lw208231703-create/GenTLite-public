@@ -147,7 +147,7 @@ fn resolve_up_link_impl(up_ip: Ipv4Addr) -> GentlResult<UpLink> {
 }
 
 /// IPv4 prefix length (CIDR) to dotted mask (same math as the producer's
-/// NIC enumeration; docs/gvcp-wirefacts.md Q31 era).
+/// NIC enumeration; docs/10-protocol/gvcp-wirefacts.md Q31 era).
 #[cfg(windows)]
 fn prefix_len_to_mask(prefix: u8) -> u32 {
     if prefix >= 32 {

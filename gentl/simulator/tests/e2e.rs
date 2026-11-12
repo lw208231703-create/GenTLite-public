@@ -101,7 +101,7 @@ fn error_statuses_over_the_wire() {
     // Read-only register.
     client.read_reg(reg::VERSION).unwrap();
     // CCP dance between two clients. The simplified model cannot tell peers
-    // apart (DeviceHandler carries no (ip, port); see OPEN-QUESTIONS Q7), so
+    // apart (DeviceHandler carries no (ip, port); see docs/00-governance/OPEN-QUESTIONS.md Q7), so
     // an identical re-request counts as an R-069cd refresh and denial is
     // exercised with a different privilege.
     let other = GvcpClient::connect(Ipv4Addr::LOCALHOST, port).unwrap();

@@ -84,7 +84,7 @@ impl Drop for LibUsbDevice {
 /// Interfaces are claimed at collect time (descriptor order kept for the
 /// stream endpoints, CR-123st: stream index = SIRM order). The event
 /// interface is claimed too — GenTL event delivery over the DEI is a
-/// follow-up (docs/OPEN-QUESTIONS.md UQ7), but claiming keeps the
+/// follow-up (docs/00-governance/OPEN-QUESTIONS.md UQ7), but claiming keeps the
 /// endpoint owned by this producer instead of racing a later claim.
 pub struct InterfaceSet {
     device: Arc<LibUsbDevice>,

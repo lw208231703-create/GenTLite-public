@@ -38,7 +38,7 @@ pub enum GentlError {
     OutOfMemory,
     AccessDenied,
     Busy,
-    /// Raw GEV status code from a GVCP acknowledge (see docs/gvcp-wirefacts.md).
+    /// Raw GEV status code from a GVCP acknowledge (see docs/10-protocol/gvcp-wirefacts.md).
     GevStatus(u16),
 }
 
