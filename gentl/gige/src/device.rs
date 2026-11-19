@@ -166,6 +166,32 @@ impl GevDevice {
         crate::payload::decode_payload_value(&reg, &bytes)
     }
 
+    /// Packet size advertised by the device XML before §11.7 negotiation.
+    ///
+    /// This is the fallback for devices whose test-packet search fails (a
+    /// 1.2 camera may accept the SCPSx writes but never return a usable
+    /// test packet). Reading the XML's `GevSCPSPacketSize` register before
+    /// the search preserves the factory/default value so the caller can
+    /// restore it instead of leaving SCPSx at a probe value.
+    pub fn stream_packet_size_hint(&self) -> Option<u32> {
+        let url = {
+            let client = self.client.lock().ok()?;
+            client.xml_url().ok()?
+        };
+        if !url.starts_with("local:") && !url.starts_with("Local:") {
+            return None;
+        }
+        let xml = crate::payload::fetch_xml(&url, |addr, buf| self.read_mem(u64::from(addr), buf))?;
+        let text = String::from_utf8_lossy(&xml);
+        let defaults = crate::payload::parse_stream_defaults(&text);
+        let reg = defaults.packet_size?;
+        let mut bytes = vec![0u8; reg.length];
+        self.read_mem(u64::from(reg.address), &mut bytes).ok()?;
+        let value = crate::payload::decode_payload_value(&reg, &bytes)?;
+        let size = (value as u32) & gentl_gvcp::registers::SCPS_SIZE_MASK;
+        (size > gentl_gvcp::gvsp::GVSP_LEGACY_HEADERS_OVERHEAD).then_some(size)
+    }
+
     fn payload_reg(&self) -> Option<crate::payload::PayloadReg> {
         let cached = self.payload_reg.lock().ok()?.clone();
         if let Some(reg) = cached {

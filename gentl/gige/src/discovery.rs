@@ -91,20 +91,22 @@ fn extra_targets() -> Vec<(Ipv4Addr, u16)> {
 }
 
 /// Desired GVSP stream channel count from `GENTLITE_GEV_STREAM_CHANNELS`.
-/// Unset or unparseable: 8. `0`: open every channel the device implements
-/// (probe all 512 slots — channels 1..511 are optional, spec §36.57).
-/// Anything else is clamped to 1..=512. The opened count is always
-/// min(desired, device channels); channel open failures degrade to the
-/// channels already opened (see `GevDataStream::start`).
-pub(crate) fn desired_stream_channels() -> u32 {
-    const DEFAULT: u32 = 8;
+/// Unset or unparseable: `default` (the device's `NUM_STREAM_CHANNELS`,
+/// or 1 when that bootstrap read fails). `0`: open every channel the
+/// device could implement (probe all 512 slots — channels 1..511 are
+/// optional, spec §36.57). Anything else is clamped to 1..=512. The
+/// opened count is always min(desired, device channels); channel open
+/// failures degrade to the channels already opened (see
+/// `GevDataStream::start`).
+pub(crate) fn desired_stream_channels(default: u32) -> u32 {
+    let default = default.clamp(1, 512);
     match std::env::var("GENTLITE_GEV_STREAM_CHANNELS") {
         Ok(v) => match v.trim().parse::<u32>() {
             Ok(0) => 512,
             Ok(n) => n.clamp(1, 512),
-            Err(_) => DEFAULT,
+            Err(_) => default,
         },
-        Err(_) => DEFAULT,
+        Err(_) => default,
     }
 }
 
@@ -179,15 +181,16 @@ mod tests {
         let old = std::env::var(var).ok();
 
         std::env::remove_var(var);
-        assert_eq!(desired_stream_channels(), 8, "unset defaults to 8");
+        assert_eq!(desired_stream_channels(8), 8, "unset uses device count");
+        assert_eq!(desired_stream_channels(1), 1);
         std::env::set_var(var, "0");
-        assert_eq!(desired_stream_channels(), 512, "0 = probe all channels");
+        assert_eq!(desired_stream_channels(1), 512, "0 = probe all channels");
         std::env::set_var(var, "3");
-        assert_eq!(desired_stream_channels(), 3);
+        assert_eq!(desired_stream_channels(1), 3);
         std::env::set_var(var, "99999");
-        assert_eq!(desired_stream_channels(), 512, "clamped to the 512-slot map");
+        assert_eq!(desired_stream_channels(1), 512, "clamped to the 512-slot map");
         std::env::set_var(var, "garbage");
-        assert_eq!(desired_stream_channels(), 8, "unparseable defaults");
+        assert_eq!(desired_stream_channels(1), 1, "unparseable uses device count");
 
         match old {
             Some(v) => std::env::set_var(var, v),

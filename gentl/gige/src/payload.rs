@@ -129,6 +129,82 @@ pub fn decode_payload_value(reg: &PayloadReg, bytes: &[u8]) -> Option<usize> {
     usize::try_from(value).ok().filter(|size| *size > 0)
 }
 
+/// Stream defaults exposed by the device XML. The registers are kept as
+/// [`PayloadReg`] so the caller can read them through the same GVCP path
+/// used for `PayloadSize`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamDefaults {
+    pub packet_size: Option<PayloadReg>,
+    pub packet_size_min: Option<PayloadReg>,
+    pub packet_size_max: Option<PayloadReg>,
+}
+
+/// Resolve the packet-size registers from `GevSCPSPacketSize`.
+///
+/// Typical chain: `Integer GevSCPSPacketSize` -> `IntConverter
+/// GevSCPSPacketSizeVal_Reg` -> `IntReg GevSCPSPacketSizeVal_INT`
+/// (address `0xd04`), with `pMin`/`pMax` pointing at
+/// `GevSCPSMin_Reg`/`GevSCPSMax_Reg`. A missing feature or a feature
+/// without an address yields `None`; the caller then keeps the factory
+/// SCPSx value.
+pub fn parse_stream_defaults(xml: &str) -> StreamDefaults {
+    let feature = find_element(xml, "Integer", "GevSCPSPacketSize");
+    let resolve = |name: &str| resolve_int_reg(xml, name.trim());
+    StreamDefaults {
+        packet_size: feature
+            .and_then(|f| child_text(f, "pValue"))
+            .and_then(resolve),
+        packet_size_min: feature
+            .and_then(|f| child_text(f, "pMin"))
+            .and_then(resolve)
+            .or_else(|| resolve_int_reg(xml, "GevSCPSMin_Reg")),
+        packet_size_max: feature
+            .and_then(|f| child_text(f, "pMax"))
+            .and_then(resolve)
+            .or_else(|| resolve_int_reg(xml, "GevSCPSMax_Reg")),
+    }
+}
+
+/// Follow one `pValue` chain to an `IntReg`/`MaskedIntReg`. Supports the
+/// converter/knife nodes used by real camera XMLs between the feature and
+/// the backing register.
+fn resolve_int_reg<'a>(xml: &'a str, mut name: &'a str) -> Option<PayloadReg> {
+    for _ in 0..8 {
+        let inner = [
+            "Integer",
+            "IntReg",
+            "MaskedIntReg",
+            "IntConverter",
+            "Converter",
+            "SwissKnife",
+            "Boolean",
+        ]
+        .iter()
+        .find_map(|tag| find_element(xml, tag, name))?;
+        if let Some(address) = child_text(inner, "Address") {
+            let address = parse_u32(address)?;
+            let length = child_text(inner, "Length")
+                .and_then(|s| s.trim().parse::<usize>().ok())
+                .unwrap_or(4);
+            if length == 0 || length > 8 {
+                return None;
+            }
+            let big_endian = !matches!(
+                child_text(inner, "Endianess").map(str::trim),
+                Some("LittleEndian")
+            );
+            return Some(PayloadReg {
+                address,
+                length,
+                big_endian,
+                mask: parse_mask(inner, length, big_endian),
+            });
+        }
+        name = child_text(inner, "pValue")?.trim();
+    }
+    None
+}
+
 fn parse_mask(inner: &str, length: usize, big_endian: bool) -> Option<(u8, u8)> {
     let bits = length.checked_mul(8)?;
     if bits > 64 {
@@ -410,6 +486,47 @@ mod tests {
         assert!(fetch_xml("http://192.0.2.1/cam.xml", |_, _| Ok(())).is_none());
         assert!(fetch_xml("local:cam.xml;zz;10", |_, _| Ok(())).is_none());
         assert!(fetch_xml("local:cam.xml;100;0", |_, _| Ok(())).is_none());
+    }
+
+    #[test]
+    fn stream_defaults_follow_packet_size_converter_chain() {
+        let xml = r#"
+            <Integer Name="GevSCPSPacketSize">
+              <pValue>GevSCPSPacketSizeVal_Reg</pValue>
+              <pMin>GevSCPSMin_Reg</pMin>
+              <pMax>GevSCPSMax_Reg</pMax>
+            </Integer>
+            <IntConverter Name="GevSCPSPacketSizeVal_Reg">
+              <pValue>GevSCPSPacketSizeVal_INT</pValue>
+            </IntConverter>
+            <IntReg Name="GevSCPSPacketSizeVal_INT">
+              <Address>0xd04</Address>
+              <Length>4</Length>
+              <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="GevSCPSMin_Reg">
+              <Address>0x10000064</Address>
+              <Length>4</Length>
+              <Endianess>BigEndian</Endianess>
+            </IntReg>
+            <IntReg Name="GevSCPSMax_Reg">
+              <Address>0x10000068</Address>
+              <Length>4</Length>
+              <Endianess>BigEndian</Endianess>
+            </IntReg>
+        "#;
+        let d = parse_stream_defaults(xml);
+        assert_eq!(d.packet_size.unwrap().address, 0xd04);
+        assert_eq!(d.packet_size_min.unwrap().address, 0x1000_0064);
+        assert_eq!(d.packet_size_max.unwrap().address, 0x1000_0068);
+    }
+
+    #[test]
+    fn missing_stream_defaults_are_none() {
+        let d = parse_stream_defaults("<Integer Name=\"Width\"/>");
+        assert!(d.packet_size.is_none());
+        assert!(d.packet_size_min.is_none());
+        assert!(d.packet_size_max.is_none());
     }
 
     #[test]

@@ -486,34 +486,67 @@ fn open_channel(
     port: u16,
     socket: &UdpSocket,
     test_data_supported: bool,
+    xml_packet_size: Option<u32>,
 ) -> GentlResult<()> {
     if registers::scp_host_port(c.read_reg(registers::scp(x))?) != 0 {
         c.write_reg(registers::scp(x), registers::scp_make(0))?;
     }
-    c.write_reg(registers::scda(x), u32::from(local_ip))?;
-    c.write_reg(registers::scp(x), registers::scp_make(port))?;
-    if registers::scp_host_port(c.read_reg(registers::scp(x))?) == 0 {
-        return Err(GentlError::Io(format!(
-            "stream channel {x} did not open (SCPx host_port reads back 0)"
-        )));
-    }
-    // M3-2 (§11.7, R-567s): the channel is open and regular streaming has
-    // not started, so this is the negotiation window. Unset/0 env =
-    // test-packet search; >0 = fixed size, written and read back without
-    // a test packet. Any SCPSx transaction error abandons negotiation
-    // silently — an old or read-only device must not fail the stream
-    // start. After the search, drain whatever the window left on the
-    // socket before the receiver thread starts.
-    match desired_packet_size() {
-        0 => {
-            negotiate_packet_size(c, x, socket, test_data_supported);
+    // Preserve the factory/default SCPSx before any 11.7 probe writes it.
+    // This is both the fallback and the value restored if negotiation
+    // fails, so a failed search cannot leave SCPSx at zero/65535.
+    let factory_scps = c.read_reg(registers::scps(x)).ok();
+    let result = (|| -> GentlResult<()> {
+        c.write_reg(registers::scda(x), u32::from(local_ip))?;
+        c.write_reg(registers::scp(x), registers::scp_make(port))?;
+        if registers::scp_host_port(c.read_reg(registers::scp(x))?) == 0 {
+            return Err(GentlError::Io(format!(
+                "stream channel {x} did not open (SCPx host_port reads back 0)"
+            )));
         }
-        fixed => {
-            fixed_packet_size(c, x, fixed);
+        // Unset/0 env = 11.7 test-packet search; >0 = fixed size. A 1.2
+        // camera may accept the SCPSx writes but never return a usable
+        // test packet: restore the XML/factory value in that case.
+        let selected = match desired_packet_size() {
+            0 => negotiate_packet_size(c, x, socket, test_data_supported)
+                .or_else(|| fallback_packet_size(c, x, factory_scps, xml_packet_size)),
+            fixed => fixed_packet_size(c, x, fixed),
+        };
+        if selected.is_none() {
+            if let Some(raw) = factory_scps {
+                let _ = c.write_reg(registers::scps(x), raw);
+            }
+        }
+        drain_socket(socket);
+        Ok(())
+    })();
+    if result.is_err() {
+        // Close a partially opened channel so a failed negotiation cannot
+        // leave the device in a streaming state.
+        let _ = c.write_reg(registers::scp(x), registers::scp_make(0));
+    }
+    result
+}
+
+fn fallback_packet_size(
+    c: &GvcpClient,
+    x: u32,
+    factory_scps: Option<u32>,
+    xml_packet_size: Option<u32>,
+) -> Option<u32> {
+    let factory_size = factory_scps.map(registers::scps_packet_size);
+    for size in [xml_packet_size, factory_size]
+        .into_iter()
+        .flatten()
+        .filter(|size| *size > gvsp::GVSP_LEGACY_HEADERS_OVERHEAD)
+    {
+        if let Some(granted) = fixed_packet_size(c, x, size) {
+            return Some(granted);
         }
     }
-    drain_socket(socket);
-    Ok(())
+    if let Some(raw) = factory_scps {
+        let _ = c.write_reg(registers::scps(x), raw);
+    }
+    None
 }
 
 /// Data Stream module behind DS_HANDLE.
@@ -573,14 +606,23 @@ impl GevDataStream {
             let c = control
                 .lock()
                 .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
+            // The bootstrap COUNT_STREAM_CHANNELS (0x0904) is authoritative
+            // when readable. Do not probe seven optional channels on a
+            // single-channel device: the old default of 8 was both slow and
+            // unsafe for cameras whose stream state machine dislikes SCPx
+            // reads. An explicit GENTLITE_GEV_STREAM_CHANNELS still wins.
+            let reported = c
+                .read_reg(registers::NUM_STREAM_CHANNELS)
+                .ok()
+                .filter(|n| *n > 0)
+                .unwrap_or(1)
+                .min(512);
+            let desired = desired_stream_channels(reported);
             // §36.57: channels 1..511 are optional; a device without
             // channel x answers GEV_STATUS_INVALID_ADDRESS — the probe
-            // terminator. The probe stops at `desired` channels: a device
-            // implementing more cannot be used anyway. Any other failure
-            // stops the probe too: the count is best-effort and degrades,
-            // never errors (a device that drops probe reads still gets
-            // its channel 0).
-            let desired = desired_stream_channels();
+            // terminator. Any other failure stops the probe too: the
+            // count is best-effort and degrades, never errors (a device
+            // that drops probe reads still gets its channel 0).
             let mut have = 1u32; // channel 0 always exists
             for x in 1..desired {
                 match c.read_reg(registers::scp(x)) {
@@ -676,6 +718,10 @@ impl GevDataStream {
                 enabled: device.packet_resend_supported && desired_resend(),
                 frame_retention: desired_frame_retention(),
             };
+            // Read the XML's factory/default packet size before any test
+            // packet search writes SCPSx. Used only as the channel-0
+            // fallback; other channels keep their own factory value.
+            let xml_packet_size = device.stream_packet_size_hint();
             let channels = self.channels.lock().unwrap();
             let mut opened = 0usize;
             let mut first_err: Option<GentlError> = None;
@@ -686,12 +732,21 @@ impl GevDataStream {
                     .local_addr()
                     .map_err(GentlError::from)?
                     .port();
+                let hint = if x == 0 { xml_packet_size } else { None };
                 let res = {
                     let c = self
                         .control
                         .lock()
                         .map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-                    open_channel(&c, x, local_ip, port, &channels[idx].socket, test_data_supported)
+                    open_channel(
+                        &c,
+                        x,
+                        local_ip,
+                        port,
+                        &channels[idx].socket,
+                        test_data_supported,
+                        hint,
+                    )
                 };
                 match res {
                     Ok(()) => {
@@ -723,6 +778,12 @@ impl GevDataStream {
                         opened += 1;
                     }
                     Err(e) => {
+                        // open_channel already tries to close the channel,
+                        // but keep this belt-and-braces close for a failure
+                        // before it reached its own cleanup block.
+                        if let Ok(c) = self.control.lock() {
+                            let _ = c.write_reg(registers::scp(x), registers::scp_make(0));
+                        }
                         first_err = Some(e);
                         break;
                     }
