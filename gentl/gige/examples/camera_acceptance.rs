@@ -326,7 +326,9 @@ impl Session {
     }
 
     fn apply(&self, cfg: &Config) -> Result<(), String> {
-        // A previous failed stream may have left TLParamsLocked set.
+        // TLParamsLocked is a transient stream-state lock, not persistent
+        // configuration. A previous failed stream may have left it set;
+        // clear it before touching any feature register.
         wr32(self.port, TL_PARAMS_LOCKED, 0)?;
         // Clear offsets first so a smaller width/height never conflicts
         // with an old offset, then set the new size and new offsets.
@@ -921,11 +923,20 @@ fn run(wanted: Option<String>, out_dir: &Path) -> Result<(), String> {
     s.stop_stream();
     let restore_result = restore_config(&s, &original_config);
     s.stop_stream();
-    let restored = s
-        .read_config()
+    let restored_cfg = s.read_config();
+    let restored = restored_cfg
+        .as_ref()
         .map(|c| c.describe())
         .unwrap_or_else(|e| format!("readback failed: {e}"));
-    summary.push_str(&format!("restored original={restored}\n"));
+    let locked_after = restored_cfg
+        .as_ref()
+        .map(|c| c.locked.to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    summary.push_str(&format!(
+        "restored original={restored}\n\
+         tlparams_locked original={} after={locked_after}\n",
+        original_config.locked
+    ));
     let summary_name = match only.as_deref() {
         Some(name) => format!("summary-{name}.txt"),
         None => "summary.txt".to_string(),
@@ -940,6 +951,12 @@ fn run(wanted: Option<String>, out_dir: &Path) -> Result<(), String> {
 /// Restore the user's pre-test configuration. ExposureTime and
 /// AcquisitionFrameRate invalidate each other on this camera, so retry
 /// once with the opposite write order if the first readback differs.
+///
+/// TLParamsLocked is intentionally not restored: it is a transient
+/// stream-state lock, not persistent configuration. The run clears it and
+/// must leave it clear, otherwise a stale pre-test 1 would lock the camera
+/// for the next consumer. A non-zero readback after restore is an error;
+/// the original value is recorded in the summary instead.
 fn restore_config(s: &Session, cfg: &Config) -> Result<(), String> {
     s.apply(cfg)?;
     let mut actual = s.read_config()?;
@@ -953,6 +970,12 @@ fn restore_config(s: &Session, cfg: &Config) -> Result<(), String> {
         return Err(format!(
             "restore mismatch: wanted exp={} fps={}, got exp={} fps={}",
             cfg.exposure, cfg.frame_rate, actual.exposure, actual.frame_rate
+        ));
+    }
+    if actual.locked != 0 {
+        return Err(format!(
+            "TLParamsLocked still {} after restore (must be 0; original was {})",
+            actual.locked, cfg.locked
         ));
     }
     Ok(())
