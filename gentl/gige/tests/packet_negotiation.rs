@@ -1,5 +1,5 @@
 //! M3-2 end-to-end: §11.7 packet-size negotiation against the sim, default
-//! mode (no `GENTLITE_GEV_PACKET_SIZE` — automatic test-packet search).
+//! mode (no `GENTLITE_GEV_PACKET_SIZE` �?automatic test-packet search).
 //!
 //! The sim's GVSP emitter accepts fire-carrying SCPS0 writes while its
 //! auto-stream runs (docs/00-governance/OPEN-QUESTIONS.md Q33), so the producer's
@@ -17,6 +17,7 @@
 use std::ffi::{c_char, c_void};
 use std::net::Ipv4Addr;
 use std::ptr;
+use std::sync::Mutex;
 
 use gentl_core::types::*;
 use gentl_gige::*;
@@ -30,6 +31,10 @@ const NUM_BUFFERS: usize = 4;
 const W: u32 = 320;
 const H: u32 = 240;
 const PF: u32 = 0x0108_0001; // PFNC_Mono8
+
+/// `GCInitLib` and the discovery env vars are process-global; the two
+/// scenarios must not run concurrently inside one test binary.
+static TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn get_string(mut f: impl FnMut(*mut c_char, *mut usize) -> GCError) -> (GCError, String) {
     let mut buf = [0u8; 1024];
@@ -51,7 +56,7 @@ fn read_port(h: PortHandle, addr: u64, buf: &mut [u8]) -> GCError {
 /// The sim's deterministic Mono8 pattern: pixel `p` of block `b` holds
 /// `(p + b) mod 256`. With a frame of W*H bytes spanning multiple GVSP
 /// payload packets, this only matches when the receiver placed every
-/// packet at `packet_id * (SCPS0 - 48)` — i.e. the negotiated stride.
+/// packet at `packet_id * (SCPS0 - 48)` �?i.e. the negotiated stride.
 fn check_payload(buf: &[u8], block_id: u64) {
     let n_pixels = (W * H) as usize;
     assert_eq!(buf.len(), n_pixels);
@@ -66,6 +71,7 @@ fn check_payload(buf: &[u8], block_id: u64) {
 
 #[test]
 fn packet_size_negotiation_end_to_end() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // Deliberately NOT touching GENTLITE_GEV_PACKET_SIZE / _RCVBUF_KB /
     // _RX_CORES: the default path (auto negotiation, default socket
     // tuning) is what this test exercises, and it stays race-free against
@@ -239,4 +245,153 @@ fn packet_size_negotiation_end_to_end() {
     assert_eq!(IFClose(iface), GC_ERR_SUCCESS);
     assert_eq!(TLClose(tl), GC_ERR_SUCCESS);
     server.stop();
+    assert_eq!(GCCloseLib(), GC_ERR_SUCCESS);
+}
+
+/// §11.7 fallback regression: when no test packet arrives, the producer
+/// must restore the factory SCPSx (the sim XML has no `GevSCPSPacketSize`
+/// hint), keep the channel open, and stream with that stride. A second
+/// start must negotiate/fallback again from a clean state.
+///
+/// The sim hooks model a 1.2 camera: fire-carrying writes are accepted but
+/// no test datagram is emitted, and plain SCPSx writes are still accepted
+/// in the post-open negotiation window.
+#[test]
+fn packet_size_fallback_to_factory_scps_and_restart() {
+    let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    const FACTORY_TOTAL: u32 = 1448; // 1400 payload + 48-byte 3.0 budget
+
+    let cam = SimCamera::with_stream(
+        SimConfig {
+            mac: MAC,
+            ip: Ipv4Addr::LOCALHOST,
+            subnet_mask: Ipv4Addr::new(255, 0, 0, 0),
+            gateway: Ipv4Addr::UNSPECIFIED,
+            manufacturer_name: "GenTLite".into(),
+            model_name: "SimCam".into(),
+            device_version: "1.0.0".into(),
+            serial_number: "SIM-0001".into(),
+            streaming: StreamingProtocol::GvspOnly,
+        },
+        StreamConfig {
+            width: W,
+            height: H,
+            pixel_format: PF,
+            channels: 1,
+            legacy_headers: false,
+        },
+    );
+    cam.set_test_packets(false);
+    cam.set_block_scps_writes(false);
+    let server = cam.start(0).expect("start sim camera");
+    let port = server.local_port().expect("server port");
+    std::env::set_var("GENTLITE_GVCP_PORT", port.to_string());
+    std::env::set_var("GENTLITE_DISCOVERY_TARGETS", format!("127.0.0.1:{port}"));
+
+    assert_eq!(GCInitLib(), GC_ERR_SUCCESS);
+    let mut tl: TLHandle = ptr::null_mut();
+    assert_eq!(TLOpen(&mut tl), GC_ERR_SUCCESS);
+    let (r, iface_id) = get_string(|s, n| TLGetInterfaceID(tl, 0, s, n));
+    assert_eq!(r, GC_ERR_SUCCESS);
+    let mut iface: IFHandle = ptr::null_mut();
+    let c_iface = std::ffi::CString::new(iface_id).unwrap();
+    assert_eq!(TLOpenInterface(tl, c_iface.as_ptr(), &mut iface), GC_ERR_SUCCESS);
+    let mut changed = 0u8;
+    assert_eq!(IFUpdateDeviceList(iface, &mut changed, 200), GC_ERR_SUCCESS);
+    let mut dev: DevHandle = ptr::null_mut();
+    let c_dev = std::ffi::CString::new(DEVICE_ID).unwrap();
+    assert_eq!(
+        IFOpenDevice(iface, c_dev.as_ptr(), 4 /* exclusive */, &mut dev),
+        GC_ERR_SUCCESS
+    );
+    let (r, stream_id) = get_string(|s, n| DevGetDataStreamID(dev, 0, s, n));
+    assert_eq!(r, GC_ERR_SUCCESS);
+    let mut ds: DSHandle = ptr::null_mut();
+    let c_sid = std::ffi::CString::new(stream_id).unwrap();
+    assert_eq!(DevOpenDataStream(dev, c_sid.as_ptr(), &mut ds), GC_ERR_SUCCESS);
+    let mut port_h: PortHandle = ptr::null_mut();
+    assert_eq!(DevGetPort(dev, &mut port_h), GC_ERR_SUCCESS);
+
+    let payload_size = (W * H) as usize;
+    let mut buffers: Vec<Vec<u8>> = (0..NUM_BUFFERS).map(|_| vec![0u8; payload_size]).collect();
+    let mut handles: Vec<BufferHandle> = Vec::new();
+    for buf in buffers.iter_mut() {
+        let mut bh: BufferHandle = ptr::null_mut();
+        assert_eq!(
+            DSAnnounceBuffer(ds, buf.as_mut_ptr().cast(), buf.len(), ptr::null_mut(), &mut bh),
+            GC_ERR_SUCCESS
+        );
+        handles.push(bh);
+    }
+    for bh in &handles {
+        assert_eq!(DSQueueBuffer(ds, *bh), GC_ERR_SUCCESS);
+    }
+    let mut ev: EventHandle = ptr::null_mut();
+    assert_eq!(GCRegisterEvent(ds, 1 /* EVENT_NEW_BUFFER */, &mut ev), GC_ERR_SUCCESS);
+
+    let read_scps0 = || {
+        let mut raw = [0u8; 4];
+        assert_eq!(
+            read_port(port_h, u64::from(registers::SCPS0), &mut raw),
+            GC_ERR_SUCCESS
+        );
+        registers::scps_packet_size(u32::from_be_bytes(raw))
+    };
+    let next_frame = || {
+        let mut raw = [0u8; 16];
+        let mut n = raw.len();
+        assert_eq!(
+            EventGetData(ev, raw.as_mut_ptr().cast(), &mut n, 10_000),
+            GC_ERR_SUCCESS
+        );
+        let nd = unsafe { (raw.as_ptr() as *const EventNewBufferData).read_unaligned() };
+        let pos = handles
+            .iter()
+            .position(|h| *h == nd.buffer_handle)
+            .expect("event handle is one of ours");
+        let mut dtype: InfoDataType = 0;
+        let mut size = std::mem::size_of::<u64>();
+        let mut block_id = 0u64;
+        assert_eq!(
+            DSGetBufferInfo(ds, nd.buffer_handle, 16, &mut dtype, (&mut block_id as *mut u64).cast(), &mut size),
+            GC_ERR_SUCCESS
+        );
+        let mut filled = 0usize;
+        assert_eq!(
+            DSGetBufferInfo(ds, nd.buffer_handle, 9, &mut dtype, (&mut filled as *mut usize).cast(), &mut size),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(filled, payload_size, "BUFFER_INFO_SIZE_FILLED");
+        check_payload(&buffers[pos], block_id);
+        assert_eq!(DSQueueBuffer(ds, nd.buffer_handle), GC_ERR_SUCCESS);
+    };
+
+    // First start: no test packets -> fallback to the factory size.
+    assert_eq!(DSStartAcquisition(ds, 0, u64::MAX), GC_ERR_SUCCESS);
+    assert_eq!(read_scps0(), FACTORY_TOTAL, "factory SCPS0 restored");
+    next_frame();
+
+    // Second start: the restored value must still be the fallback size,
+    // and frames must keep flowing (no residual negotiation state).
+    assert_eq!(DSStopAcquisition(ds, 0), GC_ERR_SUCCESS);
+    assert_eq!(DSStartAcquisition(ds, 0, u64::MAX), GC_ERR_SUCCESS);
+    assert_eq!(read_scps0(), FACTORY_TOTAL, "restart keeps factory SCPS0");
+    next_frame();
+
+    assert_eq!(DSStopAcquisition(ds, 0), GC_ERR_SUCCESS);
+    assert_eq!(EventKill(ev), GC_ERR_SUCCESS);
+    assert_eq!(GCUnregisterEvent(ds, 1), GC_ERR_SUCCESS);
+    assert_eq!(DSFlushQueue(ds, 4 /* ACQ_QUEUE_ALL_DISCARD */), GC_ERR_SUCCESS);
+    for bh in &handles {
+        assert_eq!(
+            DSRevokeBuffer(ds, *bh, ptr::null_mut(), ptr::null_mut()),
+            GC_ERR_SUCCESS
+        );
+    }
+    assert_eq!(DSClose(ds), GC_ERR_SUCCESS);
+    assert_eq!(DevClose(dev), GC_ERR_SUCCESS);
+    assert_eq!(IFClose(iface), GC_ERR_SUCCESS);
+    assert_eq!(TLClose(tl), GC_ERR_SUCCESS);
+    server.stop();
+    assert_eq!(GCCloseLib(), GC_ERR_SUCCESS);
 }

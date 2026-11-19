@@ -157,6 +157,19 @@ impl SimCamera {
         self.device.set_packet_drop(drops);
     }
 
+    /// Test hook (§11.7 fallback regression): stop emitting test packets
+    /// while still accepting the fire-carrying SCPSx write.
+    pub fn set_test_packets(&self, enabled: bool) {
+        self.device.set_test_packets(enabled);
+    }
+
+    /// Test hook (§11.7 fallback regression): allow plain SCPSx writes
+    /// while the channel streams, as a 1.2 camera does during the post-open
+    /// negotiation window.
+    pub fn set_block_scps_writes(&self, block: bool) {
+        self.device.set_block_scps_writes(block);
+    }
+
     /// The embedded GenICam XML (tests, consumer-side validation).
     pub fn xml(&self) -> &str {
         &self.xml

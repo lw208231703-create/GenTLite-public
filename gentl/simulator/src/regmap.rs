@@ -33,6 +33,7 @@
 
 use std::collections::BTreeSet;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -214,6 +215,10 @@ pub struct SimRegMap {
     /// Whole-frame striped transmitter over the open stream channels; the
     /// channel set mirrors the open (non-zero host_port) SCPx registers.
     scheduler: StreamScheduler,
+    /// Test hook: when false, plain (no-fire) SCPSx writes are accepted
+    /// while the channel streams, modelling a 1.2 camera whose §11.7
+    /// window stays open for the packet-size fallback.
+    block_scps_writes: AtomicBool,
 }
 
 impl SimRegMap {
@@ -232,6 +237,7 @@ impl SimRegMap {
                 channels: vec![[0; 4]; n_channels],
             }),
             scheduler: StreamScheduler::new(),
+            block_scps_writes: AtomicBool::new(true),
         };
         m.init_bootstrap();
         m
@@ -584,6 +590,21 @@ impl SimRegMap {
         self.scheduler.set_packet_drop(Some(drops));
     }
 
+    /// Test hook (§11.7 fallback regression): stop emitting test packets.
+    /// The SCPSx writes still succeed, so the producer's search times out
+    /// and must restore the factory/XML packet size.
+    pub fn set_test_packets(&self, enabled: bool) {
+        self.scheduler.set_test_packets(enabled);
+    }
+
+    /// Test hook (§11.7 fallback regression): allow plain SCPSx writes
+    /// while the channel streams. A real 1.2 camera accepts them in the
+    /// post-open negotiation window; the default sim block makes the
+    /// successful fallback path unreachable.
+    pub fn set_block_scps_writes(&self, block: bool) {
+        self.block_scps_writes.store(block, Ordering::Relaxed);
+    }
+
     /// Write one stream channel register (spec §36.57–§36.60). `x` is the
     /// channel number and `off` the register's offset inside the channel's
     /// 0x40 block, both decoded from the address by
@@ -642,7 +663,10 @@ impl SimRegMap {
     fn write_scps(&self, x: u32, value: u32) -> Result<(), u16> {
         let fire = value & reg::SCPS_FIRE_TEST_PACKET != 0;
         let rounded = crate::emitter::round_packet_size(&self.stream, value);
-        if !fire && self.scheduler.is_streaming(x as u16) {
+        if !fire
+            && self.block_scps_writes.load(Ordering::Relaxed)
+            && self.scheduler.is_streaming(x as u16)
+        {
             return Err(GEV_STATUS_BUSY);
         }
         // Stored = the written value without the self-clearing fire bit
@@ -745,6 +769,17 @@ impl SimDevice {
     /// Test hook (§16.7 regression): payload packets to drop on send.
     pub fn set_packet_drop(&self, drops: Arc<Mutex<BTreeSet<(u64, u32)>>>) {
         self.map.set_packet_drop(drops);
+    }
+
+    /// Test hook (§11.7 fallback regression): emit test packets or not.
+    pub fn set_test_packets(&self, enabled: bool) {
+        self.map.set_test_packets(enabled);
+    }
+
+    /// Test hook (§11.7 fallback regression): block plain SCPSx writes
+    /// while streaming, or allow them in the negotiation window.
+    pub fn set_block_scps_writes(&self, block: bool) {
+        self.map.set_block_scps_writes(block);
     }
 }
 

@@ -230,6 +230,9 @@ pub(crate) struct StreamScheduler {
     /// Test hook (§16.7 regression): payload packets to drop on send.
     /// `None` means injection is off.
     drops: Arc<Mutex<Option<Arc<Mutex<PacketDrop>>>>>,
+    /// Test hook (§11.7 fallback regression): when false, fire-carrying
+    /// SCPSx writes are accepted but no test datagram is sent.
+    test_packets: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -239,6 +242,7 @@ impl StreamScheduler {
             stop: Arc::new(AtomicBool::new(false)),
             sinks: Arc::new(Mutex::new(HashMap::new())),
             drops: Arc::new(Mutex::new(None)),
+            test_packets: Arc::new(AtomicBool::new(true)),
             thread: Mutex::new(None),
         }
     }
@@ -248,6 +252,12 @@ impl StreamScheduler {
     /// a shared set the test mutates; `None` disables injection again.
     pub fn set_packet_drop(&self, drops: Option<Arc<Mutex<PacketDrop>>>) {
         *self.drops.lock().expect("sim scheduler poisoned") = drops;
+    }
+
+    /// Test hook (§11.7 fallback regression): suppress the test datagram
+    /// while still accepting the fire-carrying SCPSx write.
+    pub fn set_test_packets(&self, enabled: bool) {
+        self.test_packets.store(enabled, Ordering::Relaxed);
     }
 
     /// PACKETRESEND (§16.7.2): retransmit the cached packets of `block_id`
@@ -325,6 +335,9 @@ impl StreamScheduler {
     /// packet requested while the stream channel is closed ("the device
     /// can either ignore the request or return GEV_STATUS_INVALID_PARAMETER").
     pub fn send_test_packet(&self, channel: u16, total_size: u32) {
+        if !self.test_packets.load(Ordering::Relaxed) {
+            return;
+        }
         let g = self.sinks.lock().expect("sim scheduler poisoned");
         if let Some(sink) = g.get(&channel) {
             sink.send_test_packet(total_size);

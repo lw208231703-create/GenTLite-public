@@ -13,8 +13,9 @@
 //! M3-4a multi-stream fan-out: the single GenTL DataStream ("Stream0",
 //! GenTL surface unchanged) drives K GVSP channels, each with its own UDP
 //! socket, receiver thread, and reassembler, all feeding the same DsCore.
-//! K = min(device channels, `GENTLITE_GEV_STREAM_CHANNELS` default 8) —
-//! see [`crate::discovery::desired_stream_channels`]. Channels 1..511 are
+//! K = min(device channels, `GENTLITE_GEV_STREAM_CHANNELS`), defaulting to
+//! the bootstrap `COUNT_STREAM_CHANNELS` (0x0904, at least 1) — see
+//! [`crate::discovery::desired_stream_channels`]. Channels 1..511 are
 //! optional (spec §36.57): the count is probed by reading SCPx
 //! sequentially until the device answers GEV_STATUS_INVALID_ADDRESS. A
 //! secondary channel that fails to open degrades the stream to the
@@ -534,19 +535,31 @@ fn fallback_packet_size(
     xml_packet_size: Option<u32>,
 ) -> Option<u32> {
     let factory_size = factory_scps.map(registers::scps_packet_size);
-    for size in [xml_packet_size, factory_size]
+    let granted = first_accepted_packet_size([xml_packet_size, factory_size], |size| {
+        fixed_packet_size(c, x, size)
+    });
+    if granted.is_none() {
+        if let Some(raw) = factory_scps {
+            let _ = c.write_reg(registers::scps(x), raw);
+        }
+    }
+    granted
+}
+
+/// Try packet-size candidates in order, returning the first one the
+/// device accepts. Candidates at or below the legacy header budget cannot
+/// carry a payload byte and are skipped. This is deliberately separate
+/// from the GVCP writes so the preference order (XML before factory) and
+/// the all-failed case are unit-testable without a device.
+fn first_accepted_packet_size(
+    candidates: [Option<u32>; 2],
+    mut try_size: impl FnMut(u32) -> Option<u32>,
+) -> Option<u32> {
+    candidates
         .into_iter()
         .flatten()
         .filter(|size| *size > gvsp::GVSP_LEGACY_HEADERS_OVERHEAD)
-    {
-        if let Some(granted) = fixed_packet_size(c, x, size) {
-            return Some(granted);
-        }
-    }
-    if let Some(raw) = factory_scps {
-        let _ = c.write_reg(registers::scps(x), raw);
-    }
-    None
+        .find_map(|size| try_size(size))
 }
 
 /// Data Stream module behind DS_HANDLE.
@@ -960,5 +973,59 @@ mod tests {
         let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
         let ch = ChannelCtx::new(0, socket);
         assert!(ch.so_rcvbuf > 0, "getsockopt readback of SO_RCVBUF");
+    }
+
+    /// After a failed test-packet search the XML hint wins over the
+    /// factory SCPS value. Only the accepted candidate is written.
+    #[test]
+    fn packet_fallback_prefers_xml_hint() {
+        let mut tried = Vec::new();
+        let selected = first_accepted_packet_size([Some(9000), Some(1448)], |size| {
+            tried.push(size);
+            (size == 9000).then_some(size)
+        });
+        assert_eq!(selected, Some(9000));
+        assert_eq!(tried, vec![9000]);
+    }
+
+    /// A rejected XML hint falls through to the factory SCPS size.
+    #[test]
+    fn packet_fallback_falls_back_to_factory_scps() {
+        let mut tried = Vec::new();
+        let selected = first_accepted_packet_size([Some(9000), Some(1448)], |size| {
+            tried.push(size);
+            (size == 1448).then_some(size)
+        });
+        assert_eq!(selected, Some(1448));
+        assert_eq!(tried, vec![9000, 1448]);
+    }
+
+    /// No XML hint: the factory size is still tried.
+    #[test]
+    fn packet_fallback_without_xml_uses_factory() {
+        let mut tried = Vec::new();
+        let selected = first_accepted_packet_size([None, Some(1500)], |size| {
+            tried.push(size);
+            Some(size)
+        });
+        assert_eq!(selected, Some(1500));
+        assert_eq!(tried, vec![1500]);
+    }
+
+    /// Header-only/zero candidates are skipped, and an exhausted candidate
+    /// list returns None rather than inventing a size. `open_channel`
+    /// keeps the channel open in that case: packet-size negotiation is
+    /// best-effort, so a read-only/legacy device can still stream with its
+    /// factory stride.
+    #[test]
+    fn packet_fallback_rejects_header_only_and_exhaustion() {
+        let overhead = gvsp::GVSP_LEGACY_HEADERS_OVERHEAD;
+        let mut tried = Vec::new();
+        let selected = first_accepted_packet_size([Some(overhead), Some(overhead + 1)], |size| {
+            tried.push(size);
+            None
+        });
+        assert_eq!(selected, None);
+        assert_eq!(tried, vec![overhead + 1], "header-only size is skipped");
     }
 }
