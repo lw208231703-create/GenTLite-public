@@ -530,10 +530,21 @@ fn consumer_dll_end_to_end() {
         check(&api, "IFGetNumDevices", (api.IFGetNumDevices)(iface, &mut num_devs));
         assert!(num_devs >= 1, "discovery via GENTLITE_DISCOVERY_TARGETS found no device");
 
-        let dev_id = get_string(&api, "IFGetDeviceID", |s, n| {
-            (api.IFGetDeviceID)(iface, 0, s, n)
-        });
-        assert_eq!(dev_id, DEVICE_ID);
+        // Other GigE devices on the same host (for example the board's own
+        // virtual camera when these tests run on the board) may sort ahead
+        // of the loopback simulator. Select by the simulator's device ID
+        // instead of assuming index 0.
+        let found = (0..num_devs)
+            .map(|i| {
+                get_string(&api, "IFGetDeviceID", |s, n| {
+                    (api.IFGetDeviceID)(iface, i, s, n)
+                })
+            })
+            .any(|id| id == DEVICE_ID);
+        assert!(
+            found,
+            "device {DEVICE_ID} not discovered among {num_devs} device(s)"
+        );
 
         let c_dev = std::ffi::CString::new(DEVICE_ID).unwrap();
         let mut dev: DevHandle = ptr::null_mut();
