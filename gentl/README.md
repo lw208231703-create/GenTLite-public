@@ -18,6 +18,30 @@ MVTec HALCON, pylon and the project's own consumers.
 | `include/` | GenTL.h and PFNC.h reference headers |
 | `platforms/` | platform-specific build and host notes |
 
+## Producer / GenApi boundary
+
+A GenTL producer does not implement GenApi and does not evaluate feature
+nodes. The division of responsibility is:
+
+- The producer exposes discovery/open, the device XML URL
+  (`GCGetPortURL`), register/memory access (`GCReadPort`/`GCWritePort`),
+  data streams, buffers and events.
+- The consumer fetches the XML through the reported URL/port, builds the
+  GenApi node tree, and resolves feature names such as `ExposureTime`,
+  `Width`, `Height`, `OffsetX`, `OffsetY`, `TriggerMode`, `Gain`,
+  `ExposureAuto` or `UserSetSave` into register accesses.
+
+The producer inspects the XML only to resolve `PayloadSize` before
+`DSStartAcquisition`; it does not replace or rewrite the device XML. GigE
+devices serve their own First URL XML; U3V devices serve the manifest XML.
+Third-party consumers therefore see the camera's normal node tree.
+
+Optional GenTL calls currently not provided by both producers:
+`GCReadPortStacked` and `GCWritePortStacked`. `GCGetPortURLInfo` is
+implemented by the U3V producer and returns `NOT_IMPLEMENTED` from the
+GigE producer; use `GCGetPortURL` plus `GCReadPort` to fetch the device
+description.
+
 The Rust source is shared by Linux and Windows. Only the final artifact
 extension differs:
 

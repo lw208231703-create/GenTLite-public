@@ -7,7 +7,9 @@
 //! (GenTL 1.6 §6.4.4) to size their buffers; the first GVSP leader arrives
 //! too late for that check.
 //!
-//! This producer has no full GenApi engine, so this module follows the
+//! GenApi is a consumer-side layer: the producer does not evaluate a node
+//! tree and does not rewrite the device XML. This module is only the small
+//! producer-side exception needed for `PayloadSize`, so it follows the
 //! feature through the device's own XML: `Integer Name="PayloadSize"` ->
 //! `<pValue>` chain -> the backing `IntReg`/`MaskedIntReg` -> one GVCP read.
 //! Nothing is estimated from Width/Height and nothing is hardcoded: an XML
