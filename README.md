@@ -28,6 +28,9 @@ cargo cti    # build the producer crates, then place gentl_gige.cti /
              # target/release/ (Windows DLL or Unix .so)
              # (cargo ctid for a debug build; plain cargo build --release
              # still works, it just skips the .cti copies)
+cargo all    # build every workspace target (release: libs, bins,
+             # examples, tests) and refresh the .cti twins
+             # (cargo all-debug for the same in debug)
 ```
 
 Point a GenTL consumer at the build directory (add it to

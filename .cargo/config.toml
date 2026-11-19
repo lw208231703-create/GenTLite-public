@@ -1,4 +1,8 @@
 [alias]
-# Build the workspace and produce .cti twins of the producer DLLs.
+# Build the producers and produce .cti twins of the producer DLLs.
 cti = "run -p gentl-packager --release --"
 ctid = "run -p gentl-packager --"
+# Build every workspace target (libraries, binaries, examples, tests) in
+# release, then refresh the .cti twins.
+all = "run -p gentl-packager --release -- --all-targets"
+all-debug = "run -p gentl-packager -- --all-targets"

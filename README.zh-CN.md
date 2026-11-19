@@ -25,6 +25,8 @@ cargo cti    # 编译 producer crate，并在 target/release/ 的共享库旁
              # 生成 gentl_gige.cti / gentl_u3v.cti
              # （Windows DLL 或 Unix .so；cargo ctid 出 debug 版）
              # 直接 cargo build --release 也可以，只是不会生成 .cti 副本
+cargo all    # release 构建全部 workspace 目标（lib/bin/example/test），
+             # 并重新生成 .cti 副本（debug 版用 cargo all-debug）
 ```
 
 把构建目录指给 GenTL consumer（加入 `GENICAM_GENTL64_PATH` 或显式加载

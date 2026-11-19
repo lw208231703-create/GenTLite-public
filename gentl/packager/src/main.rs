@@ -1,6 +1,10 @@
-//! `cargo cti` — build the workspace and place a `.cti` twin next to each
+//! `cargo cti` - build the producer crates and place a `.cti` twin next to each
 //! producer shared library in `target/<profile>/`, so the directory is
 //! directly usable as a `GENICAM_GENTL64_PATH` entry.
+//!
+//! `cargo all` / `cargo all-debug` pass `--all-targets` and build every
+//! workspace target (libraries, binaries, examples, tests, benches) before
+//! refreshing the `.cti` twins.
 //!
 //! A `.cti` is the same shared library under the extension GenTL consumers
 //! look for: `gentl_gige.dll` / `gentl_u3v.dll` on Windows, and
@@ -34,15 +38,36 @@ fn main() {
         .unwrap_or_else(|| root.join("target"));
     let profile_dir = target_dir.join(&profile);
 
-    // 1) Build the producers.
+    let all_targets = std::env::args().skip(1).any(|arg| arg == "--all-targets");
+    // 1) Build the producers, or every workspace target in --all-targets mode.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
     let mut cmd = Command::new(&cargo);
-    cmd.current_dir(&root)
-        .arg("build")
-        .arg("-p")
-        .arg("gentl-gige")
-        .arg("-p")
-        .arg("gentl-u3v");
+    cmd.current_dir(&root).arg("build");
+    if all_targets {
+        // Serialize linking: parallel link.exe children intermittently
+        // fail with LNK1104 on Windows while creating their GUID temp
+        // files. The build is still incremental/cached, so this is only
+        // slower on the first full build.
+        // Exclude the running packager itself: Windows keeps its exe open,
+        // and linking its test twin from inside that process intermittently
+        // fails with LNK1104. The packager binary is already built by the
+        // `cargo run -p gentl-packager` invocation that got us here.
+        cmd.arg("--workspace")
+            .arg("--all-targets")
+            .arg("--exclude")
+            .arg("gentl-packager")
+            .arg("--jobs")
+            .arg("1");
+        // link.exe intermittently fails with LNK1104 on a GUID temp file
+        // under %TEMP% during debug/test links. Put the linker scratch
+        // directory under target/ so it inherits the workspace's ACLs
+        // instead of the user/system temp policy.
+        let tmp = target_dir.join("tmp");
+        let _ = std::fs::create_dir_all(&tmp);
+        cmd.env("TEMP", &tmp).env("TMP", &tmp);
+    } else {
+        cmd.arg("-p").arg("gentl-gige").arg("-p").arg("gentl-u3v");
+    }
     if profile == "release" {
         cmd.arg("--release");
     } else if profile != "debug" {
