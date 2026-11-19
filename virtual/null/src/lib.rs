@@ -177,11 +177,11 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20 <Group Comment=\"AcquisitionControl\">\n\
 \x20   <Float Name=\"ExposureTimeAbs\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>0</Min><Max>100000</Max><Unit>us</Unit>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Unit>us</Unit>\n\
 \x20   </Float>\n\
 \x20   <Float Name=\"ExposureTime\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Exposure Time (us)</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>0</Min><Max>100000</Max><Unit>us</Unit>\n\
+\x20     <pValue>ExposureTimeAbs_Reg</pValue><Min>10</Min><Max>100000</Max><Unit>us</Unit>\n\
 \x20   </Float>\n\
 \x20   <IntReg Name=\"ExposureTimeAbs_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041014</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
@@ -197,7 +197,7 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"FrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>0</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <IntReg Name=\"FrameRate_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x0004101C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
@@ -205,7 +205,7 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"AcquisitionFrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Acquisition Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>0</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <Command Name=\"AcquisitionStart\" NameSpace=\"Standard\">\n\
 \x20     <pValue>AcquisitionStart_Reg</pValue><CommandValue>1</CommandValue>\n\
