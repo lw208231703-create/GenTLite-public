@@ -35,6 +35,11 @@ pub const PFNC_MONO16: u32 = 0x0110_0007;
 pub const EXPOSURE_US: u32 = 10_000;
 pub const GAIN: u32 = 0;
 pub const FRAME_RATE: u32 = 30;
+/// Upper bound accepted for FrameRate/AcquisitionFrameRate and advertised
+/// in the XML. A virtual camera has no sensor limit; 1 MHz is high enough
+/// that a high request leaves the actual frame rate to the generator and
+/// transport instead of an artificial 240 Hz cap.
+pub const MAX_FRAME_RATE: u32 = 1_000_000;
 /// Reusable payload slots. Relay ring (4) + U3V emitter queue (4) + the
 /// frame being generated gives at most 9 live buffers; 12 leaves margin.
 const FRAME_POOL_DEPTH: usize = 12;
@@ -197,7 +202,7 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"FrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>1000000</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <IntReg Name=\"FrameRate_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x0004101C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
@@ -205,7 +210,7 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </IntReg>\n\
 \x20   <Float Name=\"AcquisitionFrameRate\" NameSpace=\"Standard\">\n\
 \x20     <DisplayName>Acquisition Frame Rate</DisplayName><Visibility>Beginner</Visibility>\n\
-\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>240</Max><Unit>Hz</Unit>\n\
+\x20     <pValue>FrameRate_Reg</pValue><Min>1</Min><Max>1000000</Max><Unit>Hz</Unit>\n\
 \x20   </Float>\n\
 \x20   <Command Name=\"AcquisitionStart\" NameSpace=\"Standard\">\n\
 \x20     <pValue>AcquisitionStart_Reg</pValue><CommandValue>1</CommandValue>\n\
@@ -374,7 +379,7 @@ impl CameraBack for NullBack {
                 regs.insert(addr, value.min(100));
             }
             REG_FRAME_RATE => {
-                regs.insert(addr, value.clamp(1, 240));
+                regs.insert(addr, value.clamp(1, MAX_FRAME_RATE));
             }
             REG_TL_PARAMS_LOCKED => {
                 regs.insert(addr, u32::from(value != 0));
@@ -634,6 +639,17 @@ mod tests {
         assert_eq!(back.read_reg(REG_GAIN).unwrap(), 8);
         assert_eq!(back.read_reg(REG_FRAME_RATE).unwrap(), 60);
         assert_eq!(frame_period(60), Duration::from_micros(16_666));
+        // No 240 Hz demo cap: a high request is accepted so the test sees
+        // the generator/transport limit, not the register limit.
+        back.write_reg(REG_FRAME_RATE, 1000).unwrap();
+        assert_eq!(back.read_reg(REG_FRAME_RATE).unwrap(), 1000);
+        assert_eq!(frame_period(1000), Duration::from_millis(1));
+        back.write_reg(REG_FRAME_RATE, MAX_FRAME_RATE + 1).unwrap();
+        assert_eq!(
+            back.read_reg(REG_FRAME_RATE).unwrap(),
+            MAX_FRAME_RATE,
+            "only the virtual-camera upper bound remains"
+        );
         let payload = back.read_block(0x0004_0008, 8).unwrap();
         assert_eq!(
             u64::from_le_bytes(payload.try_into().unwrap()),
@@ -649,6 +665,10 @@ mod tests {
         let text = String::from_utf8(xml).unwrap();
         assert!(text.contains("</RegisterDescription>"));
         assert!(text.contains("ModelName=\"GenTLiteVirtual\""));
+        assert!(
+            text.contains("<Max>1000000</Max>"),
+            "XML must advertise the same high FrameRate bound"
+        );
         for node in ["Width_Reg", "Height_Reg", "OffsetX_Reg", "OffsetY_Reg", "ExposureTimeAbs_Reg", "Gain_Reg", "FrameRate_Reg", "AcquisitionMode", "TriggerMode", "TriggerModeReg", "AcquisitionFrameRate"] {
             assert!(text.contains(node), "missing {node}");
         }
