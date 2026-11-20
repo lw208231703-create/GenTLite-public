@@ -108,7 +108,7 @@ trace 还显示：
 
 - 板端 `virtual/u3v/src/gadget.rs` 的 stream `FileTransfers` 改用 Linux native AIO（`io_submit` / `io_getevents`）。
 - `AIO_DEPTH = 4`，每次仍是 512 KiB；最多 4 笔在途。
-- `DeviceTransfers::reset()` 在 host 清除 Stream Enable 时销毁/重建 AIO context，避免上一会话的完成事件污染下一次开流。
+- `DeviceTransfers::reset()` 在 host 清除 Stream Enable 时销毁/重建 AIO context，并在新 generation 的第一帧前再确认一次（覆盖 0→1 切换太快、emitter 没观察到 disabled 的情况），避免上一会话的完成事件污染下一次开流。
 - 主机侧未改：GenTL producer 仍是 512 KiB、单 pending read。
 
 ### 8.2 结果（Orange Pi 5 Plus, dwc3, Windows host, 1280x1024）

@@ -631,7 +631,10 @@ impl FileTransfers {
             let aio = if async_io {
                 match AioWriter::new() {
                     Ok(writer) => {
-                        eprintln!("vgige: U3V stream AIO enabled (depth=4)");
+                        eprintln!(
+                            "vgige: U3V stream AIO enabled (depth={})",
+                            crate::aio::AIO_DEPTH
+                        );
                         Some(Mutex::new(writer))
                     }
                     Err(e) => {
@@ -656,8 +659,11 @@ impl DeviceTransfers for FileTransfers {
     fn send(&self, bytes: &[u8]) -> Result<(), StreamError> {
         // A U3V SIRM piece may be larger than the host's WinUSB request
         // window. Keep each FunctionFS write at 512 KiB so the device and
-        // host agree on the in-flight USB transfer size.
+        // host agree on the in-flight USB transfer size. The chunk must
+        // stay a multiple of the endpoint MPS: a short packet would end
+        // the host's bulk transfer early.
         const MAX_WRITE_CHUNK: usize = 512 * 1024;
+        const _: () = assert!(MAX_WRITE_CHUNK % crate::device::desc::BULK_MPS as usize == 0);
         for chunk in bytes.chunks(MAX_WRITE_CHUNK) {
             #[cfg(target_os = "linux")]
             if let Some(aio) = &self.aio {
@@ -678,13 +684,17 @@ impl DeviceTransfers for FileTransfers {
     fn max_packet(&self) -> u16 {
         crate::device::desc::HS_BULK_MPS
     }
-    fn reset(&self) {
+    fn reset(&self) -> Result<(), StreamError> {
         #[cfg(target_os = "linux")]
         if let Some(aio) = &self.aio {
-            if let Ok(mut writer) = aio.lock() {
-                writer.reset();
-            }
+            let mut writer = aio
+                .lock()
+                .map_err(|_| StreamError::Other("AIO writer lock poisoned".into()))?;
+            writer
+                .reset()
+                .map_err(|e| StreamError::Other(format!("AIO reset: {e}")))?;
         }
+        Ok(())
     }
 }
 

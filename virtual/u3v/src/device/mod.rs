@@ -55,9 +55,12 @@ pub trait DeviceTransfers: Send + Sync {
     /// the host's UQ16 piece accumulation).
     fn max_packet(&self) -> u16;
     /// Drop/reset any transport-level async state. The stream front calls
-    /// this when the host clears Stream Enable, before the next session's
-    /// SIRM programming. Default: no-op (memory transports and sync I/O).
-    fn reset(&self) {}
+    /// this when the host clears Stream Enable and again before the first
+    /// frame of a new session (covering a fast 0→1 transition the emitter
+    /// may not observe). Default: no-op (memory transports and sync I/O).
+    fn reset(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
 }
 
 /// Everything the device-side register file and descriptors need at
@@ -268,7 +271,125 @@ impl RegisterFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gentl_u3v::packets;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
     use vgige_core::FramePayload;
+
+    struct NoCommands;
+
+    impl HostCommands for NoCommands {
+        fn recv(&self, _timeout: Duration) -> Option<Vec<u8>> {
+            None
+        }
+    }
+
+    struct FakeTransfers {
+        sends: Arc<AtomicUsize>,
+        resets: Arc<AtomicUsize>,
+    }
+
+    impl DeviceTransfers for FakeTransfers {
+        fn send(&self, _bytes: &[u8]) -> Result<(), StreamError> {
+            self.sends.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn max_packet(&self) -> u16 {
+            1024
+        }
+        fn reset(&self) -> Result<(), StreamError> {
+            self.resets.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn test_frame() -> CanonicalFrame {
+        CanonicalFrame {
+            timestamp: 1,
+            pixel_format: 0x0108_0001,
+            width: 2,
+            height: 2,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+            padding_y: 0,
+            payload: FramePayload::new(vec![1, 2, 3, 4]),
+        }
+    }
+
+    fn wait_for(counter: &AtomicUsize, want: usize) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while counter.load(Ordering::Relaxed) < want {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {want}, got {}",
+                counter.load(Ordering::Relaxed)
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// The emitter must reset the transport on every new relay generation
+    /// even when a fast Stream Enable 0→1 transition was not observed, and
+    /// again when the host clears Stream Enable.
+    #[test]
+    fn stream_generation_and_disable_reset_the_transport() {
+        let sends = Arc::new(AtomicUsize::new(0));
+        let resets = Arc::new(AtomicUsize::new(0));
+        let transfers = Arc::new(FakeTransfers {
+            sends: Arc::clone(&sends),
+            resets: Arc::clone(&resets),
+        });
+        let back: SharedBack = Arc::new(Mutex::new(vgige_back_null::NullBack::new()));
+        let device = U3vDevice::new(
+            DeviceConfig {
+                manufacturer: "GenTLite".into(),
+                model: "TestCam".into(),
+                device_version: "1.0.0".into(),
+                serial_number: "TEST-0001".into(),
+                xml: Vec::new(),
+                payload_size: 4,
+                guid: [0; 16],
+            },
+            back,
+            Arc::new(NoCommands),
+            transfers.clone(),
+            transfers.clone(),
+            transfers,
+        );
+        let mut session = device.frame_session();
+        let si_control = crate::SIRM_BASE + packets::sirm::SI_CONTROL;
+
+        device
+            .inner
+            .regs
+            .write(
+                si_control,
+                &packets::sirm::CONTROL_STREAM_ENABLE.to_le_bytes(),
+            )
+            .unwrap();
+
+        // First session: a fresh context needs no reset.
+        session.open(4).unwrap();
+        session.send_frame(test_frame());
+        wait_for(&sends, 3);
+        assert_eq!(resets.load(Ordering::Relaxed), 0);
+
+        // A new generation without an observed disable (the fast 0→1
+        // case) must still reset before its first frame.
+        session.open(4).unwrap();
+        session.send_frame(test_frame());
+        wait_for(&resets, 1);
+        wait_for(&sends, 6);
+
+        // Clearing Stream Enable also resets.
+        device
+            .inner
+            .regs
+            .write(si_control, &0u32.to_le_bytes())
+            .unwrap();
+        wait_for(&resets, 2);
+    }
 
     #[test]
     fn send_frame_moves_payload_into_the_emitter_queue() {

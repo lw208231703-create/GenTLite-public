@@ -25,13 +25,25 @@ pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<Device
     let mut generation = 0u64;
     let mut pending: Option<super::SessionFrame> = None;
     let mut was_enabled = false;
+    // The transport context is clean until this session submits data.
+    // A fast 0→1 Stream Enable transition can happen without this loop
+    // observing the disabled state; the generation check below covers it.
+    let mut aio_clean = true;
     while !inner.stop.load(std::sync::atomic::Ordering::Relaxed) {
         if !inner.regs.stream_enabled() {
             // Not streaming: drop any transport-level async writes from
             // the previous session before the host can start a new one.
             if was_enabled {
-                eprintln!("vgige: U3V stream disabled, resetting async writes");
-                inner.stream_in.reset();
+                match inner.stream_in.reset() {
+                    Ok(()) => {
+                        eprintln!("vgige: U3V stream disabled, async writes reset");
+                        aio_clean = true;
+                    }
+                    Err(e) => {
+                        eprintln!("vgige: U3V stream disable reset failed: {e}");
+                        aio_clean = false;
+                    }
+                }
             }
             was_enabled = false;
             // Drain silently and wait.
@@ -62,6 +74,16 @@ pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<Device
             generation = frame.generation;
             pending = None;
             block_id = 1;
+            // Every relay open is a new generation. Reset before its first
+            // frame even when the disable branch above was raced past.
+            if !aio_clean {
+                if let Err(e) = inner.stream_in.reset() {
+                    eprintln!("vgige: U3V session reset failed: {e}");
+                    inner.regs.abort_stream();
+                    continue;
+                }
+            }
+            aio_clean = false;
         }
         if let Err(e) = emit_block(&*inner.stream_in, &inner.regs, block_id, &frame.frame) {
             eprintln!("vgige: u3v stream emit failed: {e}");
