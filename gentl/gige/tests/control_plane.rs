@@ -104,9 +104,17 @@ fn control_plane_end_to_end() {
         assert_eq!(IFGetNumDevices(iface, &mut num_devs), GC_ERR_SUCCESS);
         assert!(num_devs >= 1, "discovery via GENTLITE_DISCOVERY_TARGETS found no device");
 
-        let (r, dev_id) = get_string(|s, n| IFGetDeviceID(iface, 0, s, n));
-        assert_eq!(r, GC_ERR_SUCCESS, "IFGetDeviceID");
-        assert_eq!(dev_id, DEVICE_ID, "device id is the MAC string (Q4)");
+        // The board's own virtual GigE camera can be enumerated ahead of
+        // the loopback simulator. Find the simulator by its MAC-derived ID
+        // instead of assuming index 0.
+        let found = (0..num_devs)
+            .map(|i| {
+                let (r, id) = get_string(|s, n| IFGetDeviceID(iface, i, s, n));
+                assert_eq!(r, GC_ERR_SUCCESS, "IFGetDeviceID");
+                id
+            })
+            .any(|id| id == DEVICE_ID);
+        assert!(found, "device id is the MAC string (Q4)");
 
         let (r, vendor) = get_string(|s, n| {
             let c = std::ffi::CString::new(DEVICE_ID).unwrap();
