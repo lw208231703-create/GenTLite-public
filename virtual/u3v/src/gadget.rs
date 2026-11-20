@@ -13,11 +13,15 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use crate::aio::AioWriter;
 use crate::device::{DeviceTransfers, HostCommands, StreamError, desc::DescriptorSet};
 use crate::{DeviceConfig, U3vDevice};
 
@@ -366,9 +370,9 @@ pub fn open(config: &GadgetConfig) -> std::io::Result<OpenGadget> {
     std::thread::spawn(move || bridge_out(out, cmd_tx));
     let streams = GadgetStreams {
         control_out: Arc::new(QueueCommands { rx: Mutex::new(cmd_rx) }),
-        control_in: Arc::new(FileTransfers { file: cin }),
-        stream_in: Arc::new(FileTransfers { file: sin }),
-        event_in: Arc::new(FileTransfers { file: ein }),
+        control_in: Arc::new(FileTransfers::new(cin, false)),
+        stream_in: Arc::new(FileTransfers::new(sin, true)),
+        event_in: Arc::new(FileTransfers::new(ein, false)),
     };
     Ok(OpenGadget { streams, ep0, set, paths })
 }
@@ -613,15 +617,74 @@ impl HostCommands for QueueCommands {
 
 /// A FunctionFS endpoint file as a device→host byte stream.
 struct FileTransfers {
+    /// Streaming endpoint only. Declared before `file` so the AIO writer
+    /// drains outstanding requests before the endpoint file is closed.
+    #[cfg(target_os = "linux")]
+    aio: Option<Mutex<AioWriter>>,
     file: File,
+}
+
+impl FileTransfers {
+    fn new(file: File, async_io: bool) -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            let aio = if async_io {
+                match AioWriter::new() {
+                    Ok(writer) => {
+                        eprintln!("vgige: U3V stream AIO enabled (depth=4)");
+                        Some(Mutex::new(writer))
+                    }
+                    Err(e) => {
+                        eprintln!("vgige: U3V stream AIO unavailable, using sync writes: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            return Self { aio, file };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = async_io;
+            Self { file }
+        }
+    }
 }
 
 impl DeviceTransfers for FileTransfers {
     fn send(&self, bytes: &[u8]) -> Result<(), StreamError> {
-        (&self.file).write_all(bytes).map_err(|e| StreamError::Other(e.to_string()))
+        // A U3V SIRM piece may be larger than the host's WinUSB request
+        // window. Keep each FunctionFS write at 512 KiB so the device and
+        // host agree on the in-flight USB transfer size.
+        const MAX_WRITE_CHUNK: usize = 512 * 1024;
+        for chunk in bytes.chunks(MAX_WRITE_CHUNK) {
+            #[cfg(target_os = "linux")]
+            if let Some(aio) = &self.aio {
+                let mut writer = aio
+                    .lock()
+                    .map_err(|_| StreamError::Other("AIO writer lock poisoned".into()))?;
+                writer
+                    .send(self.file.as_raw_fd(), chunk)
+                    .map_err(|e| StreamError::Other(e.to_string()))?;
+                continue;
+            }
+            (&self.file)
+                .write_all(chunk)
+                .map_err(|e| StreamError::Other(e.to_string()))?;
+        }
+        Ok(())
     }
     fn max_packet(&self) -> u16 {
         crate::device::desc::HS_BULK_MPS
+    }
+    fn reset(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(aio) = &self.aio {
+            if let Ok(mut writer) = aio.lock() {
+                writer.reset();
+            }
+        }
     }
 }
 

@@ -99,3 +99,33 @@ trace 还显示：
 - Null 生成和 GenTL 解析不是瓶颈；
 - 512 KiB 是当前最大稳定 transfer；
 - 250 MB/s 对应 Mono16 约 95 fps、Mono8 约 189 fps。
+
+## 8. 2026-11-20 更新：板端 AIO pipeline 实测
+
+> 旧的 “250 MB/s 上限” 是同步单请求写的上限，不是 USB3 链路上限。
+
+### 8.1 改动
+
+- 板端 `virtual/u3v/src/gadget.rs` 的 stream `FileTransfers` 改用 Linux native AIO（`io_submit` / `io_getevents`）。
+- `AIO_DEPTH = 4`，每次仍是 512 KiB；最多 4 笔在途。
+- `DeviceTransfers::reset()` 在 host 清除 Stream Enable 时销毁/重建 AIO context，避免上一会话的完成事件污染下一次开流。
+- 主机侧未改：GenTL producer 仍是 512 KiB、单 pending read。
+
+### 8.2 结果（Orange Pi 5 Plus, dwc3, Windows host, 1280x1024）
+
+| 模式 | 请求 | 实测 | 带宽 |
+|---|---:|---:|---:|
+| Mono16 | 120 fps | 120.00 fps | ~315 MB/s |
+| Mono16 | 160 fps | 160.00 fps | ~419 MB/s |
+| Mono8 | 240 fps | 240.00 fps | ~315 MB/s |
+
+- Mono16 160 fps 连续 3 次 4 秒稳定；Mono8 240 fps 连续 2 次 4 秒稳定。
+- 板端 U3V emitter 单核约 40%，整机 CPU 约 10%，不是 CPU 瓶颈。
+- 190/240 fps Mono16 请求不稳定（190 偶发 0 帧，240 失败）；160 fps Mono16 是当前稳定点。
+- 1 MiB 单次 FFS 写仍 EPIPE；1 MiB SIRM + 512 KiB 拆分写不加 AIO 时仍约 96 fps。AIO 的收益来自隐藏同步等待，不是 1 MiB。
+
+### 8.3 结论修正
+
+- 旧结论 “U3V 上限约 250 MB/s” 仅适用于同步 512 KiB 单请求路径。
+- 板端 AIO pipeline 把 1280x1024 Mono16 从约 96 fps 提升到 160 fps / 约 419 MB/s，约为 USB3 5 Gbps 理论 payload 的 84%。
+- 继续提高需要主机侧多 outstanding read 或更深的板端队列/UDC 调优；Mono8 240 fps 是当前更稳的高帧率配置。

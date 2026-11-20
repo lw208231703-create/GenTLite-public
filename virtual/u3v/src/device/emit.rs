@@ -24,14 +24,23 @@ pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<Device
     let mut block_id = 1u64; // R-77st-class per-channel sequence from 1
     let mut generation = 0u64;
     let mut pending: Option<super::SessionFrame> = None;
+    let mut was_enabled = false;
     while !inner.stop.load(std::sync::atomic::Ordering::Relaxed) {
         if !inner.regs.stream_enabled() {
-            // Not streaming: drain silently and wait.
+            // Not streaming: drop any transport-level async writes from
+            // the previous session before the host can start a new one.
+            if was_enabled {
+                eprintln!("vgige: U3V stream disabled, resetting async writes");
+                inner.stream_in.reset();
+            }
+            was_enabled = false;
+            // Drain silently and wait.
             for _ in rx.try_iter().take(64) {}
             pending = None;
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
+        was_enabled = true;
         let frame = match pending.take() {
             Some(f) => f,
             None => match rx.recv_timeout(POLL) {

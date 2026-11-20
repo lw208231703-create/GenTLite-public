@@ -26,6 +26,8 @@
 //! broadcast: identity lives entirely in the USB descriptors + ABRM, with
 //! the GUID synthesized from the camera identity (Q39).
 
+#[cfg(target_os = "linux")]
+mod aio;
 pub mod device;
 pub mod gadget;
 

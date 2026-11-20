@@ -54,6 +54,10 @@ pub trait DeviceTransfers: Send + Sync {
     /// MPS-sized chunks to model real endpoint behavior (and to exercise
     /// the host's UQ16 piece accumulation).
     fn max_packet(&self) -> u16;
+    /// Drop/reset any transport-level async state. The stream front calls
+    /// this when the host clears Stream Enable, before the next session's
+    /// SIRM programming. Default: no-op (memory transports and sync I/O).
+    fn reset(&self) {}
 }
 
 /// Everything the device-side register file and descriptors need at
