@@ -25,6 +25,17 @@ pub const READMEM_ACK: u16 = 0x0085;
 pub const WRITEMEM_CMD: u16 = 0x0086;
 pub const WRITEMEM_ACK: u16 = 0x0087;
 pub const PENDING_ACK: u16 = 0x0089;
+// Message channel commands (§17 message channel dictionary).
+pub const EVENT_CMD: u16 = 0x00C0;
+pub const EVENT_ACK: u16 = 0x00C1;
+pub const EVENTDATA_CMD: u16 = 0x00C2;
+pub const EVENTDATA_ACK: u16 = 0x00C3;
+
+/// Fixed part of one event record in EVENT_CMD / EVENTDATA_CMD
+/// (§17.1.1 Figure 17-1): event_size u16, event_identifier u16,
+/// stream_channel_index u16, reserved u16, block_id u64, timestamp u64.
+pub const EVENT_RECORD_LEN: usize = 24;
+
 pub const ACTION_CMD: u16 = 0x0100;
 pub const ACTION_ACK: u16 = 0x0101;
 
@@ -243,6 +254,74 @@ impl DiscoveryInfo {
 }
 
 /// READREG_CMD payload: N 32-bit-aligned register addresses.
+/// One asynchronous event decoded from the message channel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GvcpEvent {
+    /// Event number as defined in the XML device description (§17.1.1).
+    pub event_id: u16,
+    /// Index of the associated stream channel, 0xFFFF if none.
+    pub stream_channel: u16,
+    pub block_id: u64,
+    /// Device timestamp in Tick-Frequency ticks; 0 when unsupported.
+    pub timestamp: u64,
+    /// EVENTDATA payload (empty for EVENT_CMD).
+    pub data: Vec<u8>,
+}
+
+impl GvcpEvent {
+    /// Encode in the wire record layout (also the payload layout handed to
+    /// the GenTL consumer, so EventGetDataInfo parses it back unchanged).
+    pub fn encode(&self) -> Vec<u8> {
+        let size = EVENT_RECORD_LEN + self.data.len();
+        let mut out = Vec::with_capacity(size);
+        out.extend_from_slice(&(size as u16).to_be_bytes());
+        out.extend_from_slice(&self.event_id.to_be_bytes());
+        out.extend_from_slice(&self.stream_channel.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&self.block_id.to_be_bytes());
+        out.extend_from_slice(&self.timestamp.to_be_bytes());
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    /// Decode one event record (EVENT_CMD or EVENTDATA_CMD layout).
+    pub fn decode(record: &[u8]) -> Option<Self> {
+        if record.len() < EVENT_RECORD_LEN {
+            return None;
+        }
+        let size = usize::from(u16::from_be_bytes([record[0], record[1]]));
+        if size < EVENT_RECORD_LEN || size > record.len() {
+            return None;
+        }
+        Some(Self {
+            event_id: u16::from_be_bytes([record[2], record[3]]),
+            stream_channel: u16::from_be_bytes([record[4], record[5]]),
+            block_id: u64::from_be_bytes(record[8..16].try_into().ok()?),
+            timestamp: u64::from_be_bytes(record[16..24].try_into().ok()?),
+            data: record[EVENT_RECORD_LEN..size].to_vec(),
+        })
+    }
+}
+
+/// Decode one message-channel datagram (EVENT_CMD / EVENTDATA_CMD). Multiple
+/// events may be concatenated (§17.1: the event count is length / 24).
+pub fn decode_message_events(datagram: &[u8]) -> Option<Vec<GvcpEvent>> {
+    let header = CmdHeader::decode(datagram)?;
+    if header.command != EVENT_CMD && header.command != EVENTDATA_CMD {
+        return None;
+    }
+    let end = (HEADER_LEN + usize::from(header.length)).min(datagram.len());
+    let payload = &datagram[HEADER_LEN..end];
+    let mut events = Vec::new();
+    let mut offset = 0usize;
+    while offset + EVENT_RECORD_LEN <= payload.len() {
+        let event = GvcpEvent::decode(&payload[offset..])?;
+        offset += EVENT_RECORD_LEN + event.data.len();
+        events.push(event);
+    }
+    Some(events)
+}
+
 pub fn encode_readreg(addrs: &[u32]) -> Vec<u8> {
     let mut v = Vec::with_capacity(addrs.len() * 4);
     for a in addrs {
@@ -271,6 +350,24 @@ pub fn encode_writereg(pairs: &[(u32, u32)]) -> Vec<u8> {
 }
 
 /// READMEM_CMD payload: address u32 + reserved u16 + count u16 (spec §16.5.1).
+/// WRITEMEM_CMD payload (§16.6.1 Figure 16-11): the 32-bit address followed
+/// by the bytes to write (a multiple of 4, R-187c).
+pub fn encode_writemem_cmd_payload(addr: u32, data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + data.len());
+    out.extend_from_slice(&addr.to_be_bytes());
+    out.extend_from_slice(data);
+    out
+}
+
+/// WRITEMEM_ACK payload (§16.6.2): the written start address echoed back
+/// (R-190cd lets the application match the ack).
+pub fn decode_writemem_ack_payload(payload: &[u8]) -> Option<u32> {
+    if payload.len() < 4 {
+        return None;
+    }
+    Some(u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]))
+}
+
 pub fn encode_readmem_cmd_payload(addr: u32, count: u16) -> [u8; 8] {
     let mut p = [0u8; 8];
     p[0..4].copy_from_slice(&addr.to_be_bytes());
@@ -328,6 +425,64 @@ pub fn decode_readmem_payload(p: &[u8]) -> Option<(u32, &[u8])> {
     }
     let addr = u32::from_be_bytes([p[0], p[1], p[2], p[3]]);
     Some((addr, &p[4..]))
+}
+
+/// FORCEIP_CMD payload size (§16.2.1 Figure 16-3): the MAC words plus three
+/// reserved words around each of static_IP, static_subnet_mask and
+/// static_default_gateway.
+pub const FORCEIP_PAYLOAD_LEN: usize = 56;
+
+/// GVCP flag byte: broadcast the FORCEIP_ACK (§16.2.1 bit 3). The forced
+/// address may move the device to another subnet, so the requester may not
+/// hear a unicast reply.
+pub const FLAG_FORCEIP_ACK_BROADCAST: u8 = 0x08;
+
+/// Decoded FORCEIP_CMD payload (§16.2.1 Figure 16-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForceIpRequest {
+    /// MAC address of the device to access (48 bits).
+    pub mac: [u8; 6],
+    /// Static IP address to force into the device (0 = restart the IP
+    /// configuration cycle, §16.2.1 R-151cd).
+    pub static_ip: u32,
+    pub subnet_mask: u32,
+    pub default_gateway: u32,
+}
+
+/// Device decision for a FORCEIP_CMD (see `DeviceHandler::force_ip`):
+/// acknowledge the applied address, or discard the request silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForceIpOutcome {
+    Ack,
+    Ignore,
+}
+
+/// Decode a FORCEIP_CMD payload: the MAC words are padded (the high word
+/// carries MAC[0..2] in its low half) and each address is separated by three
+/// reserved words.
+pub fn decode_force_ip_payload(payload: &[u8]) -> Option<ForceIpRequest> {
+    if payload.len() < FORCEIP_PAYLOAD_LEN {
+        return None;
+    }
+    Some(ForceIpRequest {
+        mac: [
+            payload[2], payload[3], payload[4], payload[5], payload[6], payload[7],
+        ],
+        static_ip: u32::from_be_bytes(payload[20..24].try_into().ok()?),
+        subnet_mask: u32::from_be_bytes(payload[36..40].try_into().ok()?),
+        default_gateway: u32::from_be_bytes(payload[52..56].try_into().ok()?),
+    })
+}
+
+/// Encode a FORCEIP_CMD payload (device tests / applications).
+pub fn encode_force_ip_payload(request: &ForceIpRequest) -> [u8; FORCEIP_PAYLOAD_LEN] {
+    let mut out = [0u8; FORCEIP_PAYLOAD_LEN];
+    out[2..4].copy_from_slice(&request.mac[0..2]);
+    out[4..8].copy_from_slice(&request.mac[2..6]);
+    out[20..24].copy_from_slice(&request.static_ip.to_be_bytes());
+    out[36..40].copy_from_slice(&request.subnet_mask.to_be_bytes());
+    out[52..56].copy_from_slice(&request.default_gateway.to_be_bytes());
+    out
 }
 
 #[cfg(test)]
@@ -391,6 +546,37 @@ mod tests {
     }
 
     #[test]
+    fn message_channel_event_roundtrip() {
+        let event = GvcpEvent {
+            event_id: 0x0007,
+            stream_channel: 0xFFFF,
+            block_id: 42,
+            timestamp: 0x1122_3344_5566_7788,
+            data: vec![0xE0, 0xE1, 0xE2, 0xE3],
+        };
+        let record = event.encode();
+        assert_eq!(record.len(), EVENT_RECORD_LEN + 4);
+        assert_eq!(GvcpEvent::decode(&record), Some(event.clone()));
+
+        // One EVENTDATA_CMD datagram carrying the record after the GVCP header.
+        let mut datagram = vec![0u8; HEADER_LEN];
+        let mut header = [0u8; HEADER_LEN];
+        CmdHeader {
+            flag: FLAG_ACK | 0x08, // bit 3: extended id (§17.1.1)
+            command: EVENTDATA_CMD,
+            length: record.len() as u16,
+            req_id: 3,
+        }
+        .encode(&mut header);
+        datagram[..HEADER_LEN].copy_from_slice(&header);
+        let _ = &mut datagram;
+        datagram.extend_from_slice(&record);
+        let decoded = decode_message_events(&datagram).expect("event decodes");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0], event);
+    }
+
+    #[test]
     fn writereg_pairs_roundtrip() {
         let p = encode_writereg(&[(0x0A00, 0x80000000), (0x0938, 3000)]);
         assert_eq!(p.len(), 16);
@@ -411,5 +597,36 @@ mod tests {
         assert_eq!(&p[0..4], &0x0200u32.to_be_bytes());
         assert_eq!(&p[4..6], &[0, 0]); // reserved
         assert_eq!(&p[6..8], &512u16.to_be_bytes());
+    }
+
+    #[test]
+    fn force_ip_payload_roundtrip() {
+        let req = ForceIpRequest {
+            mac: [0x02, 0x00, 0x11, 0x22, 0x33, 0x44],
+            static_ip: 0x0A00_0064,
+            subnet_mask: 0xFFFF_FF00,
+            default_gateway: 0x0A00_0001,
+        };
+        let p = encode_force_ip_payload(&req);
+        assert_eq!(p.len(), FORCEIP_PAYLOAD_LEN);
+        assert_eq!(&p[2..4], &req.mac[0..2]);
+        assert_eq!(&p[4..8], &req.mac[2..6]);
+        assert_eq!(decode_force_ip_payload(&p), Some(req));
+        // Truncated payloads are rejected.
+        assert_eq!(decode_force_ip_payload(&p[..55]), None);
+    }
+
+    #[test]
+    fn writemem_payload_roundtrip() {
+        let data = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        let p = encode_writemem_cmd_payload(0x2000_0100, &data);
+        assert_eq!(p.len(), 12);
+        assert_eq!(&p[0..4], &0x2000_0100u32.to_be_bytes());
+        assert_eq!(&p[4..], &data);
+        assert_eq!(
+            decode_writemem_ack_payload(&0x2000_0100u32.to_be_bytes()),
+            Some(0x2000_0100)
+        );
+        assert_eq!(decode_writemem_ack_payload(&[0, 0]), None);
     }
 }

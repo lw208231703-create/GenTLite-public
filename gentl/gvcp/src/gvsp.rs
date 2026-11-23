@@ -36,6 +36,10 @@ pub const GEV_FLAG_RESEND_RANGE_ERROR: u16 = 1 << 13;
 
 // payload_type values (Table 25-1)
 pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
+/// Extended-chunk mode bit (§25.1: "bit 1 of the payload_type field",
+/// MSB-first notation → 0x4000). The payload type is the base type with
+/// this bit set (0x4001 for image + chunk data).
+pub const PAYLOAD_TYPE_EXTENDED_CHUNK_BIT: u16 = 0x4000;
 
 /// Parsed GVSP common header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,6 +141,9 @@ impl GvspHeader {
 pub struct ImageLeader {
     pub field_id: u8,      // progressive: 0
     pub field_count: u8,   // progressive: 0
+    /// Payload type (Table 25-1): `PAYLOAD_TYPE_IMAGE`, or the same with
+    /// `PAYLOAD_TYPE_EXTENDED_CHUNK_BIT` set (image followed by chunk data).
+    pub payload_type: u16,
     pub timestamp: u64,    // 0 when unsupported
     pub pixel_format: u32, // PFNC value
     pub size_x: u32,
@@ -148,20 +155,31 @@ pub struct ImageLeader {
 }
 
 pub const IMAGE_TRAILER_LEN: usize = 8;
+/// Extended-chunk trailer body (§25.1 Figure 25-1): the standard 8-byte
+/// body plus `chunk_data_payload_length` and `chunk_layout_id` (4 bytes
+/// each, network byte order) = 16 bytes.
+pub const IMAGE_EXTENDED_TRAILER_LEN: usize = 16;
 
 impl ImageLeader {
+    /// Extended chunk mode (§25.1): the payload carries the image as its
+    /// first chunk followed by chunk data.
+    pub fn is_extended_chunk(&self) -> bool {
+        self.payload_type & PAYLOAD_TYPE_EXTENDED_CHUNK_BIT != 0
+    }
+
     pub fn decode(body: &[u8]) -> Option<Self> {
         if body.len() < IMAGE_LEADER_BODY_LEN {
             return None;
         }
         let u32be = |o: usize| -> Option<u32> { Some(u32::from_be_bytes(body[o..o + 4].try_into().ok()?)) };
         let payload_type = u16::from_be_bytes([body[2], body[3]]);
-        if payload_type != PAYLOAD_TYPE_IMAGE {
+        if payload_type & !PAYLOAD_TYPE_EXTENDED_CHUNK_BIT != PAYLOAD_TYPE_IMAGE {
             return None;
         }
         Some(Self {
             field_id: body[0] >> 4,
             field_count: body[0] & 0x0F,
+            payload_type,
             timestamp: u64::from_be_bytes(body[4..12].try_into().ok()?),
             pixel_format: u32be(12)?,
             size_x: u32be(16)?,
@@ -187,6 +205,7 @@ impl ImageLeader {
         Some(Self {
             field_id: 0,      // 1.2 has no payload_type_specific
             field_count: 0,
+            payload_type,
             timestamp: u64::from_be_bytes(body[4..12].try_into().ok()?),
             pixel_format: u32be(12)?,
             size_x: u32be(16)?,
@@ -214,7 +233,7 @@ pub const IMAGE_LEADER_LEGACY_BODY_LEN: usize = 36;
 pub fn encode_image_leader_body(l: &ImageLeader) -> [u8; IMAGE_LEADER_BODY_LEN] {
     let mut out = [0u8; IMAGE_LEADER_BODY_LEN];
     out[0] = (l.field_id & 0x0F) << 4 | (l.field_count & 0x0F);
-    out[2..4].copy_from_slice(&PAYLOAD_TYPE_IMAGE.to_be_bytes());
+    out[2..4].copy_from_slice(&l.payload_type.to_be_bytes());
     out[4..12].copy_from_slice(&l.timestamp.to_be_bytes());
     out[12..16].copy_from_slice(&l.pixel_format.to_be_bytes());
     out[16..20].copy_from_slice(&l.size_x.to_be_bytes());
@@ -262,6 +281,41 @@ pub fn decode_image_trailer_body(body: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(body[4..8].try_into().ok()?))
 }
 
+/// Encode the extended-chunk image trailer body (§25.1 Figure 25-1): the
+/// standard body plus `chunk_data_payload_length` (sum of the chunk data
+/// payload bytes, 4-byte multiple) and `chunk_layout_id` (0 = layout ids
+/// unsupported).
+pub fn encode_image_extended_trailer_body(
+    size_y: u32,
+    chunk_data_payload_length: u32,
+    chunk_layout_id: u32,
+) -> [u8; IMAGE_EXTENDED_TRAILER_LEN] {
+    let mut out = [0u8; IMAGE_EXTENDED_TRAILER_LEN];
+    out[2..4].copy_from_slice(
+        &(PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT).to_be_bytes(),
+    );
+    out[4..8].copy_from_slice(&size_y.to_be_bytes());
+    out[8..12].copy_from_slice(&chunk_data_payload_length.to_be_bytes());
+    out[12..16].copy_from_slice(&chunk_layout_id.to_be_bytes());
+    out
+}
+
+/// Decode the extended-chunk trailer: `(size_y, chunk_data_payload_length,
+/// chunk_layout_id)` (§25.1 Figure 25-1, network byte order).
+pub fn decode_image_extended_trailer_body(body: &[u8]) -> Option<(u32, u32, u32)> {
+    if body.len() < IMAGE_EXTENDED_TRAILER_LEN {
+        return None;
+    }
+    let payload_type = u16::from_be_bytes([body[2], body[3]]);
+    if payload_type & !PAYLOAD_TYPE_EXTENDED_CHUNK_BIT != PAYLOAD_TYPE_IMAGE
+        || payload_type & PAYLOAD_TYPE_EXTENDED_CHUNK_BIT == 0
+    {
+        return None;
+    }
+    let u32be = |o: usize| u32::from_be_bytes(body[o..o + 4].try_into().expect("len checked"));
+    Some((u32be(4), u32be(8), u32be(12)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,6 +340,7 @@ mod tests {
         let l = ImageLeader {
             field_id: 0,
             field_count: 0,
+            payload_type: PAYLOAD_TYPE_IMAGE,
             timestamp: 0x1122334455667788,
             pixel_format: 0x01080001, // Mono8 (verified against PFNC.h)
             size_x: 640,
@@ -382,6 +437,7 @@ mod tests {
         let l = ImageLeader {
             field_id: 0,
             field_count: 0,
+            payload_type: PAYLOAD_TYPE_IMAGE,
             timestamp: 0x1122334455667788,
             pixel_format: 0x01080001,
             size_x: 640,
@@ -405,5 +461,53 @@ mod tests {
         assert_eq!(d.padding_y, 4);
         assert_eq!(d.timestamp, l.timestamp);
         assert!(ImageLeader::decode_legacy(&body[..35]).is_none());
+    }
+
+    /// Extended chunk mode (§25.1): the image leader advertises payload type
+    /// 0x4001 and the trailer appends `chunk_data_payload_length` and
+    /// `chunk_layout_id` (Figure 25-1, network byte order).
+    #[test]
+    fn extended_chunk_leader_and_trailer_roundtrip() {
+        let l = ImageLeader {
+            field_id: 0,
+            field_count: 0,
+            payload_type: PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT,
+            timestamp: 7,
+            pixel_format: 0x01080001,
+            size_x: 4,
+            size_y: 4,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+            padding_y: 0,
+        };
+        assert!(l.is_extended_chunk());
+        let body = encode_image_leader_body(&l);
+        assert_eq!(
+            u16::from_be_bytes([body[2], body[3]]),
+            PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT
+        );
+        let d = ImageLeader::decode(&body).expect("extended leader decodes");
+        assert!(d.is_extended_chunk());
+        assert_eq!(d.payload_type, l.payload_type);
+
+        let t = encode_image_extended_trailer_body(4, 16, 0x77);
+        assert_eq!(t.len(), IMAGE_EXTENDED_TRAILER_LEN);
+        assert_eq!(
+            u16::from_be_bytes([t[2], t[3]]),
+            PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT
+        );
+        assert_eq!(
+            decode_image_extended_trailer_body(&t),
+            Some((4, 16, 0x77))
+        );
+        // The standard decoder rejects an extended trailer (payload type
+        // mismatch), so a caller cannot mix the two forms.
+        assert_eq!(decode_image_trailer_body(&t), None);
+        // A standard 8-byte trailer is not an extended trailer.
+        assert_eq!(
+            decode_image_extended_trailer_body(&encode_image_trailer_body(4)),
+            None
+        );
     }
 }

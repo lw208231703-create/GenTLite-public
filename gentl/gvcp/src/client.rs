@@ -168,6 +168,54 @@ impl GvcpClient {
         Ok(())
     }
 
+    /// WRITEMEM (spec §16.6): write `data` at `addr`. `data.len()` must be a
+    /// multiple of 4 and `addr` 32-bit aligned (R-187c/R-189c); the device
+    /// must echo the address in the ack (R-190cd). Larger writes must be
+    /// split by the caller to stay under the control-channel max packet.
+    pub fn write_mem(&self, addr: u32, data: &[u8]) -> GentlResult<()> {
+        if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
+            return Err(GentlError::InvalidParameter("write_mem alignment"));
+        }
+        if data.len() > u16::MAX as usize - 8 {
+            return Err(GentlError::InvalidParameter("write_mem size"));
+        }
+        let payload = encode_writemem_cmd_payload(addr, data);
+        let datagram = self.transaction(WRITEMEM_CMD, &payload)?;
+        let status = Self::ack_status(&datagram)?;
+        if status != GEV_STATUS_SUCCESS {
+            return Err(GentlError::GevStatus(status));
+        }
+        let ack_addr = decode_writemem_ack_payload(&datagram[HEADER_LEN..])
+            .ok_or_else(|| GentlError::Io("malformed WRITEMEM_ACK".into()))?;
+        if ack_addr != addr {
+            return Err(GentlError::Io("WRITEMEM_ACK address mismatch".into()));
+        }
+        Ok(())
+    }
+
+    /// Number of message channels the device provides (§36.22); 0 means the
+    /// device has no message channel.
+    pub fn num_message_channels(&self) -> GentlResult<u32> {
+        self.read_reg(registers::NUM_MESSAGE_CHANNELS)
+    }
+
+    /// Open the message channel (§12.2): destination address first, then the
+    /// host port in MCP as the last write. The transmission timeout is set to
+    /// 0 so the device clears the ACKNOWLEDGE bit (CR-103cd) and no
+    /// EVENT_ACK is required.
+    pub fn open_message_channel(&self, host_ip: Ipv4Addr, host_port: u16) -> GentlResult<()> {
+        self.write_reg(registers::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(host_ip))?;
+        self.write_reg(registers::MESSAGE_CHANNEL_RETRY_COUNT, 0)?;
+        self.write_reg(registers::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT, 0)?;
+        self.write_reg(registers::MESSAGE_CHANNEL_PORT, registers::mcp_make(host_port))
+    }
+
+    /// Close the message channel: MCP must be the first register written
+    /// (§12.4, CR-106ca).
+    pub fn close_message_channel(&self) -> GentlResult<()> {
+        self.write_reg(registers::MESSAGE_CHANNEL_PORT, 0)
+    }
+
     /// Fetch the First URL bootstrap register content (512 bytes), trimmed
     /// at the first NUL.
     pub fn xml_url(&self) -> GentlResult<String> {

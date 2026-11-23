@@ -22,6 +22,22 @@ use crate::{GentlError, GentlResult};
 /// `GENTL_INFINITE` (GenTL.h): acquire until `DSStopAcquisition`.
 pub const GENTL_INFINITE: u64 = u64::MAX;
 
+/// Chunk region of a delivered frame, as needed by `DSGetBufferChunkData`
+/// (GenTL 1.6 §6.3.5.13) and the chunk buffer information commands.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChunkRegion {
+    /// Offset of the chunk block inside the announced buffer. The block does
+    /// NOT include the image chunk (the image is the buffer payload); it
+    /// starts after the image chunk's trailing tag.
+    pub offset: usize,
+    /// Chunk block length in bytes (tags included, transport padding
+    /// excluded).
+    pub len: usize,
+    /// Chunk layout id from the transport trailer (GigE §25.1 /
+    /// U3V §5.5.5.2.3); 0 = the transmitter does not support layout ids.
+    pub layout_id: u64,
+}
+
 /// Metadata of one completed frame, taken from the transport's frame
 /// description (the GVSP image leader for GigE Vision).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -35,6 +51,8 @@ pub struct FrameMeta {
     pub padding_x: u32,
     pub padding_y: u32,
     pub payload_bytes: Option<usize>,
+    /// Chunk data of the frame, if the transport decoded any.
+    pub chunk: Option<ChunkRegion>,
 }
 
 impl FrameMeta {

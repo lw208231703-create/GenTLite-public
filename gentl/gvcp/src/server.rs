@@ -16,6 +16,15 @@ pub trait DeviceHandler: Send + 'static {
     /// Identity for DISCOVERY_ACK.
     fn discovery_info(&self) -> DiscoveryInfo;
 
+    /// FORCEIP_CMD (§16.2): apply this device's force-IP policy. MAC
+    /// mismatch and an occupied control channel MUST be discarded silently
+    /// (R-149cd/R-150cd); static_IP == 0 restarts the IP configuration
+    /// cycle without an ACK (R-151cd); a non-zero static_IP is applied and
+    /// acknowledged (R-152cd). The default discards the request.
+    fn force_ip(&self, _peer: SocketAddr, _request: ForceIpRequest) -> ForceIpOutcome {
+        ForceIpOutcome::Ignore
+    }
+
     /// Read one 32-bit register. Err(status) is a GEV status code.
     fn read_reg(&self, addr: u32) -> Result<u32, u16>;
 
@@ -218,11 +227,19 @@ fn serve_loop<H: DeviceHandler>(
             WRITEMEM_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
                 let mut addr = 0u32;
-                if payload_in.len() < 8 || (payload_in.len() - 4) % 4 != 0 {
+                if payload_in.len() < 8 {
                     status = GEV_STATUS_INVALID_PARAMETER;
+                } else if (payload_in.len() - 4) % 4 != 0 {
+                    // R-188cd: a WRITEMEM length that is not a multiple of 4
+                    // MUST answer BAD_ALIGNMENT.
+                    status = GEV_STATUS_BAD_ALIGNMENT;
                 } else {
                     addr = u32::from_be_bytes([payload_in[0], payload_in[1], payload_in[2], payload_in[3]]);
-                    if let Err(s) = handler.write_mem(addr, &payload_in[4..]) {
+                    // R-189c: an unaligned start address MUST answer
+                    // BAD_ALIGNMENT.
+                    if addr % 4 != 0 {
+                        status = GEV_STATUS_BAD_ALIGNMENT;
+                    } else if let Err(s) = handler.write_mem(addr, &payload_in[4..]) {
                         status = s;
                     }
                 }
@@ -246,7 +263,35 @@ fn serve_loop<H: DeviceHandler>(
                 }
                 continue;
             }
-            // FORCEIP / EVENT* / ACTION: not part of M1 scope.
+            FORCEIP_CMD => {
+                // §16.2: the handler owns the ordering rules — a MAC
+                // mismatch or an occupied control channel discards the
+                // request (R-149cd/R-150cd), static_IP == 0 restarts the IP
+                // configuration cycle with no ACK (R-151cd), and a forced
+                // address is acknowledged once effective (R-152cd).
+                // Malformed payloads and discard outcomes answer nothing —
+                // not even an empty datagram (a discarded FORCEIP on the
+                // wire is a timeout for the application, R-149cd/R-150cd).
+                let Some(request) = decode_force_ip_payload(payload_in) else {
+                    continue;
+                };
+                if handler.force_ip(peer, request) != ForceIpOutcome::Ack {
+                    continue;
+                }
+                AckHeader::new(GEV_STATUS_SUCCESS, FORCEIP_ACK, 0, cmd.req_id)
+                    .encode(&mut ack);
+                out.extend_from_slice(&ack);
+                if cmd.flag & FLAG_FORCEIP_ACK_BROADCAST != 0 {
+                    // O-155cd: the ACK may need to be broadcast because the
+                    // forced address can change the reachable subnet.
+                    let _ = socket.send_to(
+                        &out,
+                        SocketAddr::from((Ipv4Addr::BROADCAST, GVCP_PORT)),
+                    );
+                    continue;
+                }
+            }
+            // EVENT* / ACTION: not part of M1 scope.
             _ => {
                 AckHeader::new(
                     GEV_STATUS_NOT_IMPLEMENTED,

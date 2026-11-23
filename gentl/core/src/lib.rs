@@ -6,6 +6,7 @@
 //! than convenience.
 
 pub mod channel;
+pub mod chunk;
 pub mod ds;
 pub mod error;
 pub mod event_queue;

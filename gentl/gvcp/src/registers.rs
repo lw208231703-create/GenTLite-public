@@ -21,10 +21,57 @@ pub const USER_DEFINED_NAME: u32 = 0x00E8;
 pub const FIRST_URL: u32 = 0x0200;
 pub const SECOND_URL: u32 = 0x0400;
 pub const NUM_NETWORK_INTERFACES: u32 = 0x0600;
+/// Persistent IP Address of network interface #0 (§4.2 / §36.7). Present
+/// only when the Network Interface Capability register advertises
+/// Persistent IP support; a device without it answers
+/// GEV_STATUS_INVALID_ADDRESS.
+pub const PERSISTENT_IP_ADDRESS: u32 = 0x064C;
+/// Persistent Subnet Mask of network interface #0 (§4.2 / §36.8).
+pub const PERSISTENT_SUBNET_MASK: u32 = 0x065C;
+/// Persistent Default Gateway of network interface #0 (§4.2 / §36.9).
+pub const PERSISTENT_DEFAULT_GATEWAY: u32 = 0x066C;
 pub const NUM_MESSAGE_CHANNELS: u32 = 0x0900;
 pub const NUM_STREAM_CHANNELS: u32 = 0x0904;
 pub const STREAMING_CAPABILITY: u32 = 0x092C;
 pub const MESSAGE_CHANNEL_CAPABILITY: u32 = 0x0930;
+
+// Message channel registers (spec 2.0 §36.51-§36.56). MCP/MCDA are written
+// by the application to open the channel (§12.2): MCDA first, MCP last.
+/// Message Channel Port register (§36.51): bits 16-31 = host UDP port
+/// (`host_port`); writing 0 closes the channel.
+pub const MESSAGE_CHANNEL_PORT: u32 = 0x0B00;
+/// Message Channel Destination Address register (§36.52): host IP.
+pub const MESSAGE_CHANNEL_DEST_ADDRESS: u32 = 0x0B10;
+/// Message Channel Transmission Timeout (§36.53), ms; 0 disables the
+/// ACKNOWLEDGE bit (CR-103cd), so the application need not ACK events.
+pub const MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT: u32 = 0x0B14;
+/// Message Channel Retry Count (§36.54).
+pub const MESSAGE_CHANNEL_RETRY_COUNT: u32 = 0x0B18;
+/// Message Channel Source Port (§36.55), read-only.
+pub const MESSAGE_CHANNEL_SOURCE_PORT: u32 = 0x0B1C;
+/// Message Channel Configuration (§36.56).
+pub const MESSAGE_CHANNEL_CONFIGURATION: u32 = 0x0B20;
+
+/// Bits 16-31 of the MCP register (§36.51).
+const MCP_HOST_PORT_MASK: u32 = 0xFFFF_0000;
+
+/// Build an MCP value from the host port (bits 16-31, §36.51).
+pub fn mcp_make(host_port: u16) -> u32 {
+    u32::from(host_port) << 16
+}
+
+/// Extract the host_port field of an MCP register value.
+pub fn mcp_host_port(value: u32) -> u16 {
+    ((value & MCP_HOST_PORT_MASK) >> 16) as u16
+}
+
+// MESSAGE_CHANNEL_CAPABILITY bits (§36.28, print/MSB-first numbering).
+/// MCSP register available (print bit 0, "SP").
+pub const MC_CAPABILITY_MCSP: u32 = 1 << 31;
+/// MCCFG register available (print bit 1, "CC").
+pub const MC_CAPABILITY_MCCFG: u32 = 1 << 30;
+/// EVENTDATA concatenation supported (print bit 2, "EC").
+pub const MC_CAPABILITY_MCEC: u32 = 1 << 29;
 pub const GVCP_CAPABILITY: u32 = 0x0934;
 pub const HEARTBEAT_TIMEOUT: u32 = 0x0938;
 pub const TIMESTAMP_TICK_FREQ_HIGH: u32 = 0x093C;
@@ -75,7 +122,13 @@ pub const SCPS0: u32 = 0x0D04;
 pub const SCPD0: u32 = 0x0D08;
 pub const SCDA0: u32 = 0x0D18;
 pub const SCSP0: u32 = 0x0D1C;
+/// GVSP Stream Channel Capability 0 (§36.62). Mandatory for every device
+/// that supports GVSP (CR-494cd: MUST implement for all stream channels);
+/// read-only, bits report optional per-channel features.
 pub const SCC0: u32 = 0x0D20;
+/// GVSP Stream Channel Configuration 0 (§36.63). Mandatory for every device
+/// that supports GVSP (CR-495cd); writes while streaming return
+/// GEV_STATUS_BUSY (R-590cd).
 pub const SCCFG0: u32 = 0x0D24;
 pub const SCMPC0: u32 = 0x0D30;
 pub const SCMBS0_HIGH: u32 = 0x0D34;
@@ -101,6 +154,13 @@ pub const SCPS_OFFSET: u32 = 0x04;
 pub const SCPD_OFFSET: u32 = 0x08;
 /// Offset of SCDAx within a stream channel's register block (spec §36.60).
 pub const SCDA_OFFSET: u32 = 0x18;
+/// Offset of SCCx within a stream channel's register block (spec §36.62,
+/// CR-494cd: mandatory for GVSP devices). Read-only capability bits.
+pub const SCC_OFFSET: u32 = 0x20;
+/// Offset of SCCFGx within a stream channel's register block (spec §36.63,
+/// CR-495cd: mandatory for GVSP devices). Read/write; disabled during
+/// streaming (R-590cd, GEV_STATUS_BUSY).
+pub const SCCFG_OFFSET: u32 = 0x24;
 
 /// SCPx: stream channel #x port register (spec §36.57).
 pub const fn scp(x: u32) -> u32 {
@@ -122,12 +182,13 @@ pub const fn scda(x: u32) -> u32 {
     SCDA0 + STREAM_CHANNEL_STRIDE * x
 }
 
-/// Reverse map of the four per-channel stream channel registers: an address
-/// inside a stream channel block decodes to (channel number, register
-/// offset). Addresses outside the SCPx/SCPSx/SCPDx/SCDAx slots answer
-/// `None` (reserved, like the unimplemented channel-0 slots SCSP0..SCEBA0
-/// do for reads), as do channel numbers past 511 — the spec defines
-/// channels 0..511, and unchecked the formula would reach far beyond
+/// Reverse map of the per-channel stream channel registers: an address inside
+/// a stream channel block decodes to (channel number, register offset).
+/// Covered slots: SCPx/SCPSx/SCPDx/SCDAx (§36.57–§36.60) and the mandatory
+/// SCCx/SCCFGx (§36.62/§36.63, CR-494cd/CR-495cd). Addresses outside those
+/// slots answer `None` (reserved, like the unimplemented channel-0 slots
+/// SCSP0..SCEBA0 do for reads), as do channel numbers past 511 — the spec
+/// defines channels 0..511, and unchecked the formula would reach far beyond
 /// (e.g. 0x0010_0000, the sim's XML blob base, decodes as channel 262092).
 pub fn stream_channel_addr(addr: u32) -> Option<(u32, u32)> {
     let rel = addr.checked_sub(SCP0)?;
@@ -135,7 +196,11 @@ pub fn stream_channel_addr(addr: u32) -> Option<(u32, u32)> {
     if x >= 512 {
         return None;
     }
-    matches!(off, SCP_OFFSET | SCPS_OFFSET | SCPD_OFFSET | SCDA_OFFSET).then_some((x, off))
+    matches!(
+        off,
+        SCP_OFFSET | SCPS_OFFSET | SCPD_OFFSET | SCDA_OFFSET | SCC_OFFSET | SCCFG_OFFSET
+    )
+    .then_some((x, off))
 }
 
 // Net If Capability / Configuration bits (spec §36.5, print bits 0/1/2:
@@ -296,6 +361,17 @@ mod tests {
         assert_eq!(stream_channel_addr(scda(3)), Some((3, SCDA_OFFSET)));
         assert_eq!(stream_channel_addr(scps(511)), Some((511, SCPS_OFFSET)));
         assert_eq!(stream_channel_addr(SCSP0), None);
+        // §36.62/§36.63 (CR-494cd/CR-495cd: mandatory for GVSP devices):
+        // SCCx/SCCFGx live in the same 0x40 block and decode like the rest.
+        assert_eq!(SCC0, 0x0D20);
+        assert_eq!(SCCFG0, 0x0D24);
+        assert_eq!(stream_channel_addr(SCC0), Some((0, SCC_OFFSET)));
+        assert_eq!(stream_channel_addr(SCCFG0), Some((0, SCCFG_OFFSET)));
+        assert_eq!(stream_channel_addr(SCC0 + 0x40 * 2), Some((2, SCC_OFFSET)));
+        assert_eq!(
+            stream_channel_addr(SCCFG0 + 0x40 * 2),
+            Some((2, SCCFG_OFFSET))
+        );
         assert_eq!(stream_channel_addr(SCP0 - 4), None);
         // 0x0D3C (SCEBA0) is inside block 0 but not a mapped slot.
         assert_eq!(stream_channel_addr(SCEBA0), None);
