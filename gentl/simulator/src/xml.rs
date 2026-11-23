@@ -10,7 +10,10 @@ use std::fmt::Write as _;
 
 use gentl_gvcp::registers as reg;
 
-use crate::regmap::{REG_EXPOSURE_TIME, REG_HEIGHT, REG_PIXEL_FORMAT, REG_WIDTH};
+use crate::regmap::{
+    REG_EXPOSURE_TIME, REG_HEIGHT, REG_PIXEL_FORMAT, REG_REVERSE_X, REG_REVERSE_Y,
+    REG_TEST_PATTERN, REG_USER_SET_LOAD, REG_USER_SET_SAVE, REG_USER_SET_SELECTOR, REG_WIDTH,
+};
 
 // Placeholder-style GUIDs in the same spirit as the SFNC reference file;
 // they only need to be syntactically valid GUID_t values.
@@ -47,6 +50,7 @@ ProductGuid=\"{PRODUCT_GUID}\" VersionGuid=\"{VERSION_GUID}\">"
          \x20     <pFeature>DeviceControl</pFeature>\n\
          \x20     <pFeature>ImageFormatControl</pFeature>\n\
          \x20     <pFeature>AcquisitionControl</pFeature>\n\
+         \x20     <pFeature>UserSetControl</pFeature>\n\
          \x20   </Category>\n\
          \x20   <Category Name=\"DeviceControl\" NameSpace=\"Standard\">\n\
          \x20     <ToolTip>Device information and control.</ToolTip>\n\
@@ -69,6 +73,9 @@ ProductGuid=\"{PRODUCT_GUID}\" VersionGuid=\"{VERSION_GUID}\">"
          \x20     <pFeature>Width</pFeature>\n\
          \x20     <pFeature>Height</pFeature>\n\
          \x20     <pFeature>PixelFormat</pFeature>\n\
+         \x20     <pFeature>ReverseX</pFeature>\n\
+         \x20     <pFeature>ReverseY</pFeature>\n\
+         \x20     <pFeature>TestPattern</pFeature>\n\
          \x20   </Category>\n\
          \x20   <Category Name=\"AcquisitionControl\" NameSpace=\"Standard\">\n\
          \x20     <ToolTip>Acquisition control.</ToolTip>\n\
@@ -77,6 +84,16 @@ ProductGuid=\"{PRODUCT_GUID}\" VersionGuid=\"{VERSION_GUID}\">"
          \x20     <Visibility>Beginner</Visibility>\n\
          \x20     <ImposedAccessMode>RO</ImposedAccessMode>\n\
          \x20     <pFeature>ExposureTime</pFeature>\n\
+         \x20   </Category>\n\
+         \x20   <Category Name=\"UserSetControl\" NameSpace=\"Standard\">\n\
+         \x20     <ToolTip>Save and load the complete feature set.</ToolTip>\n\
+         \x20     <Description>Save and load the complete feature set.</Description>\n\
+         \x20     <DisplayName>User Set Control</DisplayName>\n\
+         \x20     <Visibility>Beginner</Visibility>\n\
+         \x20     <ImposedAccessMode>RO</ImposedAccessMode>\n\
+         \x20     <pFeature>UserSetSelector</pFeature>\n\
+         \x20     <pFeature>UserSetSave</pFeature>\n\
+         \x20     <pFeature>UserSetLoad</pFeature>\n\
          \x20   </Category>\n\
          \x20 </Group>\n",
     );
@@ -131,6 +148,59 @@ ProductGuid=\"{PRODUCT_GUID}\" VersionGuid=\"{VERSION_GUID}\">"
          \x20   </Enumeration>\n",
     );
     int_reg(&mut x, "PixelFormatReg", REG_PIXEL_FORMAT);
+
+    for (name, display, tooltip, reg_addr) in [
+        (
+            "ReverseX",
+            "Reverse X",
+            "Mirror the image horizontally (SFNC ReverseX).",
+            REG_REVERSE_X,
+        ),
+        (
+            "ReverseY",
+            "Reverse Y",
+            "Mirror the image vertically (SFNC ReverseY).",
+            REG_REVERSE_Y,
+        ),
+    ] {
+        let reg = format!("{name}Reg");
+        let _ = writeln!(
+            x,
+            "    <Boolean Name=\"{name}\" NameSpace=\"Standard\">\n\
+             \x20     <ToolTip>{tooltip}</ToolTip>\n\
+             \x20     <Description>{tooltip}</Description>\n\
+             \x20     <DisplayName>{display}</DisplayName>\n\
+             \x20     <Visibility>Beginner</Visibility>\n\
+             \x20     <pValue>{reg}</pValue>\n\
+             \x20   </Boolean>"
+        );
+        int_reg(&mut x, &reg, reg_addr);
+    }
+    x.push_str(
+        "    <Enumeration Name=\"TestPattern\" NameSpace=\"Standard\">\n\
+         \x20     <ToolTip>Selects a synthetic test image (the generator switches the pattern).</ToolTip>\n\
+         \x20     <Description>Selects a synthetic test image.</Description>\n\
+         \x20     <DisplayName>Test Pattern</DisplayName>\n\
+         \x20     <Visibility>Expert</Visibility>\n",
+    );
+    for (name, value) in [
+        ("Off", 0u32),
+        ("GreyHorizontalRamp", 1),
+        ("GreyVerticalRamp", 2),
+    ] {
+        let _ = writeln!(
+            x,
+            "      <EnumEntry Name=\"{name}\" NameSpace=\"Standard\">\n\
+             \x20       <DisplayName>{name}</DisplayName>\n\
+             \x20       <Value>{value}</Value>\n\
+             \x20     </EnumEntry>"
+        );
+    }
+    x.push_str(
+        "      <pValue>TestPatternReg</pValue>\n\
+         \x20   </Enumeration>\n",
+    );
+    int_reg(&mut x, "TestPatternReg", REG_TEST_PATTERN);
     x.push_str("  </Group>\n");
 
     let _ = writeln!(
@@ -157,6 +227,56 @@ ProductGuid=\"{PRODUCT_GUID}\" VersionGuid=\"{VERSION_GUID}\">"
          \x20 </Group>"
     );
 
+    // SFNC UserSetControl: the sim really snapshots/restores the feature
+    // register area (UserSetSave/UserSetLoad), see regmap.rs.
+    x.push_str("  <Group Comment=\"UserSetControl\">\n");
+    x.push_str(
+        "    <Enumeration Name=\"UserSetSelector\" NameSpace=\"Standard\">\n\
+         \x20     <ToolTip>Selects the user set to load or save.</ToolTip>\n\
+         \x20     <Description>Selects the user set to load or save.</Description>\n\
+         \x20     <DisplayName>User Set Selector</DisplayName>\n\
+         \x20     <Visibility>Expert</Visibility>\n\
+         \x20     <EnumEntry Name=\"Default\" NameSpace=\"Standard\">\n\
+         \x20       <DisplayName>Default</DisplayName>\n\
+         \x20       <Value>0</Value>\n\
+         \x20     </EnumEntry>\n\
+         \x20     <EnumEntry Name=\"UserSet1\" NameSpace=\"Standard\">\n\
+         \x20       <DisplayName>User Set 1</DisplayName>\n\
+         \x20       <Value>1</Value>\n\
+         \x20     </EnumEntry>\n\
+         \x20     <pValue>UserSetSelectorReg</pValue>\n\
+         \x20   </Enumeration>\n",
+    );
+    int_reg(&mut x, "UserSetSelectorReg", REG_USER_SET_SELECTOR);
+    for (name, display, tooltip, reg_addr) in [
+        (
+            "UserSetSave",
+            "User Set Save",
+            "Saves the current feature set into the selected user set.",
+            REG_USER_SET_SAVE,
+        ),
+        (
+            "UserSetLoad",
+            "User Set Load",
+            "Loads the selected user set into the active feature set.",
+            REG_USER_SET_LOAD,
+        ),
+    ] {
+        let reg = format!("{name}Reg");
+        let _ = writeln!(
+            x,
+            "    <Command Name=\"{name}\" NameSpace=\"Standard\">\n\
+             \x20     <ToolTip>{tooltip}</ToolTip>\n\
+             \x20     <Description>{tooltip}</Description>\n\
+             \x20     <DisplayName>{display}</DisplayName>\n\
+             \x20     <Visibility>Expert</Visibility>\n\
+             \x20     <pValue>{reg}</pValue>\n\
+             \x20     <CommandValue>1</CommandValue>\n\
+             \x20   </Command>"
+        );
+        int_reg(&mut x, &reg, reg_addr);
+    }
+    x.push_str("  </Group>\n");
     x.push_str("</RegisterDescription>\n");
     x
 }
@@ -234,9 +354,14 @@ mod tests {
         }
         assert!(x.contains("<pPort>Device</pPort>"));
         assert!(x.contains("<Port Name=\"Device\" NameSpace=\"Standard\">"));
-        // Feature surface: 4 EnumEntries, the min/max constraints, identity
-        // StringRegs bound to the bootstrap string slots.
-        assert_eq!(x.matches("<EnumEntry ").count(), 4);
+        // Feature surface: PixelFormat (4) + TestPattern (3) + UserSetSelector
+        // (2) EnumEntries, the min/max constraints, identity StringRegs bound
+        // to the bootstrap string slots.
+        assert_eq!(x.matches("<EnumEntry ").count(), 9);
+        assert!(x.contains("<Boolean Name=\"ReverseX\""));
+        assert!(x.contains("<Enumeration Name=\"TestPattern\""));
+        assert!(x.contains("<Command Name=\"UserSetSave\""));
+        assert!(x.contains("<Category Name=\"UserSetControl\""));
         assert!(x.contains("<Min>10.0</Min>") && x.contains("<Max>100000.0</Max>"));
         assert!(x.contains("<StringReg Name=\"DeviceVendorName\""));
         assert!(x.contains(&format!(

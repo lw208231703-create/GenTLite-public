@@ -32,16 +32,16 @@
 //! count).
 
 use std::collections::BTreeSet;
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 use gentl_gvcp::DeviceHandler;
 
-use crate::emitter::{ChannelSink, StreamParams, StreamScheduler, DEFAULT_PAYLOAD};
+use crate::emitter::{ChannelSink, PatternConfig, StreamParams, StreamScheduler, DEFAULT_PAYLOAD};
 use crate::{SimConfig, StreamConfig, StreamingProtocol};
 
 // Generic error (spec Appendix B.21); gentl-gvcp's wire module does not
@@ -59,7 +59,21 @@ pub const REG_HEIGHT: u32 = USER_BASE + 4;
 pub const REG_PIXEL_FORMAT: u32 = USER_BASE + 8;
 /// ExposureTime register (IEEE754 binary32 BE, microseconds, RW).
 pub const REG_EXPOSURE_TIME: u32 = USER_BASE + 12;
-const USER_LEN: u32 = 16;
+/// SFNC ReverseX/ReverseY (image generator mirrors the fake frame).
+pub const REG_REVERSE_X: u32 = USER_BASE + 16;
+pub const REG_REVERSE_Y: u32 = USER_BASE + 20;
+/// SFNC TestPattern (0 = off, 1 = horizontal ramp, 2 = vertical ramp).
+pub const REG_TEST_PATTERN: u32 = USER_BASE + 24;
+/// SFNC UserSetControl command/selector registers.
+pub const REG_USER_SET_SELECTOR: u32 = USER_BASE + 28;
+pub const REG_USER_SET_SAVE: u32 = USER_BASE + 32;
+pub const REG_USER_SET_LOAD: u32 = USER_BASE + 36;
+/// Test event source (message channel): event id, EVENTDATA payload length
+/// (0 = plain EVENT_CMD) and the self-clearing trigger.
+pub const REG_TEST_EVENT_ID: u32 = USER_BASE + 40;
+pub const REG_TEST_EVENT_DATA_LEN: u32 = USER_BASE + 44;
+pub const REG_TEST_EVENT_TRIGGER: u32 = USER_BASE + 48;
+const USER_LEN: u32 = 52;
 
 /// Base address of the embedded GenICam XML blob.
 pub const XML_BASE: u32 = 0x0010_0000;
@@ -153,6 +167,12 @@ const BOOT_REGS: &[BootReg] = &[
     br(reg::TIMESTAMP_VALUE_LOW, 4, Ro),
     br(reg::CCP, 4, Rw),
     br(reg::STREAMING_CONFIGURATION, 4, Rw),
+    br(reg::MESSAGE_CHANNEL_PORT, 4, Rw),
+    br(reg::MESSAGE_CHANNEL_DEST_ADDRESS, 4, Rw),
+    br(reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT, 4, Rw),
+    br(reg::MESSAGE_CHANNEL_RETRY_COUNT, 4, Rw),
+    br(reg::MESSAGE_CHANNEL_SOURCE_PORT, 4, Ro),
+    br(reg::MESSAGE_CHANNEL_CONFIGURATION, 4, Rw),
 ];
 
 const BOOT_LEN: u32 = 0x1000;
@@ -165,16 +185,28 @@ const W_SCPS: usize = 1;
 const W_SCPD: usize = 2;
 /// Word index of the SCDAx value inside a channel's register block.
 const W_SCDA: usize = 3;
+/// Word index of the SCCx capability value inside a channel's register block
+/// (§36.62/CR-494cd: mandatory for GVSP devices; the sim implements none of
+/// the optional per-channel features, so it reads 0).
+const W_SCC: usize = 4;
+/// Word index of the SCCFGx configuration value inside a channel's register
+/// block (§36.63/CR-495cd: mandatory for GVSP devices; reserved bits, only a
+/// zero write is accepted, and R-590cd forbids writes while streaming).
+const W_SCCFG: usize = 5;
+/// Words stored per stream channel register block.
+const CHANNEL_WORDS: usize = 6;
 
-/// Map a stream channel register offset (spec §36.57–§36.60) to its word
-/// index inside the channel's register block. Only called with offsets
-/// validated by [`reg::stream_channel_addr`].
+/// Map a stream channel register offset (§36.57–§36.63) to its word index
+/// inside the channel's register block. Only called with offsets validated
+/// by [`reg::stream_channel_addr`].
 fn channel_word_index(off: u32) -> usize {
     match off {
         reg::SCP_OFFSET => W_SCP,
         reg::SCPS_OFFSET => W_SCPS,
         reg::SCPD_OFFSET => W_SCPD,
-        _ => W_SCDA,
+        reg::SCDA_OFFSET => W_SCDA,
+        reg::SCC_OFFSET => W_SCC,
+        _ => W_SCCFG,
     }
 }
 
@@ -187,6 +219,34 @@ struct CcpState {
     /// CCP bits 16-19: incremented on every channel open, never 0 again
     /// after the first connection (saturating at 15).
     connection_count: u32,
+    /// Last command from the primary application (§10.5): used for the
+    /// heartbeat watchdog. `None` while no control channel is open.
+    last_activity: Option<Instant>,
+}
+
+impl Inner {
+    /// GenTL-style watchdog pair for the control channel:
+    /// - R-075cd: any valid command from the primary resets the heartbeat
+    ///   counter;
+    /// - R-076cd: without one for 3x the heartbeat timeout (§10.5) the
+    ///   device MUST close the control channel — modelled by releasing the
+    ///   granted privilege (the client's next command sees `CCP == 0`).
+    fn primary_contact(&mut self) {
+        if self.ccp.flags == 0 {
+            return;
+        }
+        let window = Duration::from_millis(3 * u64::from(self.heartbeat_ms));
+        if self
+            .ccp
+            .last_activity
+            .is_some_and(|last| last.elapsed() >= window)
+        {
+            self.ccp.flags = 0;
+            self.ccp.last_activity = None;
+            return;
+        }
+        self.ccp.last_activity = Some(Instant::now());
+    }
 }
 
 /// Everything mutable; the map is reachable only through `&self`.
@@ -196,14 +256,20 @@ struct Inner {
     boot: Vec<u8>,
     /// Backing bytes for the user register area.
     user: [u8; USER_LEN as usize],
+    /// SFNC UserSet1 snapshot (UserSetSave/UserSetLoad).
+    user_saved: [u8; USER_LEN as usize],
     ccp: CcpState,
     heartbeat_ms: u32,
+    /// Open message channel destination (MCDA + MCP) when both are set.
+    message_dest: Option<SocketAddr>,
+    /// Message channel sequence (test event source).
+    event_seq: u32,
     ts_epoch: Instant,
     /// Stream channel registers per channel (spec §36.57–§36.60), indexed
     /// by channel number: [SCPx, SCPSx, SCPDx, SCDAx]. The vec holds
     /// `StreamConfig::channels` entries; channels past that count are
     /// optional in the spec and answer GEV_STATUS_INVALID_ADDRESS.
-    channels: Vec<[u32; 4]>,
+    channels: Vec<[u32; CHANNEL_WORDS]>,
 }
 
 /// Register/memory model of one simulated camera.
@@ -231,10 +297,13 @@ impl SimRegMap {
             inner: Mutex::new(Inner {
                 boot: vec![0u8; BOOT_LEN as usize],
                 user: [0u8; USER_LEN as usize],
+                user_saved: [0u8; USER_LEN as usize],
                 ccp: CcpState::default(),
                 heartbeat_ms: HEARTBEAT_DEFAULT_MS,
+                message_dest: None,
+                event_seq: 0,
                 ts_epoch: Instant::now(),
-                channels: vec![[0; 4]; n_channels],
+                channels: vec![[0; CHANNEL_WORDS]; n_channels],
             }),
             scheduler: StreamScheduler::new(),
             block_scps_writes: AtomicBool::new(true),
@@ -253,8 +322,63 @@ impl SimRegMap {
         boot[addr as usize..addr as usize + n].copy_from_slice(&bytes[..n]);
     }
 
-    fn init_bootstrap(&mut self) {
-        let mut i = self.inner.lock().expect("sim regmap poisoned");
+    /// R-075cd heartbeat bookkeeping: every valid command from the primary
+    /// application refreshes the control-channel watchdog; an idle channel is
+    /// closed after 3x the heartbeat timeout (R-076cd, §10.5).
+    fn primary_contact(&self) {
+        self.inner
+            .lock()
+            .expect("sim regmap poisoned")
+            .primary_contact();
+    }
+
+    /// Test hook: send one EVENT_CMD (payload length 0) or EVENTDATA_CMD with
+    /// a deterministic payload on the open message channel.
+    fn emit_test_event(&self) {
+        let (dest, event_id, data_len, timestamp) = {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            i.event_seq = i.event_seq.wrapping_add(1);
+            let word = |reg_addr: u32| {
+                u32::from_be_bytes(
+                    i.user[(reg_addr - USER_BASE) as usize..][..4]
+                        .try_into()
+                        .expect("u32"),
+                )
+            };
+            let timestamp = i.ts_epoch.elapsed().as_micros() as u64;
+            (
+                i.message_dest,
+                word(REG_TEST_EVENT_ID) as u16,
+                (word(REG_TEST_EVENT_DATA_LEN) as usize).min(8),
+                timestamp,
+            )
+        };
+        let Some(dest) = dest else { return };
+        let data: Vec<u8> = (0..data_len).map(|k| 0xE0u8.wrapping_add(k as u8)).collect();
+        let command = if data.is_empty() {
+            EVENT_CMD
+        } else {
+            EVENTDATA_CMD
+        };
+        let record_size = EVENT_RECORD_LEN + data.len();
+        let mut datagram = Vec::with_capacity(HEADER_LEN + record_size);
+        datagram.extend_from_slice(&[0x42, 0x08]); // GVCP key; flag bit 3 extended id
+        datagram.extend_from_slice(&command.to_be_bytes());
+        datagram.extend_from_slice(&(record_size as u16).to_be_bytes());
+        datagram.extend_from_slice(&0u16.to_be_bytes()); // req_id: unsolicited
+        datagram.extend_from_slice(&(record_size as u16).to_be_bytes());
+        datagram.extend_from_slice(&event_id.to_be_bytes());
+        datagram.extend_from_slice(&0xFFFFu16.to_be_bytes()); // no stream channel
+        datagram.extend_from_slice(&0u16.to_be_bytes());
+        datagram.extend_from_slice(&0u64.to_be_bytes()); // no block id
+        datagram.extend_from_slice(&timestamp.to_be_bytes());
+        datagram.extend_from_slice(&data);
+        if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+            let _ = socket.send_to(&datagram, dest);
+        }
+    }
+
+    fn init_bootstrap(&mut self) {        let mut i = self.inner.lock().expect("sim regmap poisoned");
         let boot = &mut i.boot;
         let cfg = &self.config;
         Self::w32(boot, reg::VERSION, VERSION_VALUE);
@@ -269,8 +393,20 @@ impl SimRegMap {
             reg::DEVICE_MAC_LOW,
             u32::from_be_bytes([cfg.mac[2], cfg.mac[3], cfg.mac[4], cfg.mac[5]]),
         );
-        Self::w32(boot, reg::NET_IF_CAPABILITY, reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA);
-        Self::w32(boot, reg::NET_IF_CONFIGURATION, reg::IP_CFG_PERSISTENT_IP);
+        // GigE Vision 3.0 §4.3: DHCP support is mandatory ("this bit is
+        // always 1"); §4.4: LLA support is mandatory and always active
+        // (configuration bit 29 is always set). Persistent IP is optional
+        // and advertised because the sim runs a static address.
+        Self::w32(
+            boot,
+            reg::NET_IF_CAPABILITY,
+            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA,
+        );
+        Self::w32(
+            boot,
+            reg::NET_IF_CONFIGURATION,
+            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
+        );
         Self::w32(boot, reg::CURRENT_IP, u32::from(cfg.ip));
         Self::w32(boot, reg::CURRENT_SUBNET_MASK, u32::from(cfg.subnet_mask));
         Self::w32(boot, reg::CURRENT_DEFAULT_GATEWAY, u32::from(cfg.gateway));
@@ -284,7 +420,10 @@ impl SimRegMap {
         Self::wstr(boot, reg::FIRST_URL, &url);
         // SECOND_URL stays empty (R-445cd: register present, may be unused).
         Self::w32(boot, reg::NUM_NETWORK_INTERFACES, 1);
-        Self::w32(boot, reg::NUM_MESSAGE_CHANNELS, 0);
+        Self::w32(boot, reg::NUM_MESSAGE_CHANNELS, 1);
+        // Message Channel Capability (§36.28): no optional features (MCSP /
+        // MCCFG / EVENTDATA concatenation) are implemented.
+        Self::w32(boot, reg::MESSAGE_CHANNEL_CAPABILITY, 0);
         // Streaming Configuration factory default follows the supported
         // modes (§36.38: GVSP if supported, GVRSP-only otherwise). Bit 1 is
         // the deprecated always-1 bit. A GVRSP-only device has no GVSP
@@ -385,6 +524,17 @@ impl SimRegMap {
                 out.extend_from_slice(
                     &self.xml[(pos - XML_BASE) as usize..(take_end - XML_BASE) as usize],
                 );
+            } else if pos >= XML_BASE + self.xml.len() as u32
+                && pos < XML_BASE + self.xml.len() as u32 + 4
+                && (out.len() as u32) < len
+            {
+                // The GenTL XML fetch aligns each READMEM chunk up to a
+                // 4-byte multiple, so the last chunk can start past the blob
+                // end when the XML length is not aligned. The XML is the
+                // sim's own memory (not a device mapping boundary): pad the
+                // requested tail with zeros instead of INVALID_ADDRESS.
+                out.resize(len as usize, 0);
+                take_end = end;
             } else {
                 return Err(GEV_STATUS_INVALID_ADDRESS);
             }
@@ -420,8 +570,8 @@ impl DeviceHandler for SimRegMap {
             spec_version_minor: 2,
             device_mode: DEVICE_MODE_VALUE,
             mac: cfg.mac,
-            ip_config_options: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
-            ip_config_current: reg::IP_CFG_PERSISTENT_IP,
+            ip_config_options: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA,
+            ip_config_current: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
             current_ip: u32::from(cfg.ip),
             current_subnet_mask: u32::from(cfg.subnet_mask),
             default_gateway: u32::from(cfg.gateway),
@@ -438,6 +588,9 @@ impl DeviceHandler for SimRegMap {
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
+        // R-075cd: any valid command from the primary application resets the
+        // heartbeat counter (and an idle channel times out, R-076cd).
+        self.primary_contact();
         if let Some((x, off)) = reg::stream_channel_addr(addr) {
             let i = self.inner.lock().expect("sim regmap poisoned");
             if Self::streaming_mode(&i) == reg::SCONF_PROTOCOL_GVRSP {
@@ -478,6 +631,7 @@ impl DeviceHandler for SimRegMap {
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
+        self.primary_contact();
         if let Some((x, off)) = reg::stream_channel_addr(addr) {
             return self.write_stream_channel(x, off, value);
         }
@@ -490,6 +644,7 @@ impl DeviceHandler for SimRegMap {
             // non-zero write is denied.
             if value == 0 {
                 i.ccp.flags = 0;
+                i.ccp.last_activity = None;
                 return Ok(());
             }
             let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
@@ -504,13 +659,34 @@ impl DeviceHandler for SimRegMap {
                     reg::CCP_CONTROL_ACCESS
                 };
                 i.ccp.connection_count = (i.ccp.connection_count + 1).min(0xF);
+                i.ccp.last_activity = Some(Instant::now());
                 return Ok(());
             }
             return if requested == i.ccp.flags {
+                // R-069cd: a repeated identical request succeeds and counts
+                // as primary traffic for the heartbeat window.
+                i.ccp.last_activity = Some(Instant::now());
                 Ok(())
             } else {
                 Err(GEV_STATUS_ACCESS_DENIED)
             };
+        }
+        if addr == reg::MESSAGE_CHANNEL_DEST_ADDRESS || addr == reg::MESSAGE_CHANNEL_PORT {
+            // §12.2: the channel opens when MCP carries a non-zero host port
+            // (MCDA first); §12.4: MCP = 0 closes it.
+            i.boot[addr as usize..addr as usize + 4].copy_from_slice(&value.to_be_bytes());
+            let read = |a: u32| {
+                u32::from_be_bytes(
+                    i.boot[a as usize..a as usize + 4]
+                        .try_into()
+                        .expect("u32"),
+                )
+            };
+            let port = reg::mcp_host_port(read(reg::MESSAGE_CHANNEL_PORT));
+            let dest_ip = read(reg::MESSAGE_CHANNEL_DEST_ADDRESS);
+            i.message_dest = (port != 0 && dest_ip != 0)
+                .then(|| SocketAddr::from((Ipv4Addr::from(dest_ip), port)));
+            return Ok(());
         }
         if addr == reg::HEARTBEAT_TIMEOUT {
             // [O-460cd]: values below 500 ms are coerced to 500 ms and the
@@ -562,15 +738,142 @@ impl DeviceHandler for SimRegMap {
             return Ok(());
         }
         if addr >= USER_BASE && addr + 4 <= USER_BASE + USER_LEN {
+            // SFNC features with real semantics on the user register area:
+            // UserSetSave/Load snapshot and restore the whole feature set,
+            // and the image generator reads TestPattern/ReverseX/ReverseY at
+            // channel open (the sim freezes them with the packet geometry).
+            match addr {
+                REG_USER_SET_SAVE => {
+                    let selector = u32::from_be_bytes(
+                        i.user[(REG_USER_SET_SELECTOR - USER_BASE) as usize..][..4]
+                            .try_into()
+                            .expect("u32"),
+                    );
+                    if value != 0 && selector == 1 {
+                        i.user_saved = i.user;
+                    }
+                    i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
+                        .copy_from_slice(&0u32.to_be_bytes());
+                    return Ok(());
+                }
+                REG_USER_SET_LOAD => {
+                    let selector = u32::from_be_bytes(
+                        i.user[(REG_USER_SET_SELECTOR - USER_BASE) as usize..][..4]
+                            .try_into()
+                            .expect("u32"),
+                    );
+                    if value != 0 && selector == 1 {
+                        let saved = i.user_saved;
+                        i.user = saved;
+                    }
+                    i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
+                        .copy_from_slice(&0u32.to_be_bytes());
+                    return Ok(());
+                }
+                REG_TEST_PATTERN => {
+                    if value <= 2 {
+                        i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
+                            .copy_from_slice(&value.to_be_bytes());
+                    }
+                    return Ok(());
+                }
+                REG_REVERSE_X | REG_REVERSE_Y | REG_USER_SET_SELECTOR => {
+                    if value <= 1 {
+                        i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
+                            .copy_from_slice(&value.to_be_bytes());
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
             i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
                 .copy_from_slice(&value.to_be_bytes());
+            if addr == REG_TEST_EVENT_TRIGGER {
+                // Self-clearing trigger: fire one event on the open message
+                // channel (device-side test source, §17.1/§17.2).
+                i.user[(addr - USER_BASE) as usize..(addr - USER_BASE + 4) as usize]
+                    .copy_from_slice(&0u32.to_be_bytes());
+                drop(i);
+                self.emit_test_event();
+            }
             return Ok(());
         }
         Err(GEV_STATUS_INVALID_ADDRESS)
     }
 
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+        // READMEM is a primary-application command like READREG: it resets
+        // the heartbeat watchdog (R-075cd).
+        self.primary_contact();
         self.read_mapped(addr, count as u32)
+    }
+
+    fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        // R-185cd: WRITEMEM is mandatory for every device. R-188cd/R-189c:
+        // a length that is not a multiple of 4 or an unaligned address is
+        // BAD_ALIGNMENT.
+        if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
+            return Err(GEV_STATUS_BAD_ALIGNMENT);
+        }
+        // The GenICam XML blob is read-only device-description memory.
+        if addr >= XML_BASE && addr + data.len() as u32 <= XML_BASE + self.xml.len() as u32 {
+            return Err(GEV_STATUS_WRITE_PROTECT);
+        }
+        // Apply word by word through the register model so every access rule
+        // (write protect, stream gate, bootstrap/user split) is unchanged.
+        for (i, word) in data.chunks_exact(4).enumerate() {
+            let word_addr = addr + 4 * i as u32;
+            let value = u32::from_be_bytes(word.try_into().expect("4-byte chunk"));
+            self.write_reg(word_addr, value)?;
+        }
+        Ok(())
+    }
+
+    fn force_ip(
+        &self,
+        _peer: SocketAddr,
+        request: ForceIpRequest,
+    ) -> gentl_gvcp::wire::ForceIpOutcome {
+        use gentl_gvcp::wire::ForceIpOutcome;
+        // R-149cd: a FORCEIP_CMD aimed at another MAC is silently discarded
+        // (the application broadcasts it, so every device sees it).
+        if request.mac != self.config.mac {
+            return ForceIpOutcome::Ignore;
+        }
+        {
+            let i = self.inner.lock().expect("sim regmap poisoned");
+            // R-150cd: only process the command when no application holds
+            // exclusive or control access.
+            if i.ccp.flags != 0 {
+                return ForceIpOutcome::Ignore;
+            }
+        }
+        if request.static_ip == 0 {
+            // R-151cd: close every stream channel and restart the IP
+            // configuration cycle; no ACK is sent. The sim re-applies its
+            // configured address — the cycle has nothing else to negotiate.
+            for x in 0..self.stream.channels.max(1) as u32 {
+                let _ = self.write_scp(x, 0);
+            }
+            return ForceIpOutcome::Ignore;
+        }
+        // R-152cd: install the temporary static IP configuration, then
+        // acknowledge it (the GVCP server sends the ACK once this returns).
+        {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            Self::w32(&mut i.boot, reg::CURRENT_IP, request.static_ip);
+            Self::w32(
+                &mut i.boot,
+                reg::CURRENT_SUBNET_MASK,
+                request.subnet_mask,
+            );
+            Self::w32(
+                &mut i.boot,
+                reg::CURRENT_DEFAULT_GATEWAY,
+                request.default_gateway,
+            );
+        }
+        ForceIpOutcome::Ack
     }
 }
 
@@ -579,6 +882,9 @@ impl SimRegMap {
     /// last-block cache (or answer GEV_STATUS_PACKET_UNAVAILABLE when the
     /// block is gone — CR-205st).
     pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        // A resend request is a valid GVCP command from the primary
+        // application, so it also refreshes the heartbeat (R-075cd).
+        self.primary_contact();
         self.scheduler.packet_resend(channel, block_id, first, last);
     }
 
@@ -628,6 +934,25 @@ impl SimRegMap {
         }
         if off == reg::SCPS_OFFSET {
             return self.write_scps(x, value);
+        }
+        if off == reg::SCC_OFFSET {
+            // §36.62/CR-494cd: mandatory capability register, read-only. No
+            // optional per-channel feature is implemented, so it reads 0.
+            return Err(GEV_STATUS_WRITE_PROTECT);
+        }
+        if off == reg::SCCFG_OFFSET {
+            // §36.63/CR-495cd: mandatory configuration register. R-590cd
+            // disables write access while streaming; with no capability bit
+            // set every configuration bit is reserved, so a non-zero write
+            // is an invalid parameter.
+            if self.scheduler.is_streaming(x as u16) {
+                return Err(GEV_STATUS_BUSY);
+            }
+            if value != 0 {
+                return Err(GEV_STATUS_INVALID_PARAMETER);
+            }
+            self.inner.lock().expect("sim regmap poisoned").channels[x as usize][W_SCCFG] = 0;
+            return Ok(());
         }
         // §36.59: SCPDx is not writable while the channel is streaming —
         // the value is frozen at open (R-586cd rejects in-stream SCPx
@@ -724,9 +1049,22 @@ impl SimRegMap {
                     return Err(GEV_STATUS_BUSY);
                 }
                 let words = i.channels[x as usize];
+                let user_word = |reg_addr: u32| {
+                    u32::from_be_bytes(
+                        i.user[(reg_addr - USER_BASE) as usize..][..4]
+                            .try_into()
+                            .expect("u32"),
+                    )
+                };
+                let pattern = PatternConfig {
+                    test_pattern: user_word(REG_TEST_PATTERN),
+                    reverse_x: user_word(REG_REVERSE_X) != 0,
+                    reverse_y: user_word(REG_REVERSE_Y) != 0,
+                };
                 (
                     SocketAddr::from((Ipv4Addr::from(words[W_SCDA]), port)),
-                    StreamParams::new(&self.stream, words[W_SCPS], words[W_SCPD]),
+                    StreamParams::new(&self.stream, words[W_SCPS], words[W_SCPD])
+                        .with_pattern(pattern),
                 )
             };
             let sink = ChannelSink::open(target, params).map_err(|_| GEV_STATUS_ERROR)?;
@@ -795,6 +1133,16 @@ impl DeviceHandler for SimDevice {
     }
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
         self.map.read_mem(addr, count)
+    }
+    fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.map.write_mem(addr, data)
+    }
+    fn force_ip(
+        &self,
+        peer: SocketAddr,
+        request: gentl_gvcp::wire::ForceIpRequest,
+    ) -> gentl_gvcp::wire::ForceIpOutcome {
+        self.map.force_ip(peer, request)
     }
     fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
         self.map.packet_resend(channel, block_id, first, last);
@@ -934,7 +1282,8 @@ mod tests {
                 pixel_format: 0x0110_0007, // Mono16
                 channels: 1,
                 legacy_headers: false,
-            },
+            chunk: None,
+        },
         );
         assert_eq!(m.read_reg(REG_WIDTH).unwrap(), 640);
         assert_eq!(m.read_reg(REG_HEIGHT).unwrap(), 480);
@@ -993,6 +1342,36 @@ mod tests {
         m.write_reg(reg::SCP0, 0).unwrap();
     }
 
+    /// §36.62/§36.63 (CR-494cd/CR-495cd): SCCx/SCCFGx are mandatory for
+    /// GVSP devices. The sim supports no optional per-channel feature, so
+    /// SCC0 reads 0 and SCCFG0 accepts only a zero write; R-590cd disables
+    /// the write while streaming.
+    #[test]
+    fn stream_channel_capability_and_config_registers() {
+        let m = test_map();
+        assert_eq!(m.read_reg(reg::SCC0).unwrap(), 0);
+        assert_eq!(m.read_reg(reg::SCCFG0).unwrap(), 0);
+        // Write-protected capability register.
+        assert_eq!(
+            m.write_reg(reg::SCC0, 0).unwrap_err(),
+            GEV_STATUS_WRITE_PROTECT
+        );
+        // Reserved configuration bits: only zero is accepted.
+        m.write_reg(reg::SCCFG0, 0).unwrap();
+        assert_eq!(
+            m.write_reg(reg::SCCFG0, 1).unwrap_err(),
+            GEV_STATUS_INVALID_PARAMETER
+        );
+        // R-590cd: write access is disabled during streaming.
+        m.write_reg(reg::SCP0, reg::scp_make(3956)).unwrap();
+        assert_eq!(m.write_reg(reg::SCCFG0, 0).unwrap_err(), GEV_STATUS_BUSY);
+        m.write_reg(reg::SCP0, 0).unwrap();
+        m.write_reg(reg::SCCFG0, 0).unwrap();
+        // READMEM sees the same values.
+        assert_eq!(m.read_mem(reg::SCC0, 4).unwrap(), vec![0, 0, 0, 0]);
+        assert_eq!(m.read_mem(reg::SCCFG0, 4).unwrap(), vec![0, 0, 0, 0]);
+    }
+
     #[test]
     fn unmapped_and_alignment_error_codes() {
         let m = test_map();
@@ -1018,7 +1397,7 @@ mod tests {
         );
         // Just past the user register area.
         assert_eq!(
-            m.read_reg(USER_BASE + 16).unwrap_err(),
+            m.read_reg(USER_BASE + USER_LEN).unwrap_err(),
             GEV_STATUS_INVALID_ADDRESS
         );
         // XML area rejects register writes.
@@ -1191,6 +1570,144 @@ mod tests {
             m.write_reg(reg::STREAMING_CONFIGURATION, reg::SCONF_DEPRECATED_BIT),
             Err(GEV_STATUS_INVALID_PARAMETER),
             "Table 36-2: GVSP mode on a GVRSP-only device"
+        );
+    }
+
+    /// R-075cd/R-076cd (§10.5): the device closes the control channel after
+    /// 3x the heartbeat timeout without primary traffic, and any valid
+    /// command from the primary refreshes the window.
+    #[test]
+    fn heartbeat_timeout_closes_the_control_channel() {
+        let m = test_map();
+        m.write_reg(reg::HEARTBEAT_TIMEOUT, 500).unwrap();
+        m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap() & reg::CCP_EXCLUSIVE_ACCESS,
+            reg::CCP_EXCLUSIVE_ACCESS
+        );
+
+        // Keep-alive traffic inside the 1.5 s window keeps the channel open;
+        // any command counts, not just a CCP read (R-075cd).
+        for _ in 0..3 {
+            std::thread::sleep(Duration::from_millis(200));
+            let read = m.read_reg(reg::USER_DEFINED_NAME).unwrap();
+            let _ = read;
+            assert_eq!(
+                m.read_reg(reg::CCP).unwrap() & reg::CCP_EXCLUSIVE_ACCESS,
+                reg::CCP_EXCLUSIVE_ACCESS
+            );
+        }
+
+        // Idle past the window: the next command observes the closed channel
+        // (CCP reads 0) and a new grant succeeds.
+        std::thread::sleep(Duration::from_millis(1600));
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap()
+                & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS),
+            0
+        );
+        m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap() & reg::CCP_EXCLUSIVE_ACCESS,
+            reg::CCP_EXCLUSIVE_ACCESS
+        );
+    }
+
+    /// §16.2 FORCEIP policy: another MAC is discarded (R-149cd), an occupied
+    /// control channel is discarded (R-150cd), static_IP 0 restarts the IP
+    /// cycle without an ACK (R-151cd), and a forced address is applied and
+    /// acknowledged (R-152cd).
+    #[test]
+    fn force_ip_policy() {
+        use gentl_gvcp::wire::{ForceIpOutcome, ForceIpRequest};
+        let m = test_map();
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 3956));
+        let mac = m.config.mac;
+        let mut request = ForceIpRequest {
+            mac,
+            static_ip: u32::from(Ipv4Addr::new(10, 0, 0, 100)),
+            subnet_mask: u32::from(Ipv4Addr::new(255, 255, 255, 0)),
+            default_gateway: u32::from(Ipv4Addr::new(10, 0, 0, 1)),
+        };
+        // R-149cd: a request addressed to another device's MAC changes
+        // nothing.
+        let other_mac = ForceIpRequest {
+            mac: [0, 0, 0, 0, 0, 1],
+            ..request
+        };
+        assert_eq!(m.force_ip(peer, other_mac), ForceIpOutcome::Ignore);
+        assert_eq!(
+            m.read_reg(reg::CURRENT_IP).unwrap(),
+            u32::from(m.config.ip)
+        );
+        // R-150cd: while an application holds the control channel the
+        // command is silently discarded.
+        m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
+        assert_eq!(m.force_ip(peer, request), ForceIpOutcome::Ignore);
+        m.write_reg(reg::CCP, 0).unwrap();
+        // R-151cd: static_IP == 0 restarts the IP configuration without an
+        // ACK (the device keeps its configured address here).
+        let restart = ForceIpRequest { static_ip: 0, ..request };
+        assert_eq!(m.force_ip(peer, restart), ForceIpOutcome::Ignore);
+        // R-152cd: a non-zero address is applied and acknowledged.
+        assert_eq!(m.force_ip(peer, request), ForceIpOutcome::Ack);
+        assert_eq!(
+            m.read_reg(reg::CURRENT_IP).unwrap(),
+            u32::from(Ipv4Addr::new(10, 0, 0, 100))
+        );
+        assert_eq!(
+            m.read_reg(reg::CURRENT_SUBNET_MASK).unwrap(),
+            u32::from(Ipv4Addr::new(255, 255, 255, 0))
+        );
+        assert_eq!(
+            m.read_reg(reg::CURRENT_DEFAULT_GATEWAY).unwrap(),
+            u32::from(Ipv4Addr::new(10, 0, 0, 1))
+        );
+        request.static_ip = u32::from(Ipv4Addr::new(10, 0, 0, 150));
+        assert_eq!(m.force_ip(peer, request), ForceIpOutcome::Ack);
+    }
+
+    /// The GenTL XML fetch rounds the last READMEM chunk up to 4 bytes; a
+    /// non-aligned XML length must therefore be padded, not rejected.
+    #[test]
+    fn xml_read_rounded_past_the_blob_end_is_zero_padded() {
+        let m = test_map();
+        let len = m.xml.len() as u32;
+        let padded = len.next_multiple_of(4);
+        if padded == len {
+            return; // fixture already aligned; nothing to prove
+        }
+        let block = m.read_mem(XML_BASE, padded as u16).unwrap();
+        assert_eq!(&block[..len as usize], m.xml.as_slice());
+        assert_eq!(&block[len as usize..], &vec![0u8; (padded - len) as usize][..]);
+    }
+
+    /// §16.6 WRITEMEM (R-185cd: mandatory): word writes go through the
+    /// register model; misalignment is BAD_ALIGNMENT (R-188cd/R-189c) and the
+    /// XML description is read-only.
+    #[test]
+    fn write_mem_applies_words_and_enforces_alignment() {
+        let m = test_map();
+        let mut block = [0u8; 8];
+        block[..4].copy_from_slice(&1280u32.to_be_bytes());
+        block[4..].copy_from_slice(&960u32.to_be_bytes());
+        m.write_mem(crate::REG_WIDTH, &block).unwrap();
+        assert_eq!(m.read_reg(crate::REG_WIDTH).unwrap(), 1280);
+        assert_eq!(m.read_reg(crate::REG_HEIGHT).unwrap(), 960);
+        assert_eq!(
+            m.write_mem(crate::REG_WIDTH, &[0u8; 6]),
+            Err(GEV_STATUS_BAD_ALIGNMENT),
+            "R-188cd: length not a multiple of 4"
+        );
+        assert_eq!(
+            m.write_mem(crate::REG_WIDTH + 2, &[0u8; 4]),
+            Err(GEV_STATUS_BAD_ALIGNMENT),
+            "R-189c: unaligned address"
+        );
+        assert_eq!(
+            m.write_mem(XML_BASE, &[0u8; 4]),
+            Err(GEV_STATUS_WRITE_PROTECT),
+            "the XML blob is read-only"
         );
     }
 }

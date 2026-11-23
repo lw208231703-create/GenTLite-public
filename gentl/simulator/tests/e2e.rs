@@ -147,6 +147,7 @@ fn gvsp_stream_over_the_wire() {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     let server = cam.start(0).unwrap();
@@ -207,5 +208,166 @@ fn gvsp_stream_over_the_wire() {
     // Close the channel again (host_port = 0).
     client.write_reg(reg::SCP0, reg::scp_make(0)).unwrap();
     assert_eq!(client.read_reg(reg::SCP0).unwrap(), 0);
+    server.stop();
+}
+
+/// §16.2 FORCEIP over the wire: the command is accepted (MAC match, no CCP
+/// holder), the simulated device applies the forced IP configuration and
+/// acknowledges it; a request for another MAC and a request while the
+/// control channel is occupied are silently discarded (R-149cd/R-150cd).
+#[test]
+fn force_ip_command_end_to_end() {
+    use gentl_gvcp::wire::{
+        encode_force_ip_payload, CmdHeader, ForceIpRequest, FORCEIP_ACK, FORCEIP_CMD,
+        FORCEIP_PAYLOAD_LEN, FLAG_ACK, HEADER_LEN,
+    };
+
+    let cam = test_camera();
+    let server = cam.start(0).unwrap();
+    let port = server.local_port().unwrap();
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(400)))
+        .unwrap();
+
+    let send = |request: ForceIpRequest, req_id: u16| -> Option<Vec<u8>> {
+        let payload = encode_force_ip_payload(&request);
+        assert_eq!(payload.len(), FORCEIP_PAYLOAD_LEN);
+        let header = CmdHeader {
+            flag: FLAG_ACK,
+            command: FORCEIP_CMD,
+            length: payload.len() as u16,
+            req_id,
+        };
+        let mut datagram = vec![0u8; HEADER_LEN];
+        let mut buf = [0u8; HEADER_LEN];
+        header.encode(&mut buf);
+        datagram.copy_from_slice(&buf);
+        datagram.extend_from_slice(&payload);
+        socket.send_to(&datagram, (Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut reply = [0u8; 256];
+        match socket.recv(&mut reply) {
+            Ok(n) => Some(reply[..n].to_vec()),
+            Err(_) => None,
+        }
+    };
+
+    let request = ForceIpRequest {
+        mac: test_config().mac,
+        static_ip: u32::from(Ipv4Addr::new(10, 0, 0, 100)),
+        subnet_mask: u32::from(Ipv4Addr::new(255, 255, 255, 0)),
+        default_gateway: u32::from(Ipv4Addr::new(10, 0, 0, 1)),
+    };
+    let ack = send(request, 7).expect("a valid FORCEIP is acknowledged");
+    assert_eq!(u16::from_be_bytes([ack[0], ack[1]]), 0, "status SUCCESS");
+    assert_eq!(
+        u16::from_be_bytes([ack[2], ack[3]]),
+        FORCEIP_ACK,
+        "FORCEIP_ACK (Figure 16-4)"
+    );
+    assert_eq!(u16::from_be_bytes([ack[4], ack[5]]), 0, "no payload");
+    assert_eq!(u16::from_be_bytes([ack[6], ack[7]]), 7, "ack_id echoes req_id");
+
+    // R-152cd: the forced address is effective before the ACK went out.
+    let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, port).unwrap();
+    assert_eq!(
+        client.read_reg(reg::CURRENT_IP).unwrap(),
+        u32::from(Ipv4Addr::new(10, 0, 0, 100))
+    );
+    assert_eq!(
+        client.read_reg(reg::CURRENT_SUBNET_MASK).unwrap(),
+        u32::from(Ipv4Addr::new(255, 255, 255, 0))
+    );
+    assert_eq!(
+        client.read_reg(reg::CURRENT_DEFAULT_GATEWAY).unwrap(),
+        u32::from(Ipv4Addr::new(10, 0, 0, 1))
+    );
+
+    // R-149cd: a request carrying another device's MAC is silently
+    // discarded.
+    let mut other = request;
+    other.mac = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    other.static_ip = u32::from(Ipv4Addr::new(10, 0, 0, 200));
+    assert!(send(other, 8).is_none(), "foreign MAC must be discarded");
+    assert_eq!(
+        client.read_reg(reg::CURRENT_IP).unwrap(),
+        u32::from(Ipv4Addr::new(10, 0, 0, 100)),
+        "a discarded request must not touch the configuration"
+    );
+
+    // R-150cd: while an application holds the control channel the command is
+    // discarded (the device ignores it, no ACK).
+    client
+        .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+        .unwrap();
+    let mut occupied = request;
+    occupied.static_ip = u32::from(Ipv4Addr::new(10, 0, 0, 150));
+    assert!(send(occupied, 9).is_none(), "occupied channel must discard");
+    client.write_reg(reg::CCP, 0).unwrap();
+
+    // R-151cd: static_IP == 0 restarts the IP configuration cycle without
+    // an ACK.
+    let restart = ForceIpRequest {
+        static_ip: 0,
+        ..request
+    };
+    assert!(send(restart, 10).is_none(), "restart cycle has no ACK");
+    server.stop();
+}
+
+/// §16.6 WRITEMEM over the wire: a multi-word write lands in the register
+/// model (R-185cd), the device echoes the address (R-190cd), and the XML
+/// description answers WRITE_PROTECT.
+#[test]
+fn write_mem_command_end_to_end() {
+    let cam = test_camera();
+    let server = cam.start(0).unwrap();
+    let port = server.local_port().unwrap();
+    let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, port).unwrap();
+
+    let mut block = [0u8; 8];
+    block[..4].copy_from_slice(&640u32.to_be_bytes());
+    block[4..].copy_from_slice(&480u32.to_be_bytes());
+    client.write_mem(gentl_simulator::REG_WIDTH, &block).unwrap();
+    assert_eq!(client.read_reg(gentl_simulator::REG_WIDTH).unwrap(), 640);
+    assert_eq!(client.read_reg(gentl_simulator::REG_HEIGHT).unwrap(), 480);
+
+    // R-188cd/R-189c are enforced device-side.
+    let mut reply = [0u8; 8];
+    let datagram = {
+        use gentl_gvcp::wire::{
+            encode_writemem_cmd_payload, CmdHeader, FLAG_ACK, HEADER_LEN, WRITEMEM_CMD,
+        };
+        let payload = encode_writemem_cmd_payload(gentl_simulator::REG_WIDTH, &[0u8; 6]);
+        let mut out = vec![0u8; HEADER_LEN];
+        let mut hdr = [0u8; HEADER_LEN];
+        CmdHeader {
+            flag: FLAG_ACK,
+            command: WRITEMEM_CMD,
+            length: payload.len() as u16,
+            req_id: 11,
+        }
+        .encode(&mut hdr);
+        out.copy_from_slice(&hdr);
+        out.extend_from_slice(&payload);
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        socket.send_to(&out, (Ipv4Addr::LOCALHOST, port)).unwrap();
+        let mut buf = [0u8; 64];
+        let (n, _) = socket.recv_from(&mut buf).unwrap();
+        reply[..2].copy_from_slice(&buf[..2]);
+        n
+    };
+    assert!(datagram >= 8);
+    assert_eq!(
+        u16::from_be_bytes([reply[0], reply[1]]),
+        gentl_gvcp::wire::GEV_STATUS_BAD_ALIGNMENT
+    );
+
+    // The XML blob is write-protected.
+    assert_eq!(
+        gev_status(client.write_mem(gentl_simulator::XML_BASE, &[0u8; 4]).unwrap_err()),
+        gentl_gvcp::wire::GEV_STATUS_WRITE_PROTECT
+    );
     server.stop();
 }

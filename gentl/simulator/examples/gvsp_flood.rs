@@ -179,6 +179,7 @@ fn flood_thread(o: &Opts, stop: &AtomicBool, packets: &AtomicU64, bytes: &Atomic
     let leader_body = encode_image_leader_body(&ImageLeader {
         field_id: 0,
         field_count: 0,
+        payload_type: gentl_gvcp::gvsp::PAYLOAD_TYPE_IMAGE,
         timestamp: 0,
         pixel_format: o.pf,
         size_x: o.width,

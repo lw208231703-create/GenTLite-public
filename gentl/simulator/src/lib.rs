@@ -15,7 +15,11 @@ use gentl_gvcp::GvcpServer;
 use regmap::{SimDevice, SimRegMap};
 
 /// User register area and per-register addresses inside it.
-pub use regmap::{REG_EXPOSURE_TIME, REG_HEIGHT, REG_PIXEL_FORMAT, REG_WIDTH, USER_BASE};
+pub use regmap::{
+    REG_EXPOSURE_TIME, REG_HEIGHT, REG_PIXEL_FORMAT, REG_REVERSE_X, REG_REVERSE_Y,
+    REG_TEST_EVENT_DATA_LEN, REG_TEST_EVENT_ID, REG_TEST_EVENT_TRIGGER, REG_TEST_PATTERN,
+    REG_USER_SET_LOAD, REG_USER_SET_SAVE, REG_USER_SET_SELECTOR, REG_WIDTH, USER_BASE,
+};
 /// Base address of the embedded GenICam XML blob.
 pub use regmap::XML_BASE;
 
@@ -97,6 +101,24 @@ pub struct StreamConfig {
     /// headers, EI=1, §24.2/§25.2.1). SCPSx packet_size counts the mode's
     /// header budget (36 vs 48 bytes, 1.2 §27.46 / 3.0 §36.58).
     pub legacy_headers: bool,
+    /// Append GenICam chunk data to every 3.0-mode image block
+    /// (extended-chunk payload type, GigE Vision 3.0 §25.1): one metadata
+    /// chunk with this ID and data length follows the image chunk. Ignored
+    /// in the 1.2 legacy header form.
+    pub chunk: Option<ChunkEmit>,
+}
+
+/// Deterministic chunk data emitted by the simulator (extended chunk mode,
+/// §25.1). The data itself is a generated pattern; the receiver-side tests
+/// only need the tag layout, not a camera feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkEmit {
+    /// Chunk identifier (SFNC `ChunkSelector` value).
+    pub id: u32,
+    /// Chunk data length in bytes (padded to 4 on the wire).
+    pub len: u32,
+    /// Chunk layout id reported in the trailer (0 = unsupported).
+    pub layout_id: u32,
 }
 
 impl Default for StreamConfig {
@@ -107,6 +129,7 @@ impl Default for StreamConfig {
             pixel_format: 0x0108_0001, // Mono8 (include/PFNC.h)
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         }
     }
 }

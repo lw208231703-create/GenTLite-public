@@ -97,6 +97,29 @@ pub(crate) struct StreamParams {
     pub legacy: bool,
     pub payload_size: usize,
     pub packet_delay: Duration,
+    /// Extended-chunk emission (§25.1, 3.0 form only); `None` = plain image.
+    pub chunk: Option<crate::ChunkEmit>,
+    /// Image-generator features snapshotted at channel open (SFNC
+    /// TestPattern/ReverseX/ReverseY).
+    pub pattern: PatternConfig,
+}
+
+/// SFNC image-generator configuration read from the user register area when
+/// the stream channel opens (the sim freezes it with the packet geometry,
+/// §36.58: SCPSx-class configuration cannot change while streaming).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PatternConfig {
+    /// 0 = synthetic gradient, 1 = horizontal ramp, 2 = vertical ramp.
+    pub test_pattern: u32,
+    pub reverse_x: bool,
+    pub reverse_y: bool,
+}
+
+impl PatternConfig {
+    /// Whether the generator needs the per-pixel path at all.
+    fn is_default(&self) -> bool {
+        self.test_pattern == 0 && !self.reverse_x && !self.reverse_y
+    }
 }
 
 impl StreamParams {
@@ -116,9 +139,17 @@ impl StreamParams {
             legacy: stream.legacy_headers,
             payload_size: DEFAULT_PAYLOAD,
             packet_delay: Duration::from_micros(u64::from(scpd0)),
+            chunk: stream.chunk,
+            pattern: PatternConfig::default(),
         };
         params.repacket(scps0);
         params
+    }
+
+    /// Attach the SFNC image-generator snapshot read at channel open.
+    pub fn with_pattern(mut self, pattern: PatternConfig) -> Self {
+        self.pattern = pattern;
+        self
     }
 
     /// (Re)derive the payload size from an SCPSx value: payload data per
@@ -518,11 +549,50 @@ fn send_block(
 ) {
     let hlen = gvsp_header_len(params.legacy);
     let image_len = params.image_len();
+    // Extended chunk mode (§25.1) needs the 3.0 payload_type field; the 1.2
+    // legacy header has none, so chunk emission only applies to 3.0 blocks.
+    let chunk = if params.legacy { None } else { params.chunk };
+    let image_padded = (image_len + 3) & !3;
+    // Metadata chunk block: data padded to 4 bytes plus its 8-byte tag.
+    let chunk_block_len = chunk.map_or(0, |c| ((c.len as usize + 3) & !3) + 8);
+    // Payload: image (+padding) + 8-byte image chunk tag + chunk block. The
+    // image is the first chunk (§25.1), so its tag sits right after the
+    // padded image data (chunk tags are network byte order, §24.4/CR-276s).
+    let payload_len = if chunk.is_some() {
+        image_padded + 8 + chunk_block_len
+    } else {
+        image_len
+    };
+    let mut payload_buf: Vec<u8> = Vec::new();
+    if let Some(c) = chunk {
+        payload_buf.resize(payload_len, 0);
+        fill_image(&mut payload_buf[..image_len], 0, block_id, params);
+        let image_tag = image_padded;
+        payload_buf[image_tag..image_tag + 4].copy_from_slice(&1u32.to_be_bytes());
+        payload_buf[image_tag + 4..image_tag + 8]
+            .copy_from_slice(&(image_padded as u32).to_be_bytes());
+        let data_at = image_padded + 8;
+        fill_pattern(
+            &mut payload_buf[data_at..data_at + c.len as usize],
+            image_len,
+            block_id,
+            params.bytes_per_pixel(),
+        );
+        let meta_tag = data_at + (chunk_block_len - 8);
+        payload_buf[meta_tag..meta_tag + 4].copy_from_slice(&c.id.to_be_bytes());
+        payload_buf[meta_tag + 4..meta_tag + 8]
+            .copy_from_slice(&((chunk_block_len - 8) as u32).to_be_bytes());
+    }
 
     write_header(packet, params.legacy, PACKET_FORMAT_DATA_LEADER, block_id, 0);
     let leader = ImageLeader {
         field_id: 0,
         field_count: 0,
+        payload_type: if chunk.is_some() {
+            PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT
+        } else {
+            PAYLOAD_TYPE_IMAGE
+        },
         timestamp,
         pixel_format: params.pixel_format,
         size_x: params.width,
@@ -545,17 +615,16 @@ fn send_block(
     };
     let mut packet_id = 1u32;
     let mut offset = 0usize;
-    while offset < image_len {
+    while offset < payload_len {
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        let n = params.payload_size.min(image_len - offset);
-        fill_pattern(
-            &mut packet[hlen..hlen + n],
-            offset,
-            block_id,
-            params.bytes_per_pixel(),
-        );
+        let n = params.payload_size.min(payload_len - offset);
+        if chunk.is_some() {
+            packet[hlen..hlen + n].copy_from_slice(&payload_buf[offset..offset + n]);
+        } else {
+            fill_image(&mut packet[hlen..hlen + n], offset, block_id, params);
+        }
         write_header(packet, params.legacy, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
         cache.push((packet_id, packet[..hlen + n].to_vec()));
         if !dropped(packet_id)
@@ -571,7 +640,15 @@ fn send_block(
     }
 
     write_header(packet, params.legacy, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
-    let body = encode_image_trailer_body(params.height);
+    let body: Vec<u8> = match chunk {
+        Some(c) => encode_image_extended_trailer_body(
+            params.height,
+            chunk_block_len as u32,
+            c.layout_id,
+        )
+        .to_vec(),
+        None => encode_image_trailer_body(params.height).to_vec(),
+    };
     packet[hlen..hlen + body.len()].copy_from_slice(&body);
     cache.push((packet_id, packet[..hlen + body.len()].to_vec()));
     let _ = send_until_stopped(socket, target, &packet[..hlen + body.len()], stop);
@@ -623,6 +700,61 @@ fn write_leader_body(packet: &mut [u8], legacy: bool, leader: &ImageLeader) -> u
         let body = encode_image_leader_body(leader);
         packet[hlen..hlen + body.len()].copy_from_slice(&body);
         hlen + body.len()
+    }
+}
+
+/// Fill one payload slice with the fake image. The default generator is the
+/// deterministic gradient of [`fill_pattern`]; a non-default SFNC generator
+/// configuration (TestPattern ramps, ReverseX/ReverseY mirroring) switches to
+/// a per-pixel path so the host really sees the feature's effect.
+fn fill_image(buf: &mut [u8], byte_offset: usize, block_id: u64, params: &StreamParams) {
+    if params.pattern.is_default() {
+        fill_pattern(buf, byte_offset, block_id, params.bytes_per_pixel());
+        return;
+    }
+    let bpp = params.bytes_per_pixel();
+    let w = params.width as usize;
+    let h = params.height as usize;
+    for (k, out) in buf.iter_mut().enumerate() {
+        let pos = byte_offset + k;
+        let pixel = pos / bpp;
+        let component = pos % bpp;
+        let x = pixel % w.max(1);
+        let y = pixel / w.max(1);
+        let mx = if params.pattern.reverse_x && w > 0 {
+            w - 1 - x
+        } else {
+            x
+        };
+        let my = if params.pattern.reverse_y && h > 0 {
+            h - 1 - y
+        } else {
+            y
+        };
+        let value: u16 = match params.pattern.test_pattern {
+            1 => {
+                if w > 1 {
+                    (mx as u64 * 65_535 / (w as u64 - 1)) as u16
+                } else {
+                    0
+                }
+            }
+            2 => {
+                if h > 1 {
+                    (my as u64 * 65_535 / (h as u64 - 1)) as u16
+                } else {
+                    0
+                }
+            }
+            // SFNC TestPattern = Off: the synthetic gradient still follows
+            // the (mirrored) scan order and block counter.
+            _ => ((my * w + mx) as u64 + block_id) as u16,
+        };
+        *out = if bpp == 1 {
+            value as u8
+        } else {
+            value.to_le_bytes()[component]
+        };
     }
 }
 
@@ -819,6 +951,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         let rx = open_channel(&m, None);
         // Plain write while streaming: still blocked (§36.58).
@@ -866,6 +999,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         // Above the u16 maximum is impossible via the mask; probe the low
         // end instead: 0 rounds up to 49 (48 header bytes + 1 payload byte).
@@ -902,6 +1036,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         // 100-byte payloads: 256 bytes -> 3 payload packets per block.
         let rx = open_channel(&m, Some(reg::scps_make(100 + reg::GVSP_HEADERS_OVERHEAD)));
@@ -939,6 +1074,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         let drops = Arc::new(Mutex::new(PacketDrop::new()));
         drops.lock().unwrap().insert((1, 1));
@@ -961,6 +1097,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         // SCPS0 in the spec layout: total packet size 1000+48 -> a 1000-byte
         // payload per full packet.
@@ -1019,6 +1156,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         // Factory default: total packet size 1400+48 (spec layout), no
         // write at all.
@@ -1057,6 +1195,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         };
         // Total packet size 1448 -> 1400 payload bytes (the sim default).
         let p = StreamParams::new(&stream, reg::scps_make(1448), 0);
@@ -1081,6 +1220,7 @@ mod tests {
             pixel_format: PFNC_MONO16,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         };
         assert_eq!(
             StreamParams::new(&s16, reg::scps_make(999), 0).payload_size,
@@ -1096,6 +1236,7 @@ mod tests {
             pixel_format: PFNC_MONO16,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         });
         // 4 * 2 pixels * 2 bytes = 16 bytes -> a single payload packet.
         let rx = open_channel(&m, None);
@@ -1138,6 +1279,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: true,
+            chunk: None,
         });
         // Factory default SCPS0: 1400 payload + the 36-byte legacy budget.
         assert_eq!(
@@ -1203,6 +1345,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 1,
             legacy_headers: true,
+            chunk: None,
         };
         // Total 1444 -> 1408 payload bytes (1444 - 36).
         let p = StreamParams::new(&stream, reg::scps_make(1444), 0);
@@ -1250,6 +1393,7 @@ mod tests {
             pixel_format: MONO8,
             channels: 2,
             legacy_headers: false,
+            chunk: None,
         });
         assert_eq!(m.read_reg(reg::NUM_STREAM_CHANNELS).unwrap(), 2);
         // §36.57: channels 1..511 are optional; channel 5 does not exist
