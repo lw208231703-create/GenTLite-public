@@ -66,6 +66,17 @@ pub const EVENT_FEATURE_INVALIDATE: EventType = 2;
 pub const EVENT_FEATURE_CHANGE: EventType = 3;
 pub const EVENT_REMOTE_DEVICE: EventType = 4;
 
+/// `EVENT_DATA_ID` string form (GenTL 1.6 搂6.4.6.1, EVENT_REMOTE_DEVICE):
+/// the event id number in hexadecimal with an even number of digits and
+/// without the leading `0x`, e.g. event id 7 -> `"07"`, 0xCF51 -> `"CF51"`.
+pub fn event_id_hex(event_id: u16) -> String {
+    if event_id <= 0xFF {
+        format!("{event_id:02X}")
+    } else {
+        format!("{event_id:04X}")
+    }
+}
+
 #[repr(C)]
 pub struct EventNewBufferData {
     pub buffer_handle: BufferHandle,
@@ -103,4 +114,19 @@ pub struct DSBufferPartInfoStacked {
     pub i_type: InfoDataType,
     pub p_buffer: *mut c_void,
     pub i_size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn event_ids_use_even_digit_hex() {
+        // GenTL 1.6 0x4.2: hexadecimal, even number of digits, no `0x`.
+        assert_eq!(event_id_hex(7), "07");
+        assert_eq!(event_id_hex(0), "00");
+        assert_eq!(event_id_hex(0x2A), "2A");
+        assert_eq!(event_id_hex(0xCF51), "CF51");
+        assert_eq!(event_id_hex(0x4FFF), "4FFF");
+    }
 }

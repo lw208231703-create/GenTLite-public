@@ -35,6 +35,9 @@ pub enum GentlError {
     NotAvailable,
     InvalidAddress,
     BufferTooSmall,
+    /// GenTL 1.6 搂6.3.5.13: the transport chunk tags in the buffer do not
+    /// decode (a tag ran past the block start or a length is unaligned).
+    ParsingChunkData(&'static str),
     OutOfMemory,
     AccessDenied,
     Busy,
@@ -59,6 +62,7 @@ impl GentlError {
             GentlError::NotAvailable => GC_ERR_NOT_AVAILABLE,
             GentlError::InvalidAddress => GC_ERR_INVALID_ADDRESS,
             GentlError::BufferTooSmall => GC_ERR_BUFFER_TOO_SMALL,
+            GentlError::ParsingChunkData(_) => GC_ERR_PARSING_CHUNK_DATA,
             GentlError::OutOfMemory => GC_ERR_OUT_OF_MEMORY,
             GentlError::AccessDenied => GC_ERR_ACCESS_DENIED,
             GentlError::Busy => GC_ERR_BUSY,
@@ -80,6 +84,7 @@ impl GentlError {
             GentlError::NotAvailable => "not available".into(),
             GentlError::InvalidAddress => "invalid address".into(),
             GentlError::BufferTooSmall => "buffer too small".into(),
+            GentlError::ParsingChunkData(what) => format!("error parsing chunk data: {what}"),
             GentlError::OutOfMemory => "out of memory".into(),
             GentlError::AccessDenied => "access denied".into(),
             GentlError::Busy => "busy".into(),

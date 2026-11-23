@@ -12,6 +12,9 @@ use crate::wire::*;
 
 const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_RETRIES: u32 = 2;
+/// Added to a PENDING_ACK `time_to_completion` before re-arming the socket
+/// read timeout (搂16.8.1: "plus some margin to allow for network latencies").
+const PENDING_ACK_NETWORK_MARGIN: Duration = Duration::from_millis(250);
 
 /// Transaction client bound to one local UDP socket. Not thread-bound:
 /// guard with a Mutex at the call site if sharing.
@@ -90,6 +93,7 @@ impl GvcpClient {
             let (n, _) = match self.socket.recv_from(&mut buf) {
                 Ok(v) => v,
                 Err(e) if e.kind() == io::ErrorKind::TimedOut || e.kind() == io::ErrorKind::WouldBlock => {
+                    let _ = self.socket.set_read_timeout(Some(DEFAULT_ACK_TIMEOUT));
                     return Ok(Err(RetryReason::Timeout))
                 }
                 Err(e) => return Err(GentlError::Io(format!("recv: {e}"))),
@@ -102,12 +106,22 @@ impl GvcpClient {
                 continue; // stale ack from an earlier attempt
             }
             if hdr.acknowledge == PENDING_ACK {
-                // PENDING_ACK (spec §16.8): device asks us to keep waiting
-                // for the real ack (payload u16 time_to_completion, ms).
-                // The socket read timeout bounds the wait; finer pacing is
-                // an M3 refinement.
+                // 16.8.1: reset the acknowledge timeout to the indicated
+                // time_to_completion plus a network margin. Ignoring it makes
+                // long device commands look like lost requests and triggers
+                // spurious retransmissions (and a timeout when the device
+                // really needs the announced time).
+                if let Some(ms) = decode_pending_ack_timeout(&datagram[HEADER_LEN..]) {
+                    let wait = Duration::from_millis(u64::from(ms))
+                        .saturating_add(PENDING_ACK_NETWORK_MARGIN)
+                        .max(DEFAULT_ACK_TIMEOUT);
+                    let _ = self.socket.set_read_timeout(Some(wait));
+                }
                 continue;
             }
+            // Restore the default cadence for the next transaction; an
+            // extended timeout belongs to the command that asked for it.
+            let _ = self.socket.set_read_timeout(Some(DEFAULT_ACK_TIMEOUT));
             return Ok(Ok(datagram.to_vec()));
         }
     }
@@ -308,4 +322,65 @@ pub fn discover(
         }
     }
     Ok(found)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+    use std::time::Instant;
+
+    /// A PENDING_ACK must re-arm the wait instead of being silently skipped:
+    /// the command is not retransmitted while the announced completion time
+    /// (plus margin) is still running.
+    #[test]
+    fn pending_ack_extends_the_ack_timeout() {
+        let device = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).expect("device socket");
+        let device_addr = device.local_addr().expect("device addr");
+        let listener = device.try_clone().expect("clone");
+        let fake = std::thread::spawn(move || {
+            listener
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .expect("timeout");
+            let mut buf = [0u8; 512];
+            let mut commands = 0u32;
+            let mut peer = None;
+            let mut req_id = 0u16;
+            let deadline = Instant::now() + Duration::from_millis(750);
+            while Instant::now() < deadline {
+                if let Ok((n, from)) = listener.recv_from(&mut buf) {
+                    let Some(cmd) = CmdHeader::decode(&buf[..n]) else {
+                        continue;
+                    };
+                    commands += 1;
+                    peer = Some(from);
+                    req_id = cmd.req_id;
+                    let mut out = [0u8; HEADER_LEN + 4];
+                    let mut hdr = [0u8; HEADER_LEN];
+                    AckHeader::new(GEV_STATUS_SUCCESS, PENDING_ACK, 4, cmd.req_id)
+                        .encode(&mut hdr);
+                    out[..HEADER_LEN].copy_from_slice(&hdr);
+                    out[HEADER_LEN + 2..].copy_from_slice(&900u16.to_be_bytes());
+                    let _ = listener.send_to(&out, from);
+                }
+            }
+            let mut ack = [0u8; HEADER_LEN + 4];
+            let mut hdr = [0u8; HEADER_LEN];
+            AckHeader::new(GEV_STATUS_SUCCESS, READREG_ACK, 4, req_id).encode(&mut hdr);
+            ack[..HEADER_LEN].copy_from_slice(&hdr);
+            ack[HEADER_LEN..].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+            let _ = listener.send_to(&ack, peer.expect("a command arrived"));
+            commands
+        });
+
+        let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, device_addr.port())
+            .expect("client");
+        let value = client.read_reg(0xDEAD_BEEF).expect("read after PENDING_ACK");
+        assert_eq!(value, 0x1234_5678);
+        let commands = fake.join().expect("fake device thread");
+        assert_eq!(
+            commands, 1,
+            "PENDING_ACK must prevent a retransmission inside the announced window"
+        );
+    }
 }

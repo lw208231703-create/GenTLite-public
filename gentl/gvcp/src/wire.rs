@@ -154,6 +154,15 @@ impl AckHeader {
     }
 }
 
+/// PENDING_ACK payload (spec 搂16.8.1 Figure 16-15): a reserved u16
+/// followed by `time_to_completion` in milliseconds.
+pub fn decode_pending_ack_timeout(payload: &[u8]) -> Option<u16> {
+    if payload.len() < 4 {
+        return None;
+    }
+    Some(u16::from_be_bytes([payload[2], payload[3]]))
+}
+
 /// Fixed-size string slot in DISCOVERY_ACK / string bootstrap registers.
 /// Strings may fill the whole slot without NUL termination (spec §16.1.2).
 fn put_str(slot: &mut [u8], s: &str) {
