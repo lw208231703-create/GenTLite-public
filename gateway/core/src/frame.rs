@@ -21,6 +21,13 @@ pub struct CanonicalFrame {
     pub offset_y: u32,
     pub padding_x: u32,
     pub padding_y: u32,
+    /// Chunk-data region inside `payload`, when the camera delivered an
+    /// extended-chunk GVSP block (GigE Vision 3.0 §25.1): offset relative to
+    /// the payload start, length of the chunk block (tags included), and the
+    /// chunk layout id. The GigE front re-emits the block in the same
+    /// extended-chunk form; the U3V front strips the chunk bytes (its wire
+    /// has no chunk blocks unless the gadget enables them).
+    pub chunk: Option<gentl_core::ds::ChunkRegion>,
     /// Payload bytes. A recyclable payload returns its allocation to the
     /// source when the frame is dropped.
     pub payload: FramePayload,
@@ -128,6 +135,11 @@ pub trait FrameSession: Send {
     /// (U3V's emitter) can retain it without cloning; a synchronous front
     /// (GigE's socket writer) drops it when this returns.
     fn send_frame(&mut self, frame: CanonicalFrame);
+    /// PACKETRESEND (§16.7.2): retransmit the requested packet-id range of a
+    /// cached block. Fronts without a resend cache keep this no-op; the
+    /// virtual device only advertises the GVCP capability when the front
+    /// answers (R-197ca).
+    fn packet_resend(&mut self, _block_id: u64, _first: u32, _last: u32) {}
     fn close(&mut self);
 }
 

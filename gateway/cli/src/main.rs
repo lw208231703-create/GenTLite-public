@@ -340,6 +340,19 @@ fn main() {
         BackKind::U3v => None,
     };
 
+    // GigE Vision 3.0 §10.5 (R-055ca/R-076cd): the gateway holds exclusive
+    // access for its whole lifetime but the downlink is idle between host
+    // transactions, so a compliant camera closes the control channel after
+    // 3x its heartbeat timeout. The worker refreshes the counter (and
+    // re-grants EA if the camera dropped it while idle). U3V has no
+    // heartbeat mechanism.
+    #[cfg(feature = "back-gige")]
+    let heartbeat = (args.back == BackKind::Gige).then(|| {
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handle = vgige_core::heartbeat::spawn(Arc::clone(&back), Arc::clone(&stop));
+        (stop, handle)
+    });
+
     // Camera XML (fetched via the back; zipped descriptions are
     // transparently unzipped) + injected nodes.
     let raw_xml = {
@@ -368,6 +381,14 @@ fn main() {
         FrontKind::Gige => run_gige_front(&args, back, Arc::clone(&xml)),
         #[cfg(feature = "front-u3v")]
         FrontKind::U3v => run_u3v_front(&args, back, Arc::clone(&xml)),
+    }
+
+    // The front returned: shutdown. Stop the downlink heartbeat before the
+    // DownGuard releases CCP, so the worker cannot re-grant after release.
+    #[cfg(feature = "back-gige")]
+    if let Some((stop, handle)) = heartbeat {
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = handle.join();
     }
 }
 
@@ -412,10 +433,35 @@ fn run_gige_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
     // the two fronts serve different register byte orders.
     identity.model_name = format!("{} GigE", identity.model_name);
     identity.serial_number = format!("{}-GE", identity.serial_number);
-    space.set_bootstrap(
-        (u32::from(identity.spec_version_major) << 16) | u32::from(identity.spec_version_minor),
-        link.mask,
-    );
+    // The virtual GigE device always claims GigE Vision 3.0: it emits the
+    // 3.0 EI=1 GVSP form, so the downstream camera's transport version (a
+    // U3V camera reports its USB3 Vision version) must not leak into the
+    // GigE bootstrap (§36.1) — hosts would derive the wrong wire format.
+    space.set_identity(&identity);
+    space.set_bootstrap(0x0003_0000, link.mask);
+    // GigE device events (§12 message channel / §17): when the downstream
+    // camera has a message channel and the backend can relay it, the virtual
+    // device advertises one message channel and forwards the camera's events
+    // to the host that opens it. A backend without event support leaves the
+    // device advertising zero channels (§36.22, the honest answer).
+    // GigE device events (12 message channel / 17): any backend that relays
+    // the camera's asynchronous events enables the virtual message channel; a
+    // backend without event support leaves it at 0 (36.22).
+    let event_relay: Option<Arc<vgige_core::MessageRelay>> = {
+        let relay = Arc::new(vgige_core::MessageRelay::new());
+        let started = back
+            .lock()
+            .map(|mut backend| backend.start_event_relay(Arc::clone(&relay)).is_ok())
+            .unwrap_or(false);
+        if started {
+            Some(relay)
+        } else {
+            None
+        }
+    };
+    if let Some(relay) = &event_relay {
+        space.set_message_channel(Arc::clone(relay));
+    }
     let front = GigEFront::new(identity, space);
 
     // Standard GigE discovery uses limited/subnet broadcast, which a socket

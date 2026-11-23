@@ -106,6 +106,56 @@ impl CcpState {
     }
 }
 
+/// Virtual-device identity strings behind the bootstrap string registers
+/// (§36.3–§36.9 / Table 36-1). Served locally: forwarding a string READMEM
+/// through a little-endian backend would word-swap it into garbage, and the
+/// client must see one coherent identity (the same one the discovery payload
+/// reports).
+#[derive(Clone)]
+struct IdentityStrings {
+    manufacturer: [u8; 32],
+    model: [u8; 32],
+    device_version: [u8; 32],
+    manufacturer_info: [u8; 48],
+    serial: [u8; 16],
+    /// §36.16 USER_DEFINED_NAME is read/write; the virtual device stores it
+    /// locally instead of touching the camera's name.
+    user_defined_name: Arc<Mutex<[u8; 16]>>,
+}
+
+impl Default for IdentityStrings {
+    fn default() -> Self {
+        Self {
+            manufacturer: [0; 32],
+            model: [0; 32],
+            device_version: [0; 32],
+            manufacturer_info: [0; 48],
+            serial: [0; 16],
+            user_defined_name: Arc::new(Mutex::new([0; 16])),
+        }
+    }
+}
+
+/// Copy `s` into a fixed bootstrap string slot, NUL/zero padded (§36.3: the
+/// registers are fixed-size strings, zero-terminated when shorter).
+fn put_str<const N: usize>(slot: &mut [u8; N], s: &str) {
+    let bytes = s.as_bytes();
+    let n = bytes.len().min(N);
+    slot[..n].copy_from_slice(&bytes[..n]);
+}
+
+/// Virtual message channel state (spec §12): enabled when the downstream
+/// backend relays events, plus the host destination written through MCDA +
+/// MCP (§36.51/§36.52) and the mandatory MCTT/MCRC registers (§36.53/§36.54).
+#[derive(Default)]
+struct MessageChannel {
+    relay: Option<Arc<crate::MessageRelay>>,
+    /// MCDA (§36.52): destination IPv4 address.
+    dest_address: u32,
+    /// MCP (§36.51): host UDP port in bits 16-31; 0 closes the channel.
+    port: u32,
+}
+
 /// The virtual device's register space. Cloneable (Arcs inside) so a
 /// front-end can keep a handle for business hooks while the server owns
 /// its own clone.
@@ -126,6 +176,10 @@ pub struct RegisterSpace {
     subnet_mask: u32,
     /// Virtual First URL slot content (512 bytes, NUL padded).
     url_slot: Arc<[u8; 512]>,
+    /// Locally served bootstrap identity strings.
+    identity: IdentityStrings,
+    /// Virtual message channel (GigE device event relay).
+    message: Arc<Mutex<MessageChannel>>,
     ccp: Arc<Mutex<CcpState>>,
     /// Custom-window general storage (slots 5..256); slots 0..4 are
     /// special-cased on access.
@@ -146,6 +200,8 @@ impl Clone for RegisterSpace {
             spec_version: self.spec_version,
             subnet_mask: self.subnet_mask,
             url_slot: Arc::clone(&self.url_slot),
+            identity: self.identity.clone(),
+            message: Arc::clone(&self.message),
             ccp: Arc::clone(&self.ccp),
             slots: Arc::clone(&self.slots),
             channel: self.channel.clone(),
@@ -179,6 +235,8 @@ impl RegisterSpace {
             spec_version: 0x0003_0000,
             subnet_mask: 0,
             url_slot: Arc::new(url_slot),
+            identity: IdentityStrings::default(),
+            message: Arc::new(Mutex::new(MessageChannel::default())),
             ccp: Arc::new(Mutex::new(CcpState::default())),
             slots: Arc::new(Mutex::new([0; CUSTOM_SLOTS])),
             channel,
@@ -199,6 +257,132 @@ impl RegisterSpace {
     pub fn set_bootstrap(&mut self, spec_version: u32, subnet_mask: Ipv4Addr) {
         self.spec_version = spec_version;
         self.subnet_mask = u32::from(subnet_mask);
+    }
+
+    /// Enable the virtual message channel and route the camera's events
+    /// (§17) to whichever host opens it. Called only when the downstream
+    /// backend really started an event relay; otherwise the device keeps
+    /// advertising zero message channels (§36.22).
+    pub fn set_message_channel(&mut self, relay: Arc<crate::MessageRelay>) {
+        if let Ok(mut message) = self.message.lock() {
+            message.relay = Some(relay);
+        }
+    }
+
+    /// Capture the camera identity for the locally served bootstrap string
+    /// registers. The virtual device presents the camera's vendor/model/
+    /// version/serial strings (transparency) through its own register model,
+    /// so a little-endian backend cannot corrupt them via READMEM byte
+    /// swapping.
+    pub fn set_identity(&mut self, id: &DiscoveryInfo) {
+        let mut identity = IdentityStrings::default();
+        put_str(&mut identity.manufacturer, &id.manufacturer_name);
+        put_str(&mut identity.model, &id.model_name);
+        put_str(&mut identity.device_version, &id.device_version);
+        put_str(&mut identity.manufacturer_info, &id.manufacturer_info);
+        put_str(&mut identity.serial, &id.serial_number);
+        {
+            let mut user = identity
+                .user_defined_name
+                .lock()
+                .expect("vgige identity poisoned");
+            put_str(&mut user, &id.user_defined_name);
+        }
+        self.identity = identity;
+    }
+
+    /// FORCEIP_CMD (§16.2) policy of the virtual GigE device.
+    ///
+    /// The advertised MAC is the up-facing NIC's, so a request for another
+    /// device is discarded (R-149cd), and so is one arriving while a remote
+    /// host holds the control channel (R-150cd). A non-zero forced address
+    /// cannot be honoured by a relay: rebinding the host interface is
+    /// destructive and out of scope, so the request is discarded with a
+    /// warning instead of pretending the address changed (design decision:
+    /// docs/00-governance/OPEN-QUESTIONS.md Q40). static_IP == 0 still
+    /// performs the required stream close and IP-cycle restart (R-151cd).
+    pub fn force_ip(&self, request: &ForceIpRequest) -> ForceIpOutcome {
+        if request.mac != self.up_mac {
+            return ForceIpOutcome::Ignore;
+        }
+        let granted = {
+            let ccp = self.ccp.lock().expect("vgige ccp poisoned");
+            ccp.flags != 0
+        };
+        if granted {
+            return ForceIpOutcome::Ignore;
+        }
+        if request.static_ip == 0 {
+            self.channel.close();
+            return ForceIpOutcome::Ignore;
+        }
+        eprintln!(
+            "vgige: FORCEIP to 0x{:08X} discarded: the virtual device lives on the up-facing NIC address (OPEN-QUESTIONS Q40)",
+            request.static_ip
+        );
+        ForceIpOutcome::Ignore
+    }
+
+    /// Bootstrap string slot bytes for `[addr, addr+count)`, zero padded.
+    fn identity_bytes(&self, addr: u32, count: u16) -> Option<Vec<u8>> {
+        let len = u32::from(count);
+        let end = addr.checked_add(len)?;
+        // Only a range fully inside one slot is served locally (hosts read
+        // one bootstrap string at a time).
+        let slot: Option<(u32, Vec<u8>)> = if addr >= reg::MANUFACTURER_NAME
+            && end <= reg::MANUFACTURER_NAME + 32
+        {
+            Some((reg::MANUFACTURER_NAME, self.identity.manufacturer.to_vec()))
+        } else if addr >= reg::MODEL_NAME && end <= reg::MODEL_NAME + 32 {
+            Some((reg::MODEL_NAME, self.identity.model.to_vec()))
+        } else if addr >= reg::DEVICE_VERSION && end <= reg::DEVICE_VERSION + 32 {
+            Some((reg::DEVICE_VERSION, self.identity.device_version.to_vec()))
+        } else if addr >= reg::MANUFACTURER_INFO && end <= reg::MANUFACTURER_INFO + 48 {
+            Some((
+                reg::MANUFACTURER_INFO,
+                self.identity.manufacturer_info.to_vec(),
+            ))
+        } else if addr >= reg::SERIAL_NUMBER && end <= reg::SERIAL_NUMBER + 16 {
+            Some((reg::SERIAL_NUMBER, self.identity.serial.to_vec()))
+        } else if addr >= reg::USER_DEFINED_NAME && end <= reg::USER_DEFINED_NAME + 16 {
+            Some((
+                reg::USER_DEFINED_NAME,
+                self.identity
+                    .user_defined_name
+                    .lock()
+                    .expect("vgige identity poisoned")
+                    .to_vec(),
+            ))
+        } else {
+            None
+        };
+        let (base, bytes) = slot?;
+        let off = (addr - base) as usize;
+        let mut out = vec![0u8; count as usize];
+        let take = bytes.len().saturating_sub(off).min(count as usize);
+        out[..take].copy_from_slice(&bytes[off..off + take]);
+        Some(out)
+    }
+
+    /// Write into the writable bootstrap string slot (USER_DEFINED_NAME) or
+    /// answer WRITE_PROTECT for the read-only identity strings. `None` when
+    /// the range is not a virtualised string slot.
+    fn identity_write(&self, addr: u32, data: &[u8]) -> Option<Result<(), u16>> {
+        let end = addr.checked_add(data.len() as u32)?;
+        if addr >= reg::USER_DEFINED_NAME && end <= reg::USER_DEFINED_NAME + 16 {
+            let mut user = self
+                .identity
+                .user_defined_name
+                .lock()
+                .expect("vgige identity poisoned");
+            let off = (addr - reg::USER_DEFINED_NAME) as usize;
+            user[off..off + data.len()].copy_from_slice(data);
+            return Some(Ok(()));
+        }
+        if self.identity_bytes(addr, data.len() as u16).is_some() {
+            return Some(Err(GEV_STATUS_WRITE_PROTECT));
+        }
+        None
     }
 
     /// Business-layer hook: set the AI_Score slot (anomaly score x1000).
@@ -309,9 +493,18 @@ impl RegisterSpace {
             reg::VERSION => return Ok(self.spec_version),
             reg::DEVICE_MODE => return Ok(0x8000_0001),
             reg::NET_IF_CAPABILITY => {
-                return Ok(reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA)
+                // §4.3: DHCP support bit ("always 1"); §4.4: LLA support bit
+                // ("always 1"). The virtual device lives on the up NIC's
+                // fixed address and does not implement Persistent IP (§4.2:
+                // optional), so bit 31 stays clear and the persistent-IP
+                // registers are not mapped.
+                return Ok(reg::IP_CFG_DHCP | reg::IP_CFG_LLA)
             }
-            reg::NET_IF_CONFIGURATION => return Ok(reg::IP_CFG_PERSISTENT_IP),
+            reg::NET_IF_CONFIGURATION => {
+                // §4.4: bit 29 is always set (LLA is the default, always
+                // active scheme).
+                return Ok(reg::IP_CFG_LLA)
+            }
             reg::CURRENT_SUBNET_MASK => return Ok(self.subnet_mask),
             reg::NUM_NETWORK_INTERFACES => return Ok(1),
             reg::CCP => return Ok(self.ccp_read()),
@@ -332,15 +525,62 @@ impl RegisterSpace {
             }
             reg::CURRENT_IP => return Ok(self.up_ip),
             reg::GVCP_CAPABILITY => {
-                // The virtual server never answers PACKETRESEND_CMD (the
-                // DeviceHandler default ignores it), so the capability must
-                // not advertise it: R-197ca forbids requesters to send
-                // resends to a device without the bit.
-                return self
-                    .back_read_reg(addr)
-                    .map(|v| v & !reg::GVCP_CAPABILITY_PACKET_RESEND);
+                // The capability bits must describe THIS device (§36.29):
+                // the virtual server answers READREG/WRITEREG/READMEM, serves
+                // the UN/SN bootstrap strings, and answers PACKETRESEND from
+                // the GigE front's block cache (§16.7/R-197ca). EVENT (§16.8),
+                // ACTION (§16.9), concatenation and a manifest table are not
+                // implemented. Advertising the camera's bits would make hosts
+                // enable features the gateway does not implement (audit P1-1).
+                return Ok(reg::GVCP_CAPABILITY_USER_DEFINED_NAME
+                    | reg::GVCP_CAPABILITY_SERIAL_NUMBER
+                    | reg::GVCP_CAPABILITY_PACKET_RESEND);
             }
+            reg::NUM_MESSAGE_CHANNELS => {
+                let enabled = self
+                    .message
+                    .lock()
+                    .map(|m| m.relay.is_some())
+                    .unwrap_or(false);
+                return Ok(u32::from(enabled));
+            }
+            reg::MESSAGE_CHANNEL_CAPABILITY => return Ok(0),
+            // Mandatory message-channel registers (§36.51§36.54). MCSP is
+            // optional (capability bit SP clear) and reads 0; MCCFG is not
+            // mapped (capability bit CC clear).
+            reg::MESSAGE_CHANNEL_PORT => {
+                return Ok(self.message.lock().map(|m| m.port).unwrap_or(0))
+            }
+            reg::MESSAGE_CHANNEL_DEST_ADDRESS => {
+                return Ok(self.message.lock().map(|m| m.dest_address).unwrap_or(0))
+            }
+            reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT => return Ok(0),
+            reg::MESSAGE_CHANNEL_RETRY_COUNT => return Ok(0),
+            reg::MESSAGE_CHANNEL_SOURCE_PORT => return Ok(0),
+            // §36.27: GVSP is supported (bit 4 clear), GVRSP is not.
+            reg::STREAMING_CAPABILITY => return Ok(0),
+            // §36.38: protocol field = GVSP (0) plus the deprecated always-1
+            // bit (bit 1).
+            reg::STREAMING_CONFIGURATION => return Ok(reg::SCONF_DEPRECATED_BIT),
             _ => {}
+        }
+        // Optional bootstrap registers the virtual device does not implement
+        // must answer INVALID_ADDRESS instead of exposing the camera's live
+        // configuration: a write to 0x064C would reconfigure the real
+        // camera's Persistent IP (destructive) and a read would leak it.
+        if matches!(
+            addr,
+            reg::PERSISTENT_IP_ADDRESS
+                | reg::PERSISTENT_SUBNET_MASK
+                | reg::PERSISTENT_DEFAULT_GATEWAY
+        ) {
+            return Err(GEV_STATUS_INVALID_ADDRESS);
+        }
+        // Locally served bootstrap identity strings.
+        if let Some(bytes) = self.identity_bytes(addr, 4) {
+            return Ok(u32::from_be_bytes(
+                bytes.try_into().expect("4-byte identity window"),
+            ));
         }
         // Virtual First URL slot (0x0200..0x0400): the injected XML's
         // local: address, served locally.
@@ -374,6 +614,65 @@ impl RegisterSpace {
         if addr == reg::CCP {
             return self.ccp_write(value, None);
         }
+        if addr == reg::MESSAGE_CHANNEL_DEST_ADDRESS || addr == reg::MESSAGE_CHANNEL_PORT {
+            // §12.2: the channel opens when MCP carries a non-zero host port
+            // (MCDA first); §12.4: MCP = 0 closes it.
+            let dest = {
+                let mut message = self.message.lock().map_err(|_| crate::GEV_STATUS_ERROR)?;
+                if addr == reg::MESSAGE_CHANNEL_DEST_ADDRESS {
+                    message.dest_address = value;
+                } else {
+                    message.port = value;
+                }
+                let port = reg::mcp_host_port(message.port);
+                (port != 0 && message.dest_address != 0).then(|| {
+                    SocketAddr::from((Ipv4Addr::from(message.dest_address), port))
+                })
+            };
+            if let Ok(message) = self.message.lock() {
+                if let Some(relay) = &message.relay {
+                    relay.set_destination(dest);
+                }
+            }
+            return Ok(());
+        }
+        if addr == reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT
+            || addr == reg::MESSAGE_CHANNEL_RETRY_COUNT
+        {
+            // The relay keeps no event retransmission buffer: ACK generation
+            // stays disabled (the mandatory registers read 0, i.e. the same
+            // behaviour as a device with MCTT = 0, CR-103cd). See
+            // docs/00-governance/OPEN-QUESTIONS.md Q41.
+            return Ok(());
+        }
+        // Optional registers the virtual device does not implement: the
+        // camera's Persistent IP must never be written through the relay.
+        if matches!(
+            addr,
+            reg::PERSISTENT_IP_ADDRESS
+                | reg::PERSISTENT_SUBNET_MASK
+                | reg::PERSISTENT_DEFAULT_GATEWAY
+        ) {
+            return Err(GEV_STATUS_INVALID_ADDRESS);
+        }
+        if addr == reg::STREAMING_CONFIGURATION {
+            // §36.38 / R-667cd: write access is disabled while any stream
+            // channel is open. The virtual device supports GVSP only, so a
+            // GVRSP or reserved mode is an invalid parameter.
+            if self.channel.is_open() {
+                return Err(GEV_STATUS_BUSY);
+            }
+            let mode =
+                (value & reg::SCONF_STREAMING_PROTOCOL_MASK) >> reg::SCONF_STREAMING_PROTOCOL_SHIFT;
+            return if mode == reg::SCONF_PROTOCOL_GVSP {
+                Ok(())
+            } else {
+                Err(GEV_STATUS_INVALID_PARAMETER)
+            };
+        }
+        if let Some(result) = self.identity_write(addr, &value.to_be_bytes()) {
+            return result;
+        }
         if matches!(
             addr,
             reg::VERSION
@@ -382,6 +681,15 @@ impl RegisterSpace {
                 | reg::NET_IF_CONFIGURATION
                 | reg::CURRENT_SUBNET_MASK
                 | reg::NUM_NETWORK_INTERFACES
+                | reg::NUM_MESSAGE_CHANNELS
+                | reg::MESSAGE_CHANNEL_CAPABILITY
+                | reg::MESSAGE_CHANNEL_PORT
+                | reg::MESSAGE_CHANNEL_DEST_ADDRESS
+                | reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT
+                | reg::MESSAGE_CHANNEL_RETRY_COUNT
+                | reg::MESSAGE_CHANNEL_SOURCE_PORT
+                | reg::STREAMING_CAPABILITY
+                | reg::GVCP_CAPABILITY
         ) {
             return Err(GEV_STATUS_WRITE_PROTECT);
         }
@@ -406,10 +714,31 @@ impl RegisterSpace {
         self.write_reg(addr, value)
     }
 
+    /// PACKETRESEND (§16.7.2): route the request to the virtual stream's
+    /// front session (the relay owns the only channel, index 0).
+    pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        self.channel.packet_resend(channel, block_id, first, last);
+    }
+
     /// Block read (`count` bytes, a multiple of 4); Err is a GEV status code.
     pub fn read_block(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
         let len = u32::from(count);
         let end = addr.checked_add(len).ok_or(GEV_STATUS_INVALID_ADDRESS)?;
+        // Persistent IP is not implemented on the virtual device (§4.2:
+        // optional): never leak or forward the camera's configuration.
+        if matches!(
+            addr,
+            reg::PERSISTENT_IP_ADDRESS
+                | reg::PERSISTENT_SUBNET_MASK
+                | reg::PERSISTENT_DEFAULT_GATEWAY
+        ) {
+            return Err(GEV_STATUS_INVALID_ADDRESS);
+        }
+        // Locally served bootstrap identity strings: the bytes are the
+        // string's own, so no backend byte-order conversion applies.
+        if let Some(bytes) = self.identity_bytes(addr, count) {
+            return Ok(bytes);
+        }
         // Virtual First URL slot.
         if addr >= reg::FIRST_URL && end <= reg::SECOND_URL {
             let off = (addr - reg::FIRST_URL) as usize;
@@ -453,6 +782,15 @@ impl RegisterSpace {
                     | reg::CCP
                     | reg::HEARTBEAT_TIMEOUT
                     | reg::NUM_STREAM_CHANNELS
+                    | reg::NUM_MESSAGE_CHANNELS
+                    | reg::MESSAGE_CHANNEL_CAPABILITY
+                    | reg::MESSAGE_CHANNEL_PORT
+                    | reg::MESSAGE_CHANNEL_DEST_ADDRESS
+                    | reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT
+                    | reg::MESSAGE_CHANNEL_RETRY_COUNT
+                    | reg::MESSAGE_CHANNEL_SOURCE_PORT
+                    | reg::STREAMING_CAPABILITY
+                    | reg::STREAMING_CONFIGURATION
                     | reg::DEVICE_MAC_HIGH
                     | reg::DEVICE_MAC_LOW
                     | reg::CURRENT_IP
@@ -474,6 +812,20 @@ impl RegisterSpace {
         }
         let len = data.len() as u32;
         let end = addr.checked_add(len).ok_or(GEV_STATUS_INVALID_ADDRESS)?;
+        // Persistent IP registers are not implemented (see read_reg).
+        if matches!(
+            addr,
+            reg::PERSISTENT_IP_ADDRESS
+                | reg::PERSISTENT_SUBNET_MASK
+                | reg::PERSISTENT_DEFAULT_GATEWAY
+        ) {
+            return Err(GEV_STATUS_INVALID_ADDRESS);
+        }
+        // Locally served bootstrap identity strings: USER_DEFINED_NAME is
+        // writable, the other identity strings answer WRITE_PROTECT.
+        if let Some(result) = self.identity_write(addr, data) {
+            return result;
+        }
         if addr >= reg::FIRST_URL && end <= reg::SECOND_URL {
             return Err(GEV_STATUS_WRITE_PROTECT);
         }
@@ -499,6 +851,15 @@ impl RegisterSpace {
                     | reg::CCP
                     | reg::HEARTBEAT_TIMEOUT
                     | reg::NUM_STREAM_CHANNELS
+                    | reg::NUM_MESSAGE_CHANNELS
+                    | reg::MESSAGE_CHANNEL_CAPABILITY
+                    | reg::MESSAGE_CHANNEL_PORT
+                    | reg::MESSAGE_CHANNEL_DEST_ADDRESS
+                    | reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT
+                    | reg::MESSAGE_CHANNEL_RETRY_COUNT
+                    | reg::MESSAGE_CHANNEL_SOURCE_PORT
+                    | reg::STREAMING_CAPABILITY
+                    | reg::STREAMING_CONFIGURATION
                     | reg::DEVICE_MAC_HIGH
                     | reg::DEVICE_MAC_LOW
                     | reg::CURRENT_IP

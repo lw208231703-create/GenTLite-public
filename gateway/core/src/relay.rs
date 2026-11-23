@@ -42,6 +42,10 @@ pub struct StreamRegs {
     pub scps: u32,
     pub scpd: u32,
     pub scda: u32,
+    /// GVSP Stream Channel Configuration 0 (§36.63). The virtual channel
+    /// supports none of the optional per-channel features, so SCC0 reads 0
+    /// and every SCCFG0 bit is reserved: only a zero write is accepted.
+    pub sccfg: u32,
     /// Device timestamp tick frequency (Hz) for the SCPD inter-packet delay
     /// unit. 0 = the downstream device exposes no tick frequency; the delay
     /// then has no defined unit (GigE Vision §36.59) and is not applied.
@@ -57,6 +61,7 @@ impl Default for StreamRegs {
             scps: reg::scps_make(1500),
             scpd: 0,
             scda: 0,
+            sccfg: 0,
             tick_freq: 0,
         }
     }
@@ -109,6 +114,9 @@ struct RelayRun {
     stop: Arc<AtomicBool>,
     rx: Option<JoinHandle<()>>,
     tx: Option<JoinHandle<()>>,
+    /// Shared with the tx driver thread so PACKETRESEND_CMD can reach the
+    /// front's block cache while frames are streaming (§16.7.2).
+    session: Arc<Mutex<Box<dyn FrameSession>>>,
 }
 
 impl RelayRun {
@@ -180,9 +188,9 @@ impl Relay {
     }
 
     /// Read one virtual channel-0 register (`off` is the offset inside the
-    /// 0x40 block: SCP/SCPS/SCPD/SCDA, decoded by
-    /// [`reg::stream_channel_addr`]). All four are served locally — nothing
-    /// reaches the camera (the §36.57–§36.60 semantics are re-implemented
+    /// 0x40 block: SCP/SCPS/SCPD/SCDA/SCC/SCCFG, decoded by
+    /// [`reg::stream_channel_addr`]). All of them are served locally —
+    /// nothing reaches the camera (§36.57–§36.63 semantics are re-implemented
     /// by the virtual channel).
     pub fn read_reg(&self, off: u32) -> Result<u32, u16> {
         let regs = self.inner.regs.lock().expect("vgige relay regs poisoned");
@@ -190,7 +198,12 @@ impl Relay {
             reg::SCP_OFFSET => regs.scp,
             reg::SCPS_OFFSET => regs.scps,
             reg::SCPD_OFFSET => regs.scpd,
-            _ => regs.scda,
+            reg::SCDA_OFFSET => regs.scda,
+            // §36.62/CR-494cd: the register is mandatory, but none of the
+            // optional per-channel features is supported, so it reads 0.
+            reg::SCC_OFFSET => 0,
+            reg::SCCFG_OFFSET => regs.sccfg,
+            _ => return Err(GEV_STATUS_INVALID_ADDRESS),
         };
         Ok(value)
     }
@@ -206,16 +219,69 @@ impl Relay {
                 self.with_regs_mut(|r| r.scpd = value);
                 Ok(())
             }
-            _ => {
+            reg::SCDA_OFFSET => {
                 self.with_regs_mut(|r| r.scda = value);
                 Ok(())
             }
+            reg::SCCFG_OFFSET => self.write_sccfg(value),
+            // §36.62: the capability register is read-only.
+            reg::SCC_OFFSET => Err(GEV_STATUS_WRITE_PROTECT),
+            _ => Err(GEV_STATUS_INVALID_ADDRESS),
         }
+    }
+
+    /// SCCFGx write (§36.63/CR-495cd): the virtual channel supports none of
+    /// the optional per-channel features, so every configuration bit is
+    /// reserved — a non-zero write is an invalid parameter. R-590cd requires
+    /// write access to be disabled while streaming (GEV_STATUS_BUSY).
+    fn write_sccfg(&self, value: u32) -> Result<(), u16> {
+        let streaming = self
+            .inner
+            .run
+            .lock()
+            .expect("vgige relay run poisoned")
+            .is_some();
+        if streaming {
+            return Err(GEV_STATUS_BUSY);
+        }
+        if value != 0 {
+            return Err(GEV_STATUS_INVALID_PARAMETER);
+        }
+        self.with_regs_mut(|r| r.sccfg = 0);
+        Ok(())
     }
 
     /// Frames relayed since startup (custom-window slot 3, FrameCountRelayed).
     pub fn count(&self) -> u32 {
         self.inner.frames_relayed.load(Ordering::Relaxed)
+    }
+
+    /// PACKETRESEND (§16.7.2): forward the request to the front session's
+    /// block cache. A front without resend support ignores it (the requester
+    /// then times out, §16.7.3) and must not advertise the GVCP capability.
+    pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        if channel != 0 {
+            return; // the virtual device has exactly one stream channel
+        }
+        let guard = self.inner.run.lock().expect("vgige relay run poisoned");
+        let Some(run) = guard.as_ref() else {
+            return;
+        };
+        let mut session = match run.session.lock() {
+            Ok(session) => session,
+            Err(_) => return,
+        };
+        session.packet_resend(block_id, first, last);
+    }
+
+    /// Whether the downstream stream is currently open (used by the register
+    /// space for §36.38 R-667cd stream-open write gating).
+    pub fn is_open(&self) -> bool {
+        self.inner
+            .run
+            .lock()
+            .expect("vgige relay run poisoned")
+            .is_some()
     }
 
     /// Idempotent, quiet close: stop the driver threads and cascade the
@@ -333,7 +399,8 @@ impl Relay {
         };
 
         let mut factory = self.inner.factory.lock().map_err(|_| GEV_STATUS_ERROR)?;
-        let mut session = factory(Arc::clone(&self.inner.regs));
+        let session: Arc<Mutex<Box<dyn FrameSession>>> =
+            Arc::new(Mutex::new(factory(Arc::clone(&self.inner.regs))));
         drop(factory);
 
         let hint = virtual_payload_chunk(
@@ -343,7 +410,11 @@ impl Relay {
                 .expect("vgige relay regs poisoned")
                 .scps,
         );
-        if let Err(e) = session.open(hint) {
+        let open_result = match session.lock() {
+            Ok(mut session) => session.open(hint),
+            Err(_) => Err("session lock poisoned".to_string()),
+        };
+        if let Err(e) = open_result {
             eprintln!("vgige: relay session open: {e}");
             let _ = self.inner.back.lock().map(|mut b| b.close_stream());
             return Err(GEV_STATUS_ERROR);
@@ -354,10 +425,11 @@ impl Relay {
         let frames_relayed = Arc::clone(&self.inner.frames_relayed);
         let tx_stop = stop.clone();
         let transmitting = Arc::clone(&self.inner.transmitting);
+        let tx_session = Arc::clone(&session);
         transmitting.store(false, Ordering::Relaxed);
         let tx_handle = match std::thread::Builder::new()
             .name("vgige-relay-tx".into())
-            .spawn(move || driver_tx(tx_stop, session, frame_rx, frames_relayed, transmitting))
+            .spawn(move || driver_tx(tx_stop, tx_session, frame_rx, frames_relayed, transmitting))
         {
             Ok(handle) => handle,
             Err(_) => {
@@ -385,6 +457,7 @@ impl Relay {
             stop,
             rx: Some(rx_handle),
             tx: Some(tx_handle),
+            session,
         });
         Ok(())
     }
@@ -434,7 +507,7 @@ fn driver_rx(
 /// was spawned, so startup errors can roll back the downstream channel.
 fn driver_tx(
     stop: Arc<AtomicBool>,
-    mut session: Box<dyn FrameSession>,
+    session: std::sync::Arc<std::sync::Mutex<Box<dyn FrameSession>>>,
     frame_rx: Receiver<CanonicalFrame>,
     frames_relayed: Arc<AtomicU32>,
     transmitting: Arc<AtomicBool>,
@@ -446,14 +519,18 @@ fn driver_tx(
                 // writable. Set before send so a concurrent SCPSx write is
                 // ordered after (BUSY) rather than slipping into the gap.
                 transmitting.store(true, Ordering::Relaxed);
-                session.send_frame(frame);
+                if let Ok(mut session) = session.lock() {
+                    session.send_frame(frame);
+                }
                 frames_relayed.fetch_add(1, Ordering::Relaxed);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
-    session.close();
+    if let Ok(mut session) = session.lock() {
+        session.close();
+    }
 }
 
 #[cfg(test)]

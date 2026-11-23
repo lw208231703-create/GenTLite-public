@@ -530,7 +530,7 @@ fn xml_injection_over_manifest() {
     let s = start();
 
     let url = s.remote.xml_url().unwrap();
-    assert!(url.starts_with("local:vgige.xml;"), "virtual URL: {url}");
+    assert!(url.starts_with("local:vgige-"), "virtual URL: {url}");
     let mut parts = url.split(';');
     parts.next();
     let addr = u32::from_str_radix(parts.next().unwrap(), 16).unwrap();

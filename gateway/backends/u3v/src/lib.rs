@@ -29,7 +29,9 @@
 //! window timeout) map to the generic Appendix B.21 status 0x8FFF, the
 //! same policy as the GigE back (its camera-unreachable case).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use gentl_core::{GentlError, GentlResult};
@@ -41,16 +43,29 @@ use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSo
 // I/O) — the same policy as the GigE back.
 const GEV_STATUS_ERROR: u16 = 0x8FFF;
 
+/// Downstream DEI event relay state: the forwarder thread and its stop flag.
+/// Dropping the backend stops the forwarder, then lowers EI_CONTROL via
+/// [`U3vCamera::stop_events`].
+struct EventRelay {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
 /// The downstream U3V camera.
 pub struct U3vBack {
-    cam: U3vCamera,
+    cam: Arc<U3vCamera>,
+    /// DEI event pump, when `start_event_relay` succeeded.
+    event_relay: Option<EventRelay>,
 }
 
 impl U3vBack {
     /// Open by the backend instance ID (Windows: CM device instance path;
     /// Linux: `<bus>:<address>` from `U3vCamera::enumerate`).
     pub fn open(instance_id: &str) -> GentlResult<Self> {
-        U3vCamera::open(instance_id).map(|cam| Self { cam })
+        U3vCamera::open(instance_id).map(|cam| Self {
+            cam: Arc::new(cam),
+            event_relay: None,
+        })
     }
 
     /// Build from pre-opened endpoint pipes (test fakes, embedded
@@ -60,7 +75,10 @@ impl U3vBack {
         control_in: Arc<dyn UsbPipe>,
         stream_in: Vec<Arc<dyn UsbPipe>>,
     ) -> GentlResult<Self> {
-        U3vCamera::from_pipes(control_out, control_in, stream_in).map(|cam| Self { cam })
+        U3vCamera::from_pipes(control_out, control_in, stream_in).map(|cam| Self {
+            cam: Arc::new(cam),
+            event_relay: None,
+        })
     }
 
     /// The facade camera (diagnostics, tests).
@@ -147,12 +165,44 @@ impl CameraBack for U3vBack {
     }
 
     fn open_stream(&mut self) -> Result<Box<dyn FrameSource>, u16> {
-        let stream = self.cam.stream(0).map_err(to_gev)?;
-        stream.start().map_err(to_gev)?;
-        Ok(Box::new(U3vFrameSource {
-            stream,
+        let mut source = U3vFrameSource {
+            cam: Arc::clone(&self.cam),
+            stream: None,
             dead: false,
-        }))
+        };
+        source.reopen().map_err(to_gev)?;
+        Ok(Box::new(source))
+    }
+
+    fn start_event_relay(
+        &mut self,
+        relay: Arc<vgige_core::MessageRelay>,
+    ) -> Result<(), u16> {
+        if self.event_relay.is_some() {
+            return Ok(());
+        }
+        // U3V 4.1.3.3 / 5.4.2: the DEI pump raises the EIRM Event Enable bit
+        // and streams EVENTS; a camera without an event endpoint answers an
+        // error here, which the caller treats as "no message channel"
+        // (36.22 honesty rule applies to the virtual device).
+        let receiver = self.cam.start_events().map_err(to_gev)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("vgige-u3v-events".into())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    if let Some(event) = receiver.next(Duration::from_millis(100)) {
+                        relay.forward(&event_to_gvcp(&event));
+                    }
+                }
+            })
+            .map_err(|_| 0x8FFFu16)?;
+        self.event_relay = Some(EventRelay {
+            stop,
+            thread: Some(thread),
+        });
+        Ok(())
     }
 
     fn close_stream(&mut self) -> Result<(), u16> {
@@ -167,11 +217,25 @@ impl CameraBack for U3vBack {
 /// U3V intake of one open channel: pulls blocks from the facade stream
 /// (watchdog-bounded) and maps them to canonical frames.
 pub struct U3vFrameSource {
-    stream: U3vStream,
-    /// Set on a transport/desync error: the pipe cannot re-synchronize
-    /// (same policy as the GenTL receiver's desync); keep answering `None`
-    /// after waiting out the timeout, mirroring the GigE source's contract.
+    /// The camera handle (Arc: a broken USB session is reopened from here).
+    cam: Arc<U3vCamera>,
+    /// Live channel-0 session; `None` while a reopen is pending.
+    stream: Option<U3vStream>,
+    /// Set only after repeated reopen failures: keeps the relay cadence.
     dead: bool,
+}
+
+impl U3vFrameSource {
+    /// (Re)open channel 0. The SIRM snapshot is taken here, so a geometry
+    /// change the host made since the previous session (NI's attribute
+    /// matrix changes Width/Height/PixelFormat per row) is picked up.
+    fn reopen(&mut self) -> Result<(), U3vError> {
+        let stream = self.cam.stream(0)?;
+        stream.start()?;
+        self.stream = Some(stream);
+        self.dead = false;
+        Ok(())
+    }
 }
 
 impl FrameSource for U3vFrameSource {
@@ -182,12 +246,37 @@ impl FrameSource for U3vFrameSource {
             std::thread::sleep(timeout);
             return None;
         }
-        match self.stream.next_block(timeout) {
+        if self.stream.is_none() {
+            match self.reopen() {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("vgige: u3v stream reopen failed: {e:?}");
+                    std::thread::sleep(timeout);
+                    return None;
+                }
+            }
+        }
+        // The relay's poll cadence is short (100 ms); that is the idle window,
+        // not a deadline for a block that already started. A large block
+        // (e.g. 2048x2048 Mono8 = 4 MiB, eight 512 KiB USB transfers) can
+        // easily outlive the poll window once the leader arrived, so wait
+        // long enough to finish one block before declaring a timeout.
+        let window = timeout.max(Duration::from_millis(1000));
+        let Some(stream) = self.stream.as_ref() else {
+            return None;
+        };
+        match stream.next_block(window) {
             // No block started within the window (idle poll / timeout).
             None => None,
             Some(Err(e)) => {
-                eprintln!("vgige: u3v stream read failed: {e:?}");
-                self.dead = true;
+                // A desync (e.g. ERROR_OPERATION_ABORTED from a session
+                // transition) is recoverable: drop this session, take a
+                // fresh SIRM snapshot and keep relaying. Without this a
+                // single aborted transfer killed the whole host session.
+                eprintln!("vgige: u3v stream read failed ({e:?}); reopening the stream");
+                if let Some(stream) = self.stream.take() {
+                    stream.stop();
+                }
                 std::thread::sleep(timeout);
                 None
             }
@@ -207,6 +296,7 @@ impl FrameSource for U3vFrameSource {
                 // U3V carries no padding_y (leader has a single padding,
                 // §5.5.5.1.1 Table 5-7).
                 padding_y: 0,
+                chunk: None,
                 payload: FramePayload::new(payload),
             }),
         }
@@ -217,8 +307,53 @@ impl Drop for U3vFrameSource {
     fn drop(&mut self) {
         // §5.4.1.2: Stream Enable = 0 aborts the stream; called by Drop as
         // well, so a forgotten stop still tears the device side down.
-        self.stream.stop();
+        if let Some(stream) = self.stream.take() {
+            stream.stop();
+        }
     }
+}
+
+impl Drop for U3vBack {
+    fn drop(&mut self) {
+        if let Some(relay) = self.event_relay.take() {
+            relay.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = relay.thread {
+                let _ = thread.join();
+            }
+            // Lower EI_CONTROL and join the facade's DEI pump.
+            let _ = self.cam.stop_events();
+        }
+    }
+}
+
+/// Convert one U3V DEI event (4.1.3.3.2: event id + timestamp + optional
+/// data) into the GigE Vision message-channel datagram the virtual device
+/// forwards to the host: the 24-byte EVENT_CMD / EVENTDATA_CMD record
+/// (17.1.1 Figure 17-1 / 17.2.1 Figure 17-3) after a GVCP header. The event
+/// id is the one from the camera's own GenICam XML, which the host was given
+/// unchanged.
+pub(crate) fn event_to_gvcp(event: &gentl_u3v::packets::EventPacket) -> Vec<u8> {
+    use gentl_gvcp::wire::{GvcpEvent, EVENT_CMD, EVENTDATA_CMD, HEADER_LEN};
+    let gvcp = GvcpEvent {
+        event_id: event.event_id,
+        stream_channel: 0xFFFF, // 17.1.1: no stream channel involved
+        block_id: 0,
+        timestamp: event.timestamp,
+        data: event.data.clone(),
+    };
+    let record = gvcp.encode();
+    let command = if event.data.is_empty() {
+        EVENT_CMD
+    } else {
+        EVENTDATA_CMD
+    };
+    let mut datagram = Vec::with_capacity(HEADER_LEN + record.len());
+    datagram.extend_from_slice(&[0x42, 0x08]); // GVCP key; flag bit 3 = extended id
+    datagram.extend_from_slice(&command.to_be_bytes());
+    datagram.extend_from_slice(&(record.len() as u16).to_be_bytes());
+    datagram.extend_from_slice(&0u16.to_be_bytes()); // unsolicited: req_id unused
+    datagram.extend_from_slice(&record);
+    datagram
 }
 
 #[cfg(test)]
@@ -227,6 +362,46 @@ mod tests {
 
     /// The GenCP→GEV namespace decision: common codes verbatim, local
     /// failures to the generic Appendix B.21 status.
+    /// U3V DEI event -> GigE Vision message-channel datagram (17.1.1 /
+    /// 17.2.1): EVENT_CMD for a payload-less event, EVENTDATA_CMD when the
+    /// event carries camera-specific data; id/timestamp preserved.
+    #[test]
+    fn dei_events_convert_to_message_channel_datagrams() {
+        use gentl_gvcp::wire::{decode_message_events, EVENT_CMD, EVENTDATA_CMD};
+        let plain = gentl_u3v::packets::EventPacket {
+            event_id: 7,
+            timestamp: 1_234,
+            data: Vec::new(),
+        };
+        let datagram = event_to_gvcp(&plain);
+        assert_eq!(
+            u16::from_be_bytes([datagram[2], datagram[3]]),
+            EVENT_CMD,
+            "no event data -> EVENT_CMD"
+        );
+        let decoded = decode_message_events(&datagram).expect("EVENT_CMD decodes");
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].event_id, 7);
+        assert_eq!(decoded[0].timestamp, 1_234);
+        assert_eq!(decoded[0].stream_channel, 0xFFFF);
+        assert!(decoded[0].data.is_empty());
+
+        let with_data = gentl_u3v::packets::EventPacket {
+            event_id: 8,
+            timestamp: 9,
+            data: vec![1, 2, 3, 4],
+        };
+        let datagram = event_to_gvcp(&with_data);
+        assert_eq!(
+            u16::from_be_bytes([datagram[2], datagram[3]]),
+            EVENTDATA_CMD,
+            "event data -> EVENTDATA_CMD (17.2.1)"
+        );
+        let decoded = decode_message_events(&datagram).expect("EVENTDATA_CMD decodes");
+        assert_eq!(decoded[0].event_id, 8);
+        assert_eq!(decoded[0].data, vec![1, 2, 3, 4]);
+    }
+
     #[test]
     fn status_mapping_table() {
         assert_eq!(to_gev(U3vError::Status(gentl_gvcp::wire::GEV_STATUS_SUCCESS)), 0x0000);

@@ -14,8 +14,8 @@ use crate::XML_BASE_V;
 /// Injected device description served by the virtual device.
 pub struct XmlMerger {
     blob: Vec<u8>,
-    /// `local:vgige.xml;<XML_BASE_V hex>;<len hex>` — never longer than the
-    /// 512-byte First URL slot.
+    /// `local:vgige-<content hash>.xml;<XML_BASE_V hex>;<len hex>` — never
+    /// longer than the 512-byte First URL slot.
     url: String,
     /// Feature nodes in the built-in SmartCamera fragment (ready-line stats).
     node_count: usize,
@@ -65,7 +65,19 @@ impl XmlMerger {
                 blob = rewrite_gige_identity(blob);
             }
         }
-        let url = format!("local:vgige.xml;{XML_BASE_V:x};{:x}", blob.len());
+        // NI-IMAQdx and GenApi-based consumers cache the downloaded XML by
+        // URL (NI: `Data\XML\<name>.xml`; GenICam: the GENICAM_CACHE entry
+        // keyed by XMLVersion plus device identity). A device whose XML
+        // changes but keeps the same URL/version hands the host a stale
+        // feature tree: measured 2026-11-20, NI MAX validated FrameRate
+        // against a cached Min/Max 0..240 while the live device allowed
+        // 1..1e6. Hash the content into the file name so any XML document
+        // change becomes a new cache entry.
+        let revision = content_revision(blob.as_bytes());
+        let url = format!(
+            "local:vgige-{revision:08x}.xml;{XML_BASE_V:x};{:x}",
+            blob.len()
+        );
         if url.len() > 512 {
             return Err(GentlError::Io("injected XML URL exceeds the 512-byte First URL slot".into()));
         }
@@ -95,6 +107,18 @@ impl XmlMerger {
     pub fn node_count(&self) -> usize {
         self.node_count
     }
+}
+
+/// FNV-1a 32-bit content revision embedded in the virtual XML URL. Not a
+/// security hash: it only has to change whenever the document changes, so a
+/// host's URL-keyed XML cache cannot serve a stale feature tree.
+fn content_revision(blob: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &byte in blob {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 /// Rewrite every int-register endianness declaration to `big` (GigE wire)
@@ -142,7 +166,16 @@ fn build_injected_xml(
     let cut = camera_xml
         .rfind(closing)
         .ok_or_else(|| GentlError::Io("camera XML has no </RegisterDescription>".into()))?;
-    let smart = smart_camera_fragment();
+    // Idempotency: a downstream camera may itself be one of our virtual
+    // devices (e.g. the U3V gadget front), whose served XML already carries
+    // this built-in fragment. Injecting it a second time produces duplicate
+    // GenApi feature names and hosts reject the whole document (NI-IMAQdx:
+    // "Unable to load camera's XML file"; XSD: duplicate FeatureKey).
+    let smart = if has_node(camera_xml, "SmartCamera") {
+        String::new()
+    } else {
+        smart_camera_fragment()
+    };
     let node_count = smart.matches("<pFeature>").count();
     let mut out = String::with_capacity(camera_xml.len() + smart.len() + ext.map_or(0, <[u8]>::len));
     out.push_str(&camera_xml[..cut]);
@@ -156,23 +189,62 @@ fn build_injected_xml(
         }
     }
     out.push_str(&camera_xml[cut..]);
+    // The injected category is only reachable through the GenApi feature
+    // tree when Root references it: a camera XML that never had a
+    // SmartCamera node needs the `<pFeature>` link or NI/pylon show the
+    // fragment as an orphan (the null XML already carries the reference, so
+    // this is a no-op there).
+    let out = attach_to_root(out, "SmartCamera");
     Ok((out, node_count))
 }
 
+/// Insert `feature` into the `Root` category's `pFeature` list unless the
+/// document already references it. GenApi only exposes categories reachable
+/// from Root; an injected `<Category>` without the link is invisible in host
+/// attribute trees (and in NI's `.icd` paths).
+fn attach_to_root(xml: String, feature: &str) -> String {
+    let reference = format!("<pFeature>{feature}</pFeature>");
+    if xml.contains(&reference) {
+        return xml;
+    }
+    let Some(pos) = category_close(&xml, "Root") else {
+        return xml;
+    };
+    insert_at(xml, pos, &format!("    {reference}\n"))
+}
+
+/// Byte offset of the `</Category>` closing the first
+/// `<Category Name="{name}"` in the document. String surgery only: the
+/// producer/consumer contract is "well-formed camera XML", and Root's direct
+/// children are `<pFeature>` references (no nested categories), so the first
+/// close tag after the opening one is the matching one.
+fn category_close(xml: &str, name: &str) -> Option<usize> {
+    let open = format!("<Category Name=\"{name}\"");
+    let start = xml.find(&open)?;
+    xml[start..].find("</Category>").map(|p| start + p)
+}
+
+fn insert_at(mut xml: String, pos: usize, text: &str) -> String {
+    xml.insert_str(pos, text);
+    xml
+}
+
 /// Insert the standard GigE Vision transport features for stream channel 0
-/// when the camera XML does not already declare them. The addresses are the
-/// spec's fixed stream-channel map (§36.57–§36.60); the virtual front routes
-/// them to its local channel, so they never reach the downstream camera.
+/// when the camera XML does not already declare them, into a
+/// `TransportLayerControl` category that Root references (§37.5: that
+/// category is the standard home of the `Gev*` features, and GenApi only
+/// exposes features reachable from Root). The addresses are the spec's fixed
+/// stream-channel map (§36.57–§36.60); the virtual front routes them to its
+/// local channel, so they never reach the downstream camera.
 /// Returns the document and the number of injected features (4 when the
 /// camera had no GigE transport nodes at all).
 fn inject_gige_transport(xml: String) -> (String, usize) {
-    let mut fragment = String::new();
-    let mut nodes = 0usize;
-    fragment.push_str("  <Group Comment=\"GigEVisionTransport\">\n");
+    let mut nodes = String::new();
+    let mut features: Vec<&str> = Vec::new();
 
     if !has_node(&xml, "GevSCPSPacketSize") {
         gige_int_feature(
-            &mut fragment,
+            &mut nodes,
             "GevSCPSPacketSize",
             "Packet Size",
             "Total GVSP packet size in bytes, including IP, UDP and GVSP headers (GigE Vision §36.58).",
@@ -185,12 +257,12 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
         // of a big-endian register MSB-first (bit 0 is the MSB), so the low
         // 16 bits are printed bits 16..31: LSB=31, MSB=16. The reference
         // GenApi implementation rejects LSB < MSB for BigEndian registers.
-        gige_masked_reg(&mut fragment, "GevSCPSPacketSize_Reg", reg::SCPS0, 31, 16);
-        nodes += 1;
+        gige_masked_reg(&mut nodes, "GevSCPSPacketSize_Reg", reg::SCPS0, 31, 16);
+        features.push("GevSCPSPacketSize");
     }
     if !has_node(&xml, "GevSCPHostPort") {
         gige_int_feature(
-            &mut fragment,
+            &mut nodes,
             "GevSCPHostPort",
             "Host Port",
             "Host UDP port of the stream channel; writing 0 closes it (GigE Vision §36.57).",
@@ -198,12 +270,12 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
             "0",
             "65535",
         );
-        gige_masked_reg(&mut fragment, "GevSCPHostPort_Reg", reg::SCP0, 31, 16);
-        nodes += 1;
+        gige_masked_reg(&mut nodes, "GevSCPHostPort_Reg", reg::SCP0, 31, 16);
+        features.push("GevSCPHostPort");
     }
     if !has_node(&xml, "GevSCDA") {
         gige_int_feature(
-            &mut fragment,
+            &mut nodes,
             "GevSCDA",
             "Destination Address",
             "Stream channel destination IPv4 address (GigE Vision §36.60).",
@@ -211,12 +283,12 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
             "0",
             "4294967295",
         );
-        gige_int_reg(&mut fragment, "GevSCDA_Reg", reg::SCDA0);
-        nodes += 1;
+        gige_int_reg(&mut nodes, "GevSCDA_Reg", reg::SCDA0);
+        features.push("GevSCDA");
     }
     if !has_node(&xml, "GevSCPD") {
         gige_int_feature(
-            &mut fragment,
+            &mut nodes,
             "GevSCPD",
             "Packet Delay",
             "Minimal inter-packet delay in timestamp ticks (GigE Vision §36.59).",
@@ -224,22 +296,44 @@ fn inject_gige_transport(xml: String) -> (String, usize) {
             "0",
             "4294967295",
         );
-        gige_int_reg(&mut fragment, "GevSCPD_Reg", reg::SCPD0);
-        nodes += 1;
+        gige_int_reg(&mut nodes, "GevSCPD_Reg", reg::SCPD0);
+        features.push("GevSCPD");
     }
-    fragment.push_str("  </Group>\n");
 
-    if nodes == 0 {
+    if features.is_empty() {
         return (xml, 0);
     }
+    let count = features.len();
     let Some(cut) = xml.rfind("</RegisterDescription>") else {
         return (xml, 0);
     };
-    let mut out = String::with_capacity(xml.len() + fragment.len());
+    let mut out = String::with_capacity(xml.len() + nodes.len() + 1024);
     out.push_str(&xml[..cut]);
-    out.push_str(&fragment);
+    out.push_str(&nodes);
     out.push_str(&xml[cut..]);
-    (out, nodes)
+
+    let pfeatures: String = features
+        .iter()
+        .map(|f| format!("    <pFeature>{f}</pFeature>\n"))
+        .collect();
+    let out = match category_close(&out, "TransportLayerControl") {
+        // Real cameras already have the standard transport category: add the
+        // injected features to it instead of creating a duplicate.
+        Some(pos) => insert_at(out, pos, &pfeatures),
+        None => {
+            let category = format!(
+                "  <Category Name=\"TransportLayerControl\" NameSpace=\"Standard\">\n\
+                 \x20     <ToolTip>Transport layer control (GigE Vision stream channel 0).</ToolTip>\n\
+                 \x20     <Description>Transport layer control.</Description>\n\
+                 \x20     <DisplayName>Transport Layer Control</DisplayName>\n\
+                 \x20     <Visibility>Beginner</Visibility>\n\
+                 {pfeatures}  </Category>\n"
+            );
+            let out = insert_at(out, cut, &category);
+            attach_to_root(out, "TransportLayerControl")
+        }
+    };
+    (out, count)
 }
 
 fn has_node(xml: &str, name: &str) -> bool {
@@ -362,6 +456,54 @@ fn int_reg(x: &mut String, name: &str, addr: u32, access: &str) {
 
 #[cfg(test)]
 mod tests {
+
+    /// A downstream camera that already serves our SmartCamera fragment
+    /// (e.g. the U3V gadget front, whose XML this gateway then wraps) must
+    /// not get a second copy: duplicate GenApi feature names make every
+    /// host reject the document (NI: "Unable to load camera's XML file").
+    #[test]
+    fn injected_smart_camera_fragment_is_idempotent() {
+        let camera_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<RegisterDescription xmlns="http://www.genicam.org/GenApi/Version_1_1">
+  <Category Name="Root" NameSpace="Standard">
+    <pFeature>SmartCamera</pFeature>
+    <pFeature>DeviceControl</pFeature>
+  </Category>
+  <Category Name="SmartCamera" NameSpace="Custom">
+    <pFeature>VgigeVersion</pFeature>
+  </Category>
+  <Integer Name="VgigeVersion" NameSpace="Custom">
+    <pValue>VgigeVersionReg</pValue>
+  </Integer>
+  <IntReg Name="VgigeVersionReg" NameSpace="Custom">
+    <Address>536870912</Address>
+    <Length>4</Length>
+    <AccessMode>RO</AccessMode>
+    <pPort>Device</pPort>
+  </IntReg>
+  <Category Name="DeviceControl" NameSpace="Standard">
+    <pFeature>DeviceReset</pFeature>
+  </Category>
+</RegisterDescription>
+"#;
+        let merged = XmlMerger::new(camera_xml.as_bytes(), None).expect("merge");
+        let text = String::from_utf8_lossy(merged.blob());
+        assert_eq!(
+            text.matches("Name=\"SmartCamera\"").count(),
+            1,
+            "SmartCamera category stays unique"
+        );
+        assert_eq!(
+            text.matches("Name=\"VgigeVersion\"").count(),
+            1,
+            "feature stays unique"
+        );
+        assert_eq!(
+            text.matches("<pFeature>SmartCamera</pFeature>").count(),
+            1,
+            "Root keeps a single reference"
+        );
+    }
     use super::*;
 
     /// Minimal camera document in the simulator's shape.
@@ -463,9 +605,27 @@ mod tests {
             assert!(out[at..at + 220].contains(&format!("Address>0x{addr:08X}</Address>")));
         }
         assert!(out.contains("<AccessMode>WO</AccessMode>"));
-        // Virtual URL points at the blob.
-        assert!(m.url().starts_with("local:vgige.xml;"));
+        // The injected category is reachable from Root (NI/pylon only show
+        // categories referenced by Root's pFeature list).
+        assert!(out.contains("<pFeature>SmartCamera</pFeature>"));
+        // Virtual URL points at the blob and carries the content revision.
+        assert!(m.url().starts_with("local:vgige-"));
+        assert!(m.url().contains(".xml;"));
         assert!(m.url().ends_with(&format!("{:x}", m.blob().len())));
+    }
+
+    #[test]
+    fn xml_url_tracks_content_revision() {
+        // Same document -> same URL (host caches stay valid).
+        let a = XmlMerger::new(camera_xml().as_bytes(), None).unwrap();
+        let b = XmlMerger::new(camera_xml().as_bytes(), None).unwrap();
+        assert_eq!(a.url(), b.url());
+        // Content change -> new URL, so an URL-keyed host cache cannot serve
+        // the stale feature tree (2026-11-20 NI MAX FrameRate incident).
+        let changed = camera_xml().replace("ModelName=\"SimCam\"", "ModelName=\"SimCam2\"");
+        let c = XmlMerger::new(changed.as_bytes(), None).unwrap();
+        assert_ne!(a.url(), c.url());
+        assert!(!changed.is_empty());
     }
 
     #[test]
@@ -510,7 +670,45 @@ mod tests {
         assert!(out.contains("<MaskedIntReg Name=\"GevSCPHostPort_Reg\""));
         assert_eq!(out.matches("<LSB>31</LSB>").count(), 2);
         assert_eq!(out.matches("<MSB>16</MSB>").count(), 2);
+        // §37.5: the injected features live in TransportLayerControl, which
+        // Root references (otherwise NI/pylon treat them as orphans).
+        assert!(out.contains("<Category Name=\"TransportLayerControl\""));
+        assert!(out.contains("<pFeature>TransportLayerControl</pFeature>"));
+        assert_eq!(
+            out.matches("Name=\"TransportLayerControl\"").count(),
+            1,
+            "exactly one transport category"
+        );
         assert_eq!(m.node_count(), 9, "5 built-in + 4 transport nodes");
+    }
+
+    #[test]
+    fn injected_features_join_an_existing_transport_category() {
+        // Real cameras already declare TransportLayerControl: injected
+        // features must join it instead of creating a duplicate category.
+        let camera = camera_xml().replace(
+            "  </Group>\n</RegisterDescription>",
+            "  </Group>\n  <Category Name=\"TransportLayerControl\" NameSpace=\"Standard\">\n    <pFeature>CameraOnlyTransportNode</pFeature>\n  </Category>\n</RegisterDescription>",
+        );
+        let m = XmlMerger::new_with_endian(camera.as_bytes(), None, true).unwrap();
+        let out = std::str::from_utf8(m.blob()).unwrap();
+        assert_tag_balance(out);
+        assert_eq!(out.matches("<Category Name=\"TransportLayerControl\"").count(), 1);
+        let transport = out.find("<Category Name=\"TransportLayerControl\"").unwrap();
+        let close = out[transport..].find("</Category>").unwrap() + transport;
+        let block = &out[transport..close];
+        for node in [
+            "CameraOnlyTransportNode",
+            "GevSCPSPacketSize",
+            "GevSCPHostPort",
+            "GevSCDA",
+            "GevSCPD",
+        ] {
+            assert!(
+                block.contains(&format!("<pFeature>{node}</pFeature>")),
+                "{node} missing from the existing TransportLayerControl category"
+            );
+        }
     }
 
     #[test]

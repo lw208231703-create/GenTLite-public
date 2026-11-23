@@ -10,7 +10,10 @@
 use std::collections::VecDeque;
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use gentl_core::ds::{BufferState, DsCore, GENTL_INFINITE};
@@ -41,6 +44,14 @@ const POOL_DEPTH: usize = 4;
 /// Reusable canonical-frame payload slots (relay ring + pending + current).
 const FRAME_POOL_DEPTH: usize = 12;
 
+/// Downstream event relay state (§12 message channel): the receiver thread
+/// and its stop flag. Dropping the backend closes the channel (MCP = 0) and
+/// joins the thread.
+struct EventPump {
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
 /// The downstream GigE camera: one GVCP control channel plus the stream
 /// configuration knowledge for channel 0.
 pub struct GigeBack {
@@ -48,6 +59,10 @@ pub struct GigeBack {
     /// Source IPv4 of the down-facing NIC, written to the camera's SCDA0 at
     /// stream open.
     down_local_ip: Ipv4Addr,
+    camera_ip: Ipv4Addr,
+    camera_port: u16,
+    /// Message-channel pump, when `start_event_relay` succeeded.
+    event_pump: Option<EventPump>,
 }
 
 impl GigeBack {
@@ -59,6 +74,9 @@ impl GigeBack {
         Ok(Self {
             client,
             down_local_ip,
+            camera_ip: camera,
+            camera_port: port,
+            event_pump: None,
         })
     }
 
@@ -177,11 +195,25 @@ impl CameraBack for GigeBack {
         Ok(out)
     }
 
-    fn write_block(&mut self, _addr: u32, _data: &[u8]) -> Result<(), u16> {
-        // gentl-gvcp's client has no WRITEMEM path in v1, and no register-
-        // space caller needs one; the seam exists for block-shaped backends
-        // (U3V, Step 2). NOT_IMPLEMENTED is the honest §19 answer.
-        Err(GEV_STATUS_NOT_IMPLEMENTED)
+    fn write_block(&mut self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        // GenCP register access is block-shaped: a U3V front receives even a
+        // single 32-bit GenApi write as WRITEMEM, while GVCP has WRITEREG for
+        // exactly that case (§16.4). Route 4-byte blocks through WRITEREG so
+        // scalar register writes work across the back-gige x front-u3v
+        // matrix; `data` is already in this backend's native byte order (the
+        // register space converts to `register_endian` before the call).
+        if data.len() == 4 {
+            let value = u32::from_be_bytes(data.try_into().expect("4-byte block"));
+            return self.client.write_reg(addr, value).map_err(gev_status);
+        }
+        // Larger GenCP-style block writes ride WRITEMEM (§16.6: mandatory for
+        // every device, R-185cd). Both the length and the address must be
+        // 32-bit aligned (R-187c/R-189c); a GenCP block that is not cannot be
+        // represented on the GigE wire.
+        if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
+            return Err(GEV_STATUS_BAD_ALIGNMENT);
+        }
+        self.client.write_mem(addr, data).map_err(gev_status)
     }
 
     fn fetch_xml(&mut self) -> Result<Vec<u8>, u16> {
@@ -245,8 +277,82 @@ impl CameraBack for GigeBack {
         Ok(Box::new(GigeFrameSource::new(rx)))
     }
 
+    fn start_event_relay(
+        &mut self,
+        relay: Arc<vgige_core::MessageRelay>,
+    ) -> Result<(), u16> {
+        if self.event_pump.is_some() {
+            return Ok(());
+        }
+        // 36.22: a camera without a message channel cannot deliver events.
+        let channels = self.client.num_message_channels().map_err(|_| 0x8FFFu16)?;
+        if channels == 0 {
+            return Err(0x8001);
+        }
+        // Resolve the routable host address with a throw-away connected
+        // socket, then receive on an unconnected one: the camera sends events
+        // from its own ephemeral source port (12.2 CO-098cd).
+        let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
+        probe
+            .connect((self.camera_ip, self.camera_port))
+            .map_err(|_| 0x8FFFu16)?;
+        let host_ip = match probe.local_addr().map_err(|_| 0x8FFFu16)?.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            std::net::IpAddr::V6(_) => return Err(0x8FFF),
+        };
+        drop(probe);
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
+        let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+        let host_port = socket.local_addr().map_err(|_| 0x8FFFu16)?.port();
+        // 12.2: MCDA then MCP; the helper writes MCTT = 0, which disables
+        // ACK generation (CR-103cd) so no EVENT_ACK is required.
+        self.client
+            .open_message_channel(host_ip, host_port)
+            .map_err(|_| 0x8FFFu16)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("vgige-device-events".into())
+            .spawn(move || {
+                let mut buf = [0u8; 65536];
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match socket.recv(&mut buf) {
+                        Ok(n) => {
+                            relay.forward(&buf[..n]);
+                        }
+                        Err(e)
+                            if e.kind() == io::ErrorKind::TimedOut
+                                || e.kind() == io::ErrorKind::WouldBlock =>
+                        {
+                            continue
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                    }
+                }
+            })
+            .map_err(|_| 0x8FFFu16)?;
+        self.event_pump = Some(EventPump {
+            stop,
+            thread: Some(thread),
+        });
+        Ok(())
+    }
+
     fn close_stream(&mut self) -> Result<(), u16> {
         self.client.write_reg(reg::scp(0), 0).map_err(gev_status)
+    }
+}
+
+impl Drop for GigeBack {
+    fn drop(&mut self) {
+        if let Some(pump) = self.event_pump.take() {
+            // 12.4/CR-106ca: close the message channel with MCP = 0 first.
+            let _ = self.client.close_message_channel();
+            pump.stop.store(true, Ordering::Relaxed);
+            if let Some(thread) = pump.thread {
+                let _ = thread.join();
+            }
+        }
     }
 }
 
@@ -392,6 +498,9 @@ impl GigeFrameSource {
                 offset_y: meta.offset_y,
                 padding_x: meta.padding_x,
                 padding_y: meta.padding_y,
+                // §25.1: an extended-chunk block forwards its chunk region
+                // (the payload already carries the chunk-formatted bytes).
+                chunk: meta.chunk,
                 payload: FramePayload::with_recycle(payload, self.recycler.clone()),
             };
             let _ = self.core.mark_delivered(id);

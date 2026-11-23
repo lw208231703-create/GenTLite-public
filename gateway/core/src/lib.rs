@@ -23,6 +23,8 @@
 
 pub mod back;
 pub mod frame;
+pub mod heartbeat;
+pub mod message;
 pub mod relay;
 pub mod space;
 pub mod xml;
@@ -31,6 +33,7 @@ pub use back::{
     swap_register_endian, BackIdentity, CameraBack, RegisterEndian, SharedBack,
 };
 pub use frame::{CanonicalFrame, FramePayload, FrameSession, FrameSource};
+pub use message::MessageRelay;
 pub use relay::{packet_delay, virtual_payload_chunk, Relay, SessionFactory, StreamRegs};
 pub use space::RegisterSpace;
 pub use xml::XmlMerger;

@@ -76,6 +76,18 @@ pub trait CameraBack: Send {
     /// Close the downstream stream (camera channel register back to 0,
     /// R-091ca cascade source). Err = GEV status.
     fn close_stream(&mut self) -> Result<(), u16>;
+
+    /// Start relaying the camera's asynchronous events (GigE Vision §12
+    /// message channel / §17 EVENT) into `relay`, i.e. towards the host that
+    /// opens the virtual device's message channel. The default reports
+    /// NOT_IMPLEMENTED: a backend without a message channel makes the virtual
+    /// device advertise zero message channels, which is the honest answer.
+    fn start_event_relay(
+        &mut self,
+        _relay: Arc<crate::MessageRelay>,
+    ) -> Result<(), u16> {
+        Err(0x8001)
+    }
 }
 
 /// Transport-native identity of the downstream camera (see
