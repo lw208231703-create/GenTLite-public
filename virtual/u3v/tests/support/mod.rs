@@ -148,6 +148,7 @@ pub fn mono8_frame(block_seed: u64, timestamp: u64) -> CanonicalFrame {
         offset_y: 0,
         padding_x: 0,
         padding_y: 0,
+        chunk: None,
         payload: FramePayload::new(
             (0..PAYLOAD).map(|k| (k as u64 + block_seed) as u8).collect(),
         ),

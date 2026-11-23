@@ -313,6 +313,7 @@ mod tests {
             offset_y: 0,
             padding_x: 0,
             padding_y: 0,
+            chunk: None,
             payload: FramePayload::new(vec![1, 2, 3, 4]),
         }
     }
@@ -409,6 +410,7 @@ mod tests {
             offset_y: 0,
             padding_x: 0,
             padding_y: 0,
+            chunk: None,
             payload: FramePayload::new(vec![1, 2, 3, 4]),
         };
         let payload_ptr = frame.payload.as_ptr();

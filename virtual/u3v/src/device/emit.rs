@@ -129,7 +129,15 @@ fn emit_block(
     }
     stream.send(&packets::encode_image_leader(&leader))?;
 
-    let payload = &frame.payload;
+    // A relayed GigE camera may deliver an extended-chunk payload (§25.1).
+    // The U3V wire carries no chunk blocks unless the gadget enables them, so
+    // the image is everything before the image chunk tag: the region starts
+    // after the padded image plus its 8-byte tag.
+    let image_len = frame
+        .chunk
+        .map_or(frame.payload.len(), |region| region.offset.saturating_sub(8))
+        .min(frame.payload.len());
+    let payload = &frame.payload[..image_len];
     let (ts, count, f1, f2) = regs.programmed_geometry();
     emit_payload(stream, payload, ts, count, f1, f2, || regs.stream_enabled())?;
 

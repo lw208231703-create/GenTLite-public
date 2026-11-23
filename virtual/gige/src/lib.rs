@@ -13,6 +13,7 @@
 //! use [`RegisterSpace`] (no GVCP register space on USB), which is why the
 //! front is a crate, not a trait hierarchy.
 
+use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -67,8 +68,11 @@ pub fn assemble_identity(back: &SharedBack, up: &UpIdentity) -> GentlResult<Disc
         spec_version_minor: 0,
         device_mode: 0x8000_0001,
         mac: up.mac,
-        ip_config_options: reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_LLA,
-        ip_config_current: reg::IP_CFG_PERSISTENT_IP,
+        // §4.3/§4.4: DHCP and LLA support bits are mandatory; the front
+        // lives on the up NIC's address and does not implement Persistent
+        // IP (§4.2, optional), so its bit stays clear.
+        ip_config_options: reg::IP_CFG_DHCP | reg::IP_CFG_LLA,
+        ip_config_current: reg::IP_CFG_LLA,
         current_ip: u32::from(up.ip),
         current_subnet_mask: u32::from(up.mask),
         default_gateway: 0,
@@ -130,6 +134,10 @@ impl DeviceHandler for GigEFront {
         self.identity.clone()
     }
 
+    fn force_ip(&self, _peer: SocketAddr, request: ForceIpRequest) -> ForceIpOutcome {
+        self.space.force_ip(&request)
+    }
+
     fn read_reg(&self, addr: u32) -> Result<u32, u16> {
         self.space.read_reg(addr)
     }
@@ -155,6 +163,10 @@ impl DeviceHandler for GigEFront {
             }
         }
         result
+    }
+
+    fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
+        self.space.packet_resend(channel, block_id, first, last);
     }
 
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
@@ -189,6 +201,23 @@ fn build_test_packet(total: u32) -> Option<Vec<u8>> {
 /// GVSP 3.0 encoding session: one UDP sender socket plus the virtual
 /// channel's register file (destination and slice size are re-read per
 /// frame; SCPS0 cannot change once the first frame was sent, §36.58).
+/// PACKETRESEND block cache (§16.7.2): the virtual device keeps the most
+/// recent blocks so lost packets can be retransmitted. Bounded by bytes so a
+/// 16 MiB relay frame cannot grow the gateway footprint without limit.
+const RESEND_MAX_BLOCKS: usize = 8;
+// Large frames (e.g. a 4096x2731 Mono16 block is ~21 MiB) leave little
+// retransmission headroom at 48 MiB; NI's attribute matrix saturates the
+// link and asks for resends of the previous blocks, so keep 8 blocks /
+// 256 MiB (the cache is per open stream channel and freed on close).
+const RESEND_MAX_BYTES: usize = 256 * 1024 * 1024;
+
+struct CachedBlock {
+    block_id: u64,
+    /// `(packet_id, encoded datagram)`: leader = 0, payloads from 1, trailer
+    /// last (R-264st sequence).
+    packets: Vec<(u32, Vec<u8>)>,
+}
+
 pub struct GvspSession {
     socket: Option<UdpSocket>,
     regs: Arc<Mutex<StreamRegs>>,
@@ -199,6 +228,9 @@ pub struct GvspSession {
     /// two must not be mixed on one channel.
     legacy: bool,
     scratch: Vec<u8>,
+    /// Recent blocks for PACKETRESEND (§16.7.2), newest last.
+    cache: VecDeque<CachedBlock>,
+    cache_bytes: usize,
 }
 
 impl GvspSession {
@@ -209,7 +241,33 @@ impl GvspSession {
             next_block_id: 1,
             legacy: false,
             scratch: Vec::with_capacity(65_535),
+            cache: VecDeque::new(),
+            cache_bytes: 0,
         }
+    }
+
+    /// Keep one transmitted block for retransmission, evicting the oldest
+    /// blocks beyond the cache limits (always keeping the newest one).
+    fn cache_block(&mut self, block_id: u64, packets: Vec<(u32, Vec<u8>)>) {
+        if packets.is_empty() {
+            return;
+        }
+        self.cache_bytes += packets.iter().map(|(_, d)| d.len()).sum::<usize>();
+        self.cache.push_back(CachedBlock { block_id, packets });
+        while self.cache.len() > 1
+            && (self.cache.len() > RESEND_MAX_BLOCKS || self.cache_bytes > RESEND_MAX_BYTES)
+        {
+            if let Some(old) = self.cache.pop_front() {
+                self.cache_bytes -= old.packets.iter().map(|(_, d)| d.len()).sum::<usize>();
+            }
+        }
+    }
+
+    /// Current open channel destination (None while the channel is closing).
+    fn current_target(&self) -> Option<SocketAddr> {
+        let regs = self.regs.lock().ok()?;
+        let target = SocketAddr::from((Ipv4Addr::from(regs.scda), reg::scp_host_port(regs.scp)));
+        (target.port() != 0).then_some(target)
     }
 }
 
@@ -246,33 +304,100 @@ impl FrameSession for GvspSession {
         if target.port() == 0 {
             return; // channel closing; nothing to address.
         }
+        let block_id = self.next_block_id;
+        let mut packets: Vec<(u32, Vec<u8>)> = Vec::new();
         if self.legacy {
             send_block_legacy(
                 socket,
                 target,
-                self.next_block_id,
+                block_id,
                 &frame,
                 chunk,
                 delay,
                 &mut self.scratch,
+                &mut packets,
             );
         } else {
             send_block(
                 socket,
                 target,
-                self.next_block_id,
+                block_id,
                 &frame,
                 chunk,
                 delay,
                 &mut self.scratch,
+                &mut packets,
             );
         }
+        self.cache_block(block_id, packets);
         self.next_block_id += 1;
     }
 
     fn close(&mut self) {
         self.socket = None;
+        self.cache.clear();
+        self.cache_bytes = 0;
     }
+
+    /// PACKETRESEND (§16.7.2/CR-204st): retransmit the requested packet-id
+    /// range from the block cache, marking every resent datagram with
+    /// GEV_STATUS_PACKET_RESEND and GEV_FLAG_PACKET_RESEND. An unknown block
+    /// or an out-of-range request answers a header-only
+    /// GEV_STATUS_PACKET_UNAVAILABLE packet (CR-205st) instead of silence.
+    fn packet_resend(&mut self, block_id: u64, first: u32, last: u32) {
+        let Some(socket) = &self.socket else {
+            return;
+        };
+        let Some(target) = self.current_target() else {
+            return;
+        };
+        let Some(block) = self.cache.iter().find(|b| b.block_id == block_id) else {
+            send_packet_unavailable(socket, target, block_id, first);
+            return;
+        };
+        let mut sent = false;
+        for (packet_id, datagram) in &block.packets {
+            if *packet_id < first {
+                continue;
+            }
+            if last != u32::MAX && *packet_id > last {
+                continue;
+            }
+            let mut data = datagram.clone();
+            data[0..2].copy_from_slice(&GEV_STATUS_PACKET_RESEND.to_be_bytes());
+            if !self.legacy {
+                let flag = u16::from_be_bytes([data[2], data[3]]) | GEV_FLAG_PACKET_RESEND;
+                data[2..4].copy_from_slice(&flag.to_be_bytes());
+            }
+            let _ = socket.send_to(&data, target);
+            sent = true;
+        }
+        if !sent {
+            send_packet_unavailable(socket, target, block_id, first);
+        }
+    }
+}
+
+/// Header-only error packet for a PACKETRESEND the cache cannot serve
+/// (CR-205st): 3.0 20-byte header, status PACKET_UNAVAILABLE, the requested
+/// block/packet id.
+fn send_packet_unavailable(
+    socket: &UdpSocket,
+    target: SocketAddr,
+    block_id: u64,
+    packet_id: u32,
+) {
+    let mut hdr = [0u8; GVSP_HEADER_LEN];
+    GvspHeader {
+        status: GEV_STATUS_PACKET_UNAVAILABLE,
+        flag: 0,
+        extended_id: true,
+        packet_format: PACKET_FORMAT_DATA_PAYLOAD,
+        block_id,
+        packet_id,
+    }
+    .encode(&mut hdr);
+    let _ = socket.send_to(&hdr, target);
 }
 
 /// Emit one block: 3.0 20-byte EI=1 headers (§24.2), leader body in the
@@ -286,10 +411,18 @@ fn send_block(
     chunk: usize,
     delay: Duration,
     scratch: &mut Vec<u8>,
+    packets: &mut Vec<(u32, Vec<u8>)>,
 ) {
     let leader = ImageLeader {
         field_id: 0,
         field_count: 0,
+        // §25.1: a relayed chunk block keeps its extended-chunk payload type;
+        // the payload bytes are the camera's chunk-formatted bytes verbatim.
+        payload_type: if frame.chunk.is_some() {
+            PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT
+        } else {
+            PAYLOAD_TYPE_IMAGE
+        },
         timestamp: frame.timestamp,
         pixel_format: frame.pixel_format,
         size_x: frame.width,
@@ -302,6 +435,7 @@ fn send_block(
     scratch.clear();
     push_header(scratch, PACKET_FORMAT_DATA_LEADER, block_id, 0);
     scratch.extend_from_slice(&encode_image_leader_body(&leader));
+    packets.push((0, scratch.clone()));
     if socket.send_to(scratch, target).is_err() {
         return;
     }
@@ -314,10 +448,23 @@ fn send_block(
         delay,
         false,
         scratch,
+        packets,
     );
     scratch.clear();
     push_header(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
-    scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
+    let trailer = match frame.chunk {
+        // §25.1 Figure 25-1: the extended trailer reports the chunk block
+        // length and the layout id; the host parses the tags from the end.
+        Some(region) => encode_image_extended_trailer_body(
+            frame.height,
+            region.len as u32,
+            region.layout_id as u32,
+        )
+        .to_vec(),
+        None => encode_image_trailer_body(frame.height).to_vec(),
+    };
+    scratch.extend_from_slice(&trailer);
+    packets.push((packet_id, scratch.clone()));
     let _ = socket.send_to(scratch, target);
 }
 
@@ -333,10 +480,12 @@ fn send_block_legacy(
     chunk: usize,
     delay: Duration,
     scratch: &mut Vec<u8>,
+    packets: &mut Vec<(u32, Vec<u8>)>,
 ) {
     let leader = ImageLeader {
         field_id: 0,
         field_count: 0,
+        payload_type: gentl_gvcp::gvsp::PAYLOAD_TYPE_IMAGE,
         timestamp: frame.timestamp,
         pixel_format: frame.pixel_format,
         size_x: frame.width,
@@ -349,6 +498,7 @@ fn send_block_legacy(
     scratch.clear();
     push_header_legacy(scratch, PACKET_FORMAT_DATA_LEADER, block_id, 0);
     scratch.extend_from_slice(&encode_image_leader_body_legacy(&leader));
+    packets.push((0, scratch.clone()));
     if socket.send_to(scratch, target).is_err() {
         return;
     }
@@ -361,10 +511,12 @@ fn send_block_legacy(
         delay,
         true,
         scratch,
+        packets,
     );
     scratch.clear();
     push_header_legacy(scratch, PACKET_FORMAT_DATA_TRAILER, block_id, packet_id);
     scratch.extend_from_slice(&encode_image_trailer_body(frame.height));
+    packets.push((packet_id, scratch.clone()));
     let _ = socket.send_to(scratch, target);
 }
 
@@ -381,6 +533,7 @@ fn send_payloads(
     delay: Duration,
     legacy: bool,
     scratch: &mut Vec<u8>,
+    packets: &mut Vec<(u32, Vec<u8>)>,
 ) -> u32 {
     let mut packet_id = 1u32;
     let mut chunks = payload.chunks(chunk).peekable();
@@ -392,6 +545,7 @@ fn send_payloads(
             push_header(scratch, PACKET_FORMAT_DATA_PAYLOAD, block_id, packet_id);
         }
         scratch.extend_from_slice(data);
+        packets.push((packet_id, scratch.clone()));
         if socket.send_to(scratch, target).is_err() {
             return packet_id;
         }

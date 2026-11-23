@@ -44,6 +44,47 @@ pub const MAX_FRAME_RATE: u32 = 1_000_000;
 /// frame being generated gives at most 9 live buffers; 12 leaves margin.
 const FRAME_POOL_DEPTH: usize = 12;
 
+/// SFNC ReverseX/ReverseY: mirror the generated frame in place — pixel order
+/// inside each row for X, row order for Y.
+fn mirror_payload(
+    payload: &mut [u8],
+    w: u32,
+    h: u32,
+    bpp: usize,
+    reverse_x: bool,
+    reverse_y: bool,
+) {
+    if !reverse_x && !reverse_y {
+        return;
+    }
+    let width = w as usize;
+    let row_bytes = width * bpp;
+    if reverse_x {
+        let mut pixel = vec![0u8; bpp];
+        for row in payload.chunks_exact_mut(row_bytes) {
+            let (mut lo, mut hi) = (0usize, width.saturating_sub(1));
+            while lo < hi {
+                let (a, b) = (lo * bpp, hi * bpp);
+                pixel.copy_from_slice(&row[a..a + bpp]);
+                row.copy_within(b..b + bpp, a);
+                row[b..b + bpp].copy_from_slice(&pixel);
+                lo += 1;
+                hi -= 1;
+            }
+        }
+    }
+    if reverse_y {
+        let rows = h as usize;
+        let (mut top, mut bottom) = (0usize, rows);
+        while top + 1 < bottom {
+            bottom -= 1;
+            let (head, tail) = payload.split_at_mut(bottom * row_bytes);
+            head[top * row_bytes..(top + 1) * row_bytes].swap_with_slice(&mut tail[..row_bytes]);
+            top += 1;
+        }
+    }
+}
+
 fn frame_period(fps: u32) -> Duration {
     Duration::from_micros(1_000_000 / u64::from(fps.max(1)))
 }
@@ -84,6 +125,28 @@ pub const REG_TRIGGER_MODE: u32 = 0x0004_0010;
 pub const REG_DEVICE_UPTIME: u32 = 0x0004_1020;
 pub const REG_DEVICE_TEMPERATURE: u32 = 0x0004_1024;
 pub const REG_TL_PARAMS_LOCKED: u32 = 0x0004_1028;
+/// SFNC sensor limits: the virtual sensor is a fixed 4096x4096 area
+/// (`Width`/`Height` clamp to the same bound). RO constants exposed through
+/// the standard ImageFormatControl category (NI-IMAQdx references WidthMax /
+/// HeightMax / SensorWidth / SensorHeight by name).
+pub const SENSOR_MAX: u32 = 4096;
+pub const REG_WIDTH_MAX: u32 = 0x0004_102C;
+pub const REG_HEIGHT_MAX: u32 = 0x0004_1030;
+pub const REG_SENSOR_WIDTH: u32 = 0x0004_1034;
+pub const REG_SENSOR_HEIGHT: u32 = 0x0004_1038;
+/// SFNC DeviceReset command register: writing the command value restores the
+/// factory defaults (the same map `new()` seeds).
+pub const REG_DEVICE_RESET: u32 = 0x0004_103C;
+/// SFNC `TestPattern` (the synthetic image generator selects the pattern).
+pub const REG_TEST_PATTERN: u32 = 0x0004_1040;
+/// SFNC `ReverseX`/`ReverseY` (the generator mirrors the synthetic frame).
+pub const REG_REVERSE_X: u32 = 0x0004_1054;
+pub const REG_REVERSE_Y: u32 = 0x0004_1058;
+/// SFNC `UserSetControl` registers.
+pub const REG_USER_SET_SELECTOR: u32 = 0x0004_1044;
+pub const REG_USER_SET_DEFAULT: u32 = 0x0004_1048;
+pub const REG_USER_SET_SAVE: u32 = 0x0004_104C;
+pub const REG_USER_SET_LOAD: u32 = 0x0004_1050;
 
 /// Device timestamp counter unit advertised through the GigE bootstrap
 /// registers. The null frame source timestamps frames in microseconds, so
@@ -111,18 +174,79 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20     <Description>Provides the Root of the GenICam features tree.</Description>\n\
 \x20     <DisplayName>Root</DisplayName><Visibility>Beginner</Visibility>\n\
 \x20     <ImposedAccessMode>RO</ImposedAccessMode>\n\
-\x20     <pFeature>DeviceVendorName</pFeature><pFeature>DeviceModelName</pFeature>\n\
-\x20     <pFeature>DeviceVersion</pFeature><pFeature>DeviceFirmwareVersion</pFeature>\n\
-\x20     <pFeature>DeviceSerialNumber</pFeature><pFeature>DeviceUserID</pFeature>\n\
-\x20     <pFeature>Width</pFeature><pFeature>Height</pFeature>\n\
-\x20     <pFeature>OffsetX</pFeature><pFeature>OffsetY</pFeature>\n\
-\x20     <pFeature>PixelFormat</pFeature><pFeature>PayloadSize</pFeature>\n\
-\x20     <pFeature>ExposureTimeAbs</pFeature><pFeature>ExposureTime</pFeature><pFeature>Gain</pFeature>\n\
-\x20     <pFeature>FrameRate</pFeature><pFeature>AcquisitionFrameRate</pFeature>\n\
-\x20     <pFeature>AcquisitionStart</pFeature><pFeature>AcquisitionStop</pFeature>\n\
-\x20     <pFeature>AcquisitionMode</pFeature><pFeature>TriggerMode</pFeature>\n\
-\x20     <pFeature>DeviceUptime</pFeature><pFeature>DeviceTemperature</pFeature>\n\
-\x20     <pFeature>TLParamsLocked</pFeature><pFeature>SmartCamera</pFeature>\n\
+\x20     <pFeature>DeviceControl</pFeature>\n\
+\x20     <pFeature>ImageFormatControl</pFeature>\n\
+\x20     <pFeature>AcquisitionControl</pFeature>\n\
+\x20     <pFeature>AnalogControl</pFeature>\n\
+\x20     <pFeature>TransportLayerControl</pFeature>\n\
+\x20     <pFeature>SmartCamera</pFeature>\n\
+\x20     <pFeature>UserSetControl</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"DeviceControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Device information and status.</ToolTip>\n\
+\x20     <Description>Device information and status.</Description>\n\
+\x20     <DisplayName>Device Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>DeviceVendorName</pFeature>\n\
+\x20     <pFeature>DeviceModelName</pFeature>\n\
+\x20     <pFeature>DeviceVersion</pFeature>\n\
+\x20     <pFeature>DeviceFirmwareVersion</pFeature>\n\
+\x20     <pFeature>DeviceSerialNumber</pFeature>\n\
+\x20     <pFeature>DeviceUserID</pFeature>\n\
+\x20     <pFeature>DeviceUptime</pFeature>\n\
+\x20     <pFeature>DeviceTemperature</pFeature>\n\
+\x20     <pFeature>DeviceReset</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"ImageFormatControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Image size and pixel format.</ToolTip>\n\
+\x20     <Description>Image size and pixel format.</Description>\n\
+\x20     <DisplayName>Image Format Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>Width</pFeature>\n\
+\x20     <pFeature>Height</pFeature>\n\
+\x20     <pFeature>OffsetX</pFeature>\n\
+\x20     <pFeature>OffsetY</pFeature>\n\
+\x20     <pFeature>PixelFormat</pFeature>\n\
+\x20     <pFeature>WidthMax</pFeature>\n\
+\x20     <pFeature>HeightMax</pFeature>\n\
+\x20     <pFeature>SensorWidth</pFeature>\n\
+\x20     <pFeature>SensorHeight</pFeature>\n\
+\x20     <pFeature>TestPattern</pFeature>\n\
+\x20     <pFeature>ReverseX</pFeature>\n\
+\x20     <pFeature>ReverseY</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"AcquisitionControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Acquisition start/stop, exposure and frame rate.</ToolTip>\n\
+\x20     <Description>Acquisition start/stop, exposure and frame rate.</Description>\n\
+\x20     <DisplayName>Acquisition Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>AcquisitionMode</pFeature>\n\
+\x20     <pFeature>AcquisitionStart</pFeature>\n\
+\x20     <pFeature>AcquisitionStop</pFeature>\n\
+\x20     <pFeature>ExposureTime</pFeature>\n\
+\x20     <pFeature>ExposureTimeAbs</pFeature>\n\
+\x20     <pFeature>AcquisitionFrameRate</pFeature>\n\
+\x20     <pFeature>FrameRate</pFeature>\n\
+\x20     <pFeature>TriggerMode</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"AnalogControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Analog gain.</ToolTip>\n\
+\x20     <Description>Analog gain.</Description>\n\
+\x20     <DisplayName>Analog Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>Gain</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"TransportLayerControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Transport layer features (GigE Vision U3V front adds the GevSCP* nodes).</ToolTip>\n\
+\x20     <Description>Transport layer features.</Description>\n\
+\x20     <DisplayName>Transport Layer Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>TLParamsLocked</pFeature>\n\
+\x20     <pFeature>PayloadSize</pFeature>\n\
+\x20   </Category>\n\
+\x20   <Category Name=\"UserSetControl\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Save and load the complete feature set (SFNC UserSetControl).</ToolTip>\n\
+\x20     <Description>Save and load the complete feature set.</Description>\n\
+\x20     <DisplayName>User Set Control</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pFeature>UserSetSelector</pFeature>\n\
+\x20     <pFeature>UserSetDefault</pFeature>\n\
+\x20     <pFeature>UserSetSave</pFeature>\n\
+\x20     <pFeature>UserSetLoad</pFeature>\n\
 \x20   </Category>\n\
 \x20 </Group>\n\
 \x20 <String Name=\"DeviceVendorName\" NameSpace=\"Standard\"><Value>GenTLite</Value></String>\n\
@@ -162,6 +286,46 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20   </Integer>\n\
 \x20   <IntReg Name=\"OffsetY_Reg\" NameSpace=\"Custom\">\n\
 \x20     <Address>0x00041010</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"WidthMax\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Maximum width of the sensor in pixels.</ToolTip>\n\
+\x20     <Description>Maximum width of the sensor in pixels.</Description>\n\
+\x20     <DisplayName>Width Max</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>WidthMax_Reg</pValue><Min>1</Min><Max>4096</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"WidthMax_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004102C</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"HeightMax\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Maximum height of the sensor in pixels.</ToolTip>\n\
+\x20     <Description>Maximum height of the sensor in pixels.</Description>\n\
+\x20     <DisplayName>Height Max</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>HeightMax_Reg</pValue><Min>1</Min><Max>4096</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"HeightMax_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041030</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"SensorWidth\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Physical sensor width in pixels.</ToolTip>\n\
+\x20     <Description>Physical sensor width in pixels.</Description>\n\
+\x20     <DisplayName>Sensor Width</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>SensorWidth_Reg</pValue><Min>1</Min><Max>4096</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"SensorWidth_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041034</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Integer Name=\"SensorHeight\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Physical sensor height in pixels.</ToolTip>\n\
+\x20     <Description>Physical sensor height in pixels.</Description>\n\
+\x20     <DisplayName>Sensor Height</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>SensorHeight_Reg</pValue><Min>1</Min><Max>4096</Max>\n\
+\x20   </Integer>\n\
+\x20   <IntReg Name=\"SensorHeight_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041038</Address><Length>4</Length><AccessMode>RO</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
 \x20   <Enumeration Name=\"PixelFormat\" NameSpace=\"Standard\">\n\
@@ -280,33 +444,147 @@ VersionGuid=\"7c3f5e0a-4d9b-6a2c-9e6f-3a4b5c6d7e8f\">\n\
 \x20     <Address>0x00041028</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
 \x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
 \x20   </IntReg>\n\
+\x20   <Command Name=\"DeviceReset\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Resets the device to factory defaults (SFNC DeviceReset).</ToolTip>\n\
+\x20     <Description>Resets the device to factory defaults.</Description>\n\
+\x20     <DisplayName>Device Reset</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>DeviceReset_Reg</pValue><CommandValue>1</CommandValue>\n\
+\x20   </Command>\n\
+\x20   <IntReg Name=\"DeviceReset_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004103C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20 </Group>\n\
+\x20 <Group Comment=\"TestPatternAndUserSets\">\n\
+\x20   <Enumeration Name=\"TestPattern\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Selects a synthetic test image; the generator switches the pixel pattern.</ToolTip>\n\
+\x20     <DisplayName>Test Pattern</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <EnumEntry Name=\"Off\" NameSpace=\"Standard\"><DisplayName>Off</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"GreyHorizontalRamp\" NameSpace=\"Standard\"><DisplayName>Grey Horizontal Ramp</DisplayName><Value>1</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"GreyVerticalRamp\" NameSpace=\"Standard\"><DisplayName>Grey Vertical Ramp</DisplayName><Value>2</Value></EnumEntry>\n\
+\x20     <pValue>TestPattern_Reg</pValue>\n\
+\x20   </Enumeration>\n\
+\x20   <IntReg Name=\"TestPattern_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041040</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Boolean Name=\"ReverseX\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Mirror the image horizontally; the synthetic generator flips the frame.</ToolTip>\n\
+\x20     <Description>Mirror the image horizontally.</Description>\n\
+\x20     <DisplayName>Reverse X</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>ReverseX_Reg</pValue>\n\
+\x20   </Boolean>\n\
+\x20   <IntReg Name=\"ReverseX_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041054</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Boolean Name=\"ReverseY\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Mirror the image vertically; the synthetic generator flips the frame.</ToolTip>\n\
+\x20     <Description>Mirror the image vertically.</Description>\n\
+\x20     <DisplayName>Reverse Y</DisplayName><Visibility>Beginner</Visibility>\n\
+\x20     <pValue>ReverseY_Reg</pValue>\n\
+\x20   </Boolean>\n\
+\x20   <IntReg Name=\"ReverseY_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041058</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Enumeration Name=\"UserSetSelector\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Selects the user set to load or save.</ToolTip>\n\
+\x20     <DisplayName>User Set Selector</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <EnumEntry Name=\"Default\" NameSpace=\"Standard\"><DisplayName>Default</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"UserSet1\" NameSpace=\"Standard\"><DisplayName>User Set 1</DisplayName><Value>1</Value></EnumEntry>\n\
+\x20     <pValue>UserSetSelector_Reg</pValue>\n\
+\x20   </Enumeration>\n\
+\x20   <IntReg Name=\"UserSetSelector_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041044</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Enumeration Name=\"UserSetDefault\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Selects the user set restored at power-on and by DeviceReset.</ToolTip>\n\
+\x20     <DisplayName>User Set Default</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <EnumEntry Name=\"Default\" NameSpace=\"Standard\"><DisplayName>Default</DisplayName><Value>0</Value></EnumEntry>\n\
+\x20     <EnumEntry Name=\"UserSet1\" NameSpace=\"Standard\"><DisplayName>User Set 1</DisplayName><Value>1</Value></EnumEntry>\n\
+\x20     <pValue>UserSetDefault_Reg</pValue>\n\
+\x20   </Enumeration>\n\
+\x20   <IntReg Name=\"UserSetDefault_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041048</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Command Name=\"UserSetSave\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Saves the current feature set into the selected user set.</ToolTip>\n\
+\x20     <DisplayName>User Set Save</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>UserSetSave_Reg</pValue><CommandValue>1</CommandValue>\n\
+\x20   </Command>\n\
+\x20   <IntReg Name=\"UserSetSave_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x0004104C</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
+\x20   <Command Name=\"UserSetLoad\" NameSpace=\"Standard\">\n\
+\x20     <ToolTip>Loads the selected user set into the active feature set.</ToolTip>\n\
+\x20     <DisplayName>User Set Load</DisplayName><Visibility>Expert</Visibility>\n\
+\x20     <pValue>UserSetLoad_Reg</pValue><CommandValue>1</CommandValue>\n\
+\x20   </Command>\n\
+\x20   <IntReg Name=\"UserSetLoad_Reg\" NameSpace=\"Custom\">\n\
+\x20     <Address>0x00041050</Address><Length>4</Length><AccessMode>RW</AccessMode>\n\
+\x20     <pPort>Device</pPort><Sign>Unsigned</Sign><Endianess>LittleEndian</Endianess>\n\
+\x20   </IntReg>\n\
 \x20 </Group>\n\
 </RegisterDescription>\n";
 
 /// The synthetic camera: a writable register view plus a pattern stream.
 pub struct NullBack {
     regs: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
+    /// Saved feature set for SFNC `UserSet1` (UserSetSave/UserSetLoad have
+    /// real semantics: the whole feature map is snapshotted and restored).
+    saved: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
     /// Device clock for `DeviceUptime` and the bootstrap timestamp counter.
     epoch: Instant,
 }
 
 impl NullBack {
+    /// Factory-default register map, shared by `new()` and the SFNC
+    /// `DeviceReset` command.
+    fn default_regs() -> std::collections::HashMap<u32, u32> {
+        std::collections::HashMap::from([
+            (REG_WIDTH, WIDTH),
+            (REG_HEIGHT, HEIGHT),
+            (REG_PIXEL_FORMAT, PFNC_MONO16),
+            (REG_OFFSET_X, 0),
+            (REG_OFFSET_Y, 0),
+            (REG_EXPOSURE_US, EXPOSURE_US),
+            (REG_GAIN, GAIN),
+            (REG_FRAME_RATE, FRAME_RATE),
+            (REG_ACQUISITION_MODE, 2), // SFNC Continuous
+            (REG_TRIGGER_MODE, 0),     // Off; the synthetic source is free-running
+            (REG_DEVICE_TEMPERATURE, 25.0f32.to_bits()),
+            (REG_TL_PARAMS_LOCKED, 0),
+            // Static virtual-sensor geometry (SFNC ImageFormatControl).
+            (REG_WIDTH_MAX, SENSOR_MAX),
+            (REG_HEIGHT_MAX, SENSOR_MAX),
+            (REG_SENSOR_WIDTH, SENSOR_MAX),
+            (REG_SENSOR_HEIGHT, SENSOR_MAX),
+            // SFNC TestPattern: Off (the deterministic synthetic pattern) or
+            // a grey ramp generated by the frame source.
+            (REG_TEST_PATTERN, 0),
+            // SFNC UserSetControl: selector/default plus the command
+            // registers (they read 0 outside a command).
+            (REG_USER_SET_SELECTOR, 0),
+            (REG_USER_SET_DEFAULT, 0),
+            (REG_USER_SET_SAVE, 0),
+            (REG_USER_SET_LOAD, 0),
+            // SFNC ReverseX/ReverseY: the frame generator mirrors the frame.
+            (REG_REVERSE_X, 0),
+            (REG_REVERSE_Y, 0),
+        ])
+    }
+
     pub fn new() -> Self {
+        let defaults = Self::default_regs();
         Self {
-            regs: Arc::new(Mutex::new(std::collections::HashMap::from([
-                (REG_WIDTH, WIDTH),
-                (REG_HEIGHT, HEIGHT),
-                (REG_PIXEL_FORMAT, PFNC_MONO16),
-                (REG_OFFSET_X, 0),
-                (REG_OFFSET_Y, 0),
-                (REG_EXPOSURE_US, EXPOSURE_US),
-                (REG_GAIN, GAIN),
-                (REG_FRAME_RATE, FRAME_RATE),
-                (REG_ACQUISITION_MODE, 2), // SFNC Continuous
-                (REG_TRIGGER_MODE, 0),     // Off; the synthetic source is free-running
-                (REG_DEVICE_TEMPERATURE, 25.0f32.to_bits()),
-                (REG_TL_PARAMS_LOCKED, 0),
-            ]))),
+            regs: Arc::new(Mutex::new(defaults.clone())),
+            // A factory-fresh camera has a valid user set: saving without a
+            // prior UserSetSave would otherwise have nothing to restore.
+            saved: Arc::new(Mutex::new(defaults)),
             epoch: Instant::now(),
         }
     }
@@ -383,6 +661,46 @@ impl CameraBack for NullBack {
             }
             REG_TL_PARAMS_LOCKED => {
                 regs.insert(addr, u32::from(value != 0));
+            }
+            REG_TEST_PATTERN => {
+                // SFNC TestPattern enumeration: Off / GreyHorizontalRamp /
+                // GreyVerticalRamp. The frame source reads this and switches
+                // the generated pixels, so the feature has real semantics.
+                if value <= 2 {
+                    regs.insert(addr, value);
+                }
+            }
+            REG_USER_SET_SELECTOR | REG_USER_SET_DEFAULT | REG_REVERSE_X | REG_REVERSE_Y => {
+                if value <= 1 {
+                    regs.insert(addr, value);
+                }
+            }
+            REG_USER_SET_SAVE => {
+                // SFNC UserSetSave: snapshot the active feature set into the
+                // selected user set (1 = UserSet1; Default is read-only).
+                let selector = regs.get(&REG_USER_SET_SELECTOR).copied().unwrap_or(0);
+                if value != 0 && selector == 1 {
+                    *self.saved.lock().expect("null saved lock") = regs.clone();
+                }
+                regs.insert(addr, 0);
+            }
+            REG_USER_SET_LOAD => {
+                // SFNC UserSetLoad: restore the selected user set.
+                let selector = regs.get(&REG_USER_SET_SELECTOR).copied().unwrap_or(0);
+                if value != 0 && selector == 1 {
+                    let saved = self.saved.lock().expect("null saved lock").clone();
+                    *regs = saved;
+                }
+                regs.insert(addr, 0);
+            }
+            REG_DEVICE_RESET => {
+                // SFNC DeviceReset: the command value restores factory
+                // defaults (a virtual reset — the process keeps running).
+                if value != 0 {
+                    let defaults = Self::default_regs();
+                    *regs = defaults.clone();
+                    *self.saved.lock().expect("null saved lock") = defaults;
+                }
             }
             _ => {}
         }
@@ -511,7 +829,7 @@ impl FrameSource for NullFrameSource {
             }
             return None;
         }
-        let (w, h, ox, oy, fps, pixel_format) = {
+        let (w, h, ox, oy, fps, pixel_format, test_pattern, reverse_x, reverse_y) = {
             let regs = self.regs.lock().expect("null regs lock");
             (
                 regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH),
@@ -522,6 +840,9 @@ impl FrameSource for NullFrameSource {
                 regs.get(&REG_PIXEL_FORMAT)
                     .copied()
                     .unwrap_or(PFNC_MONO16),
+                regs.get(&REG_TEST_PATTERN).copied().unwrap_or(0),
+                regs.get(&REG_REVERSE_X).copied().unwrap_or(0) != 0,
+                regs.get(&REG_REVERSE_Y).copied().unwrap_or(0) != 0,
             )
         };
         let block = self.next_block;
@@ -537,6 +858,43 @@ impl FrameSource for NullFrameSource {
         } else {
             BYTES_PER_PIXEL
         };
+        // SFNC TestPattern: a real generator switch. The ramps replace the
+        // synthetic pattern (and its block marker) for every row.
+        if test_pattern != 0 {
+            let mut payload = self.pool.try_recv().unwrap_or_default();
+            payload.clear();
+            payload.reserve((w * h) as usize * bpp);
+            let horizontal = test_pattern == 1;
+            let denom = if horizontal {
+                u64::from(w.saturating_sub(1).max(1))
+            } else {
+                u64::from(h.saturating_sub(1).max(1))
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    let position = if horizontal { u64::from(x) } else { u64::from(y) };
+                    let value = ((position * 65_535) / denom) as u16;
+                    if bpp == 1 {
+                        payload.push((value >> 8) as u8);
+                    } else {
+                        payload.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+            mirror_payload(&mut payload, w, h, bpp, reverse_x, reverse_y);
+            return Some(CanonicalFrame {
+                timestamp: self.epoch.elapsed().as_micros() as u64,
+                pixel_format,
+                width: w,
+                height: h,
+                offset_x: ox,
+                offset_y: oy,
+                padding_x: 0,
+                padding_y: 0,
+                chunk: None,
+                payload: FramePayload::with_recycle(payload, self.recycler.clone()),
+            });
+        }
         let row_y = if h >= 32 { 32 } else { 0 };
         let mut base_row = Vec::with_capacity(w as usize);
         base_row.extend((0..w).map(|x| pattern_value(x, row_y, w, h, block)));
@@ -585,6 +943,7 @@ impl FrameSource for NullFrameSource {
             }
             payload.extend_from_slice(&row_bytes);
         }
+        mirror_payload(&mut payload, w, h, bpp, reverse_x, reverse_y);
         Some(CanonicalFrame {
             timestamp: self.epoch.elapsed().as_micros() as u64,
             pixel_format,
@@ -594,6 +953,7 @@ impl FrameSource for NullFrameSource {
             offset_y: oy,
             padding_x: 0,
             padding_y: 0,
+            chunk: None,
             payload: FramePayload::with_recycle(payload, self.recycler.clone()),
         })
     }
@@ -665,6 +1025,35 @@ mod tests {
         let text = String::from_utf8(xml).unwrap();
         assert!(text.contains("</RegisterDescription>"));
         assert!(text.contains("ModelName=\"GenTLiteVirtual\""));
+        // SFNC standard category tree: GenApi hosts (NI MAX, pylon, MVS)
+        // group the attribute tree by Category and derive persisted
+        // attribute paths from it (CameraAttributes::ImageFormatControl::
+        // Width). A flat Root feature list shows an ungrouped grid instead.
+        for category in [
+            "Root",
+            "DeviceControl",
+            "ImageFormatControl",
+            "AcquisitionControl",
+            "AnalogControl",
+            "TransportLayerControl",
+        ] {
+            assert!(
+                text.contains(&format!("<Category Name=\"{category}\"")),
+                "missing category {category}"
+            );
+        }
+        for feature in [
+            "DeviceControl",
+            "ImageFormatControl",
+            "AcquisitionControl",
+            "AnalogControl",
+            "TransportLayerControl",
+        ] {
+            assert!(
+                text.contains(&format!("<pFeature>{feature}</pFeature>")),
+                "Root does not reference {feature}"
+            );
+        }
         assert!(
             text.contains("<Max>1000000</Max>"),
             "XML must advertise the same high FrameRate bound"
@@ -678,6 +1067,49 @@ mod tests {
         }
         assert!(text.contains("<EnumEntry Name=\"Mono8\""));
         assert!(text.contains("<EnumEntry Name=\"Mono16\""));
+        // SFNC sensor constants and the DeviceReset command (NI-IMAQdx's
+        // fixed attribute table references these by name).
+        for node in [
+            "WidthMax",
+            "HeightMax",
+            "SensorWidth",
+            "SensorHeight",
+            "DeviceReset",
+        ] {
+            assert!(
+                text.contains(&format!("Name=\"{node}\"")),
+                "missing SFNC node {node}"
+            );
+        }
+        for feature in ["WidthMax", "HeightMax", "SensorWidth", "SensorHeight"] {
+            assert!(
+                text.contains(&format!("<pFeature>{feature}</pFeature>")),
+                "{feature} not attached to a category"
+            );
+        }
+        assert!(text.contains("<pFeature>DeviceReset</pFeature>"));
+    }
+
+    #[test]
+    fn sensor_constants_and_device_reset() {
+        let mut back = NullBack::new();
+        assert_eq!(back.read_reg(REG_WIDTH_MAX).unwrap(), SENSOR_MAX);
+        assert_eq!(back.read_reg(REG_HEIGHT_MAX).unwrap(), SENSOR_MAX);
+        assert_eq!(back.read_reg(REG_SENSOR_WIDTH).unwrap(), SENSOR_MAX);
+        assert_eq!(back.read_reg(REG_SENSOR_HEIGHT).unwrap(), SENSOR_MAX);
+
+        // DeviceReset restores factory defaults after a change.
+        back.write_reg(REG_WIDTH, 640).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640);
+        back.write_reg(REG_DEVICE_RESET, 1).unwrap();
+        assert_eq!(
+            back.read_reg(REG_WIDTH).unwrap(),
+            WIDTH,
+            "DeviceReset restores the factory width"
+        );
+        // The command register must not retain a stale 1 that a later read
+        // would interpret as an active reset request.
+        assert_eq!(back.read_reg(REG_DEVICE_RESET).unwrap(), 0);
     }
 
     #[test]
@@ -860,5 +1292,124 @@ mod tests {
         back.close_stream().unwrap();
         assert_eq!(back.read_reg(REG_ACQUISITION_START).unwrap(), 0);
         assert!(back.open_stream().is_ok());
+    }
+
+    /// SFNC TestPattern has real semantics: the frame generator switches
+    /// from the synthetic pattern to a grey ramp (both directions).
+    #[test]
+    fn test_pattern_switches_the_generated_pixels() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_PIXEL_FORMAT, PFNC_MONO8).unwrap();
+        back.write_reg(REG_WIDTH, 4).unwrap();
+        back.write_reg(REG_HEIGHT, 2).unwrap();
+        back.write_reg(REG_FRAME_RATE, 1000).unwrap();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
+        let mut src = NullFrameSource::new(back.regs.clone(), back.epoch);
+
+        // Horizontal ramp: row-independent 0,80,170,255 (65535/3 >> 8).
+        back.write_reg(REG_TEST_PATTERN, 1).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).expect("ramp frame");
+        assert_eq!((frame.width, frame.height), (4, 2));
+        assert_eq!(frame.payload.len(), 8);
+        for row in 0..2 {
+            assert_eq!(
+                &frame.payload[row * 4..row * 4 + 4],
+                &[0, 85, 170, 255],
+                "horizontal ramp row {row}"
+            );
+        }
+        // Vertical ramp: two flat rows.
+        back.write_reg(REG_TEST_PATTERN, 2).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).expect("ramp frame");
+        assert_eq!(&frame.payload[..4], &[0, 0, 0, 0]);
+        assert_eq!(&frame.payload[4..], &[255, 255, 255, 255]);
+        // Off restores the block-dependent synthetic pattern.
+        back.write_reg(REG_TEST_PATTERN, 0).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).expect("pattern frame");
+        assert_ne!(&frame.payload[..4], &[0, 0, 0, 0]);
+    }
+
+    /// SFNC ReverseX/ReverseY really mirror the generated frame.
+    #[test]
+    fn reverse_x_and_y_mirror_the_generated_frame() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_PIXEL_FORMAT, PFNC_MONO8).unwrap();
+        back.write_reg(REG_WIDTH, 4).unwrap();
+        back.write_reg(REG_HEIGHT, 2).unwrap();
+        back.write_reg(REG_FRAME_RATE, 1000).unwrap();
+        back.write_reg(REG_ACQUISITION_START, 1).unwrap();
+        // Horizontal ramp makes the mirroring observable per row.
+        back.write_reg(REG_TEST_PATTERN, 1).unwrap();
+        let mut src = NullFrameSource::new(back.regs.clone(), back.epoch);
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(&frame.payload[..4], &[0, 85, 170, 255]);
+        back.write_reg(REG_REVERSE_X, 1).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(&frame.payload[..4], &[255, 170, 85, 0]);
+        assert_eq!(&frame.payload[4..], &[255, 170, 85, 0], "both rows mirrored");
+        // Vertical ramp exposes ReverseY: the ramp runs top-down, so the
+        // bottom row carries the high value.
+        back.write_reg(REG_TEST_PATTERN, 2).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(&frame.payload[..4], &[0, 0, 0, 0], "top row = ramp start");
+        assert_eq!(&frame.payload[4..], &[255, 255, 255, 255], "bottom row = ramp end");
+        back.write_reg(REG_REVERSE_Y, 1).unwrap();
+        let frame = src.next_frame(Duration::from_secs(2)).unwrap();
+        assert_eq!(&frame.payload[..4], &[255, 255, 255, 255], "ReverseY flips the rows");
+        assert_eq!(&frame.payload[4..], &[0, 0, 0, 0]);
+    }
+
+    /// SFNC UserSetControl has real semantics: save snapshots the feature
+    /// set, load restores it, and DeviceReset clears it back to factory.
+    #[test]
+    fn user_set_save_and_load_restore_the_feature_set() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_WIDTH, 640).unwrap();
+        back.write_reg(REG_HEIGHT, 480).unwrap();
+        back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
+        back.write_reg(REG_USER_SET_SAVE, 1).unwrap();
+        assert_eq!(back.read_reg(REG_USER_SET_SAVE).unwrap(), 0, "command self-clears");
+
+        back.write_reg(REG_WIDTH, 320).unwrap();
+        back.write_reg(REG_HEIGHT, 240).unwrap();
+        back.write_reg(REG_USER_SET_LOAD, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640);
+        assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), 480);
+
+        // DeviceReset restores factory defaults and clears the saved set.
+        back.write_reg(REG_DEVICE_RESET, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
+        back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
+        back.write_reg(REG_USER_SET_LOAD, 1).unwrap();
+        assert_eq!(
+            back.read_reg(REG_WIDTH).unwrap(),
+            WIDTH,
+            "a reset user set loads factory defaults"
+        );
+    }
+
+    /// The XML exposes the SFNC features the register model implements, in
+    /// their standard categories (the gateway injects this XML into the
+    /// virtual device, so GenApi hosts see them).
+    #[test]
+    fn xml_exposes_test_pattern_and_user_sets() {
+        let mut back = NullBack::new();
+        let xml = String::from_utf8(back.fetch_xml().unwrap()).unwrap();
+        for needle in [
+            "<Enumeration Name=\"TestPattern\"",
+            "<Boolean Name=\"ReverseX\"",
+            "<Boolean Name=\"ReverseY\"",
+            "<Enumeration Name=\"UserSetSelector\"",
+            "<Enumeration Name=\"UserSetDefault\"",
+            "<Command Name=\"UserSetSave\"",
+            "<Command Name=\"UserSetLoad\"",
+            "<Category Name=\"UserSetControl\"",
+            "<pFeature>TestPattern</pFeature>",
+            "<pFeature>ReverseX</pFeature>",
+            "<pFeature>ReverseY</pFeature>",
+            "<pFeature>UserSetControl</pFeature>",
+        ] {
+            assert!(xml.contains(needle), "missing {needle}");
+        }
     }
 }
