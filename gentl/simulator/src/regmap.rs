@@ -92,8 +92,7 @@ const DEVICE_MODE_VALUE: u32 = 0x8000_0001;
 // Net If Configuration writable bits (spec §36.6): all three configuration
 // flags (persistent / DHCP / LLA) are writable; the sim stores them, but
 // the DHCP bit has no behavioral effect (the sim runs no DHCP client).
-const NET_IF_CFG_WRITABLE: u32 =
-    reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA;
+const NET_IF_CFG_WRITABLE: u32 = reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP;
 
 // GVCP Capability (1.2 §27.28, MSB-first print): user-defined-name and
 // serial-number registers are implemented, and PACKETRESEND (§16.7) is
@@ -730,8 +729,10 @@ impl DeviceHandler for SimRegMap {
                 return Err(GEV_STATUS_WRITE_PROTECT);
             }
             if addr == reg::NET_IF_CONFIGURATION {
-                i.boot[addr as usize..addr as usize + 4]
-                    .copy_from_slice(&(value & NET_IF_CFG_WRITABLE).to_be_bytes());
+                // [R-029cd]: LLA is always activated and cannot be disabled.
+                i.boot[addr as usize..addr as usize + 4].copy_from_slice(
+                    &((value & NET_IF_CFG_WRITABLE) | reg::IP_CFG_LLA).to_be_bytes(),
+                );
             } else {
                 i.boot[addr as usize..addr as usize + 4].copy_from_slice(&value.to_be_bytes());
             }
@@ -1708,6 +1709,30 @@ mod tests {
             m.write_mem(XML_BASE, &[0u8; 4]),
             Err(GEV_STATUS_WRITE_PROTECT),
             "the XML blob is read-only"
+        );
+    }
+
+    /// [R-029cd]: LLA MUST always stay activated; writing 0 must not clear
+    /// the configuration bit.
+    #[test]
+    fn lla_cannot_be_disabled() {
+        let m = test_map();
+        m.write_reg(reg::NET_IF_CONFIGURATION, 0).unwrap();
+        let cfg = m.read_reg(reg::NET_IF_CONFIGURATION).unwrap();
+        assert_eq!(cfg & reg::IP_CFG_LLA, reg::IP_CFG_LLA, "LLA always 1");
+        assert_eq!(
+            cfg & (reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP),
+            0,
+            "persistent/DHCP are user configurable"
+        );
+        m.write_reg(
+            reg::NET_IF_CONFIGURATION,
+            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA,
+        )
+        .unwrap();
+        assert_eq!(
+            m.read_reg(reg::NET_IF_CONFIGURATION).unwrap(),
+            reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA
         );
     }
 }
