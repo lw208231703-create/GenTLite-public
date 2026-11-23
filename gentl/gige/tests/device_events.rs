@@ -175,7 +175,10 @@ fn gige_device_events_flow_over_the_message_channel() {
         EventGetDataInfo(ev, raw.as_ptr().cast(), n, EVENT_DATA_ID, &mut dtype, s as *mut c_void, size)
     });
     assert_eq!(r, GC_ERR_SUCCESS);
-    assert_eq!(id_text, "7", "EVENT_DATA_ID as decimal text");
+    assert_eq!(
+        id_text, "07",
+        "EVENT_DATA_ID: hex with an even number of digits (GenTL 1.6 搂6.4.6.1)"
+    );
 
     // -- EVENTDATA_CMD with a payload --------------------------------------
     write_reg(port, REG_TEST_EVENT_ID, 9);
@@ -192,7 +195,7 @@ fn gige_device_events_flow_over_the_message_channel() {
     let event = GvcpEvent::decode(&raw[..n]).expect("event decodes");
     assert_eq!(event.event_id, 9);
     assert_eq!(event.data, vec![0xE0, 0xE1, 0xE2, 0xE3]);
-    let mut payload = [0u8; 8];
+    let mut payload = [0u8; 64];
     let mut payload_len = payload.len();
     let mut dtype: InfoDataType = 0;
     assert_eq!(
@@ -208,7 +211,20 @@ fn gige_device_events_flow_over_the_message_channel() {
         GC_ERR_SUCCESS
     );
     assert_eq!(dtype, 13, "INFO_DATATYPE_BUFFER");
-    assert_eq!(&payload[..payload_len], &[0xE0, 0xE1, 0xE2, 0xE3]);
+    // The value buffer is the remote event port from offset 0: the 24-byte
+    // standardized header plus the payload (GigE EVENTDATA without GVCP).
+    assert_eq!(payload_len, 28, "24-byte header + 4 data bytes");
+    assert_eq!(&payload[..payload_len], &raw[..n]);
+
+    // -- Flush / Kill work on a device-event handle (搂6.3.7.4/6.3.7.5) ----
+    assert_eq!(EventFlush(ev), GC_ERR_SUCCESS);
+    assert_eq!(EventKill(ev), GC_ERR_SUCCESS);
+    let mut n = raw.len();
+    assert_eq!(
+        EventGetData(ev, raw.as_mut_ptr().cast(), &mut n, 100),
+        GC_ERR_ABORT,
+        "EventKill terminates the next wait with GC_ERR_ABORT"
+    );
 
     // -- Unregister closes the channel -------------------------------------
     assert_eq!(GCUnregisterEvent(dev, EVENT_REMOTE_DEVICE), GC_ERR_SUCCESS);

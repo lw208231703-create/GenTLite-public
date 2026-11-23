@@ -263,6 +263,27 @@ fn extended_chunk_frames_expose_the_genTL_chunk_layout() {
         CHUNK_DATA_LEN as u32
     );
 
+    // -- Too-small array: GC_ERR_BUFFER_TOO_SMALL (搂6.3.5.13 Returns) -----
+    let mut capacity = 0usize;
+    let mut one = [SingleChunkData {
+        chunk_id: 0,
+        chunk_offset: 0,
+        chunk_length: 0,
+    }];
+    assert_eq!(
+        DSGetBufferChunkData(ds, buffer_handle, one.as_mut_ptr(), &mut capacity),
+        GC_ERR_BUFFER_TOO_SMALL
+    );
+    assert_eq!(capacity, 1, "required number of entries is reported");
+
+    // -- Malformed chunk tags: GC_ERR_PARSING_CHUNK_DATA -------------------
+    buffers[idx][tag_at + 4..tag_at + 8].copy_from_slice(&[0xFF; 4]);
+    let mut capacity = 1usize;
+    assert_eq!(
+        DSGetBufferChunkData(ds, buffer_handle, one.as_mut_ptr(), &mut capacity),
+        GC_ERR_PARSING_CHUNK_DATA
+    );
+
     assert_eq!(DSQueueBuffer(ds, buffer_handle), GC_ERR_SUCCESS);
     assert_eq!(DSStopAcquisition(ds, 0), GC_ERR_SUCCESS);
     assert_eq!(DSClose(ds), GC_ERR_SUCCESS);
