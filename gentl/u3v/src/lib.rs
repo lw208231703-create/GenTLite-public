@@ -1974,7 +1974,9 @@ pub extern "C" fn DSGetBufferChunkData(
             gentl_core::chunk::parse_chunks(block, false)
         };
         let Ok(chunks) = chunks else {
-            return fail(GentlError::Io("malformed chunk tags".into()));
+            // 搂6.3.5.13 Returns: an unparseable chunk buffer maps to
+            // GC_ERR_PARSING_CHUNK_DATA.
+            return fail(GentlError::ParsingChunkData("malformed U3V chunk tags"));
         };
         if p_chunk_data.is_null() {
             // Size query: report the minimal array length.
@@ -1982,8 +1984,12 @@ pub extern "C" fn DSGetBufferChunkData(
             return GC_ERR_SUCCESS;
         }
         let capacity = unsafe { *pi_num_chunks };
-        let written = chunks.len().min(capacity);
-        for (i, c) in chunks.iter().take(written).enumerate() {
+        if capacity < chunks.len() {
+            // 搂6.3.5.13 Returns: too few entries is GC_ERR_BUFFER_TOO_SMALL.
+            unsafe { *pi_num_chunks = chunks.len() };
+            return GC_ERR_BUFFER_TOO_SMALL;
+        }
+        for (i, c) in chunks.iter().enumerate() {
             unsafe {
                 let entry = &mut *p_chunk_data.add(i);
                 entry.chunk_id = c.id;
@@ -1991,7 +1997,7 @@ pub extern "C" fn DSGetBufferChunkData(
                 entry.chunk_length = c.len;
             }
         }
-        unsafe { *pi_num_chunks = written };
+        unsafe { *pi_num_chunks = chunks.len() };
         GC_ERR_SUCCESS
     })
 }
@@ -2583,11 +2589,29 @@ pub extern "C" fn EventGetDataInfo(
             None => return fail(GentlError::InvalidParameter("event data")),
         };
         match i_info_cmd {
-            0 | 2 => {
+            // EVENT_DATA_ID: GenTL 1.6 搂6.4.6.1 requires the event id as a
+            // hexadecimal STRING with an even number of digits (no `0x`).
+            0 => {
+                let id = gentl_core::event_id_hex(event.event_id);
+                unsafe { info_string(pi_type, p_out_buffer, pi_out_size, &id) }
+            }
+            // EVENT_DATA_NUMID: numeric representation, UINT64.
+            2 => {
                 let v = u64::from(event.event_id);
                 unsafe { info_value(pi_type, INFO_DATATYPE_UINT64, p_out_buffer, pi_out_size, &v) }
             }
-            1 => unsafe { info_bytes(pi_type, INFO_DATATYPE_BUFFER, p_out_buffer, pi_out_size, bytes) },
+            // EVENT_DATA_VALUE: the remote event port mapping. U3V 1.2
+            // 搂4.1.3.3.2: the mapping starts immediately after the CCD, so
+            // the prefix (4 bytes) and CCD (8 bytes) are not part of it.
+            1 => {
+                if i_in_size < packets::CMD_OVERHEAD {
+                    return fail(GentlError::InvalidParameter("event data"));
+                }
+                let scd = &bytes[packets::CMD_OVERHEAD..];
+                unsafe {
+                    info_bytes(pi_type, INFO_DATATYPE_BUFFER, p_out_buffer, pi_out_size, scd)
+                }
+            }
             _ => not_implemented("EventGetDataInfo cmd"),
         }
     })

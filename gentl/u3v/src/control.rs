@@ -18,7 +18,7 @@
 //!   USB-level failures, with a fresh request_id.
 
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gentl_core::channel::ControlChannel;
 use gentl_core::{GentlError, GentlResult};
@@ -37,6 +37,9 @@ use crate::usbio::UsbPipe;
 const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_millis(1000);
 /// Upper bound for one acknowledge wait; pending acks may chain.
 const MAX_CMD_TIMEOUT: Duration = Duration::from_secs(5);
+/// Network margin added to a PendingAck temporary timeout (GenCP 4.4.5
+/// defines the field; the margin is quality of implementation).
+const PENDING_ACK_MARGIN: Duration = Duration::from_millis(250);
 /// Bootstrap IN transfer size before SBRM's Maximum Acknowledge Transfer
 /// Length is known. Every bootstrap register fits (largest is 64 B).
 const BOOTSTRAP_IN_SIZE: usize = 1024;
@@ -124,11 +127,14 @@ impl GenCpClient {
 
         // One round = submit IN, wait, handle PENDING_ACK by waiting again.
         let mut pending_rounds = 0u32;
+        let mut wait = self.mdrt + Duration::from_millis(500);
+        let deadline = Instant::now() + MAX_CMD_TIMEOUT;
         loop {
+            if Instant::now() >= deadline {
+                return Err(GentlError::Timeout);
+            }
             let mut buf = vec![0u8; self.in_size()];
-            let n = self
-                .in_pipe
-                .read_bulk(&mut buf, self.mdrt + Duration::from_millis(500))?;
+            let n = self.in_pipe.read_bulk(&mut buf, wait)?;
             let transfer = &buf[..n as usize];
 
             let ccd: AckCcd =
@@ -136,10 +142,17 @@ impl GenCpClient {
                     Ok(c) => c,
                     Err(AckError::UnexpectedCommand { got, .. }) if got == PENDING_ACK => {
                         pending_rounds += 1;
-                        if pending_rounds > 8
-                            || self.mdrt.saturating_mul(pending_rounds + 2) > MAX_CMD_TIMEOUT
-                        {
+                        if pending_rounds > 8 {
                             return Err(GentlError::Timeout);
+                        }
+                        // GenCP 4.4.5: the PendingAck carries the temporary
+                        // timeout for this command, counted from the moment
+                        // the PendingAck was sent. Re-arm the read with it
+                        // instead of polling at the MDRT cadence.
+                        if let Some(ms) = packets::decode_pending_ack_timeout(transfer) {
+                            let extended = Duration::from_millis(u64::from(ms))
+                                .saturating_add(PENDING_ACK_MARGIN);
+                            wait = extended.max(self.mdrt + Duration::from_millis(500));
                         }
                         continue;
                     }

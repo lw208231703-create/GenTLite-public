@@ -274,6 +274,19 @@ pub fn decode_ack(
     Ok(ccd)
 }
 
+/// PENDING_ACK SCD (GenCP 1.3.1 搂4.4.5 Table 12): a reserved u16 and the
+/// temporary timeout in ms, valid for the command with this request id and
+/// counting from the moment the PendingAck is sent.
+pub fn decode_pending_ack_timeout(transfer: &[u8]) -> Option<u16> {
+    if transfer.len() < CMD_OVERHEAD + 4 {
+        return None;
+    }
+    Some(u16::from_le_bytes([
+        transfer[CMD_OVERHEAD + 2],
+        transfer[CMD_OVERHEAD + 3],
+    ]))
+}
+
 /// Encode a READMEM command transfer. `len` is the byte count (u16 field,
 /// GenCP §4.4.1). Returns the full 24-byte transfer.
 pub fn encode_readmem(
@@ -728,6 +741,14 @@ mod tests {
         assert_eq!(PREFIX_EVENT.to_le_bytes(), *b"U3VE");
         assert_eq!(LEADER_MAGIC.to_le_bytes(), *b"U3VL");
         assert_eq!(TRAILER_MAGIC.to_le_bytes(), *b"U3VT");
+    }
+
+    #[test]
+    fn pending_ack_temporary_timeout_is_little_endian() {
+        let mut transfer = [0u8; CMD_OVERHEAD + 4];
+        transfer[CMD_OVERHEAD + 2..CMD_OVERHEAD + 4].copy_from_slice(&1500u16.to_le_bytes());
+        assert_eq!(decode_pending_ack_timeout(&transfer), Some(1500));
+        assert_eq!(decode_pending_ack_timeout(&transfer[..CMD_OVERHEAD + 3]), None);
     }
 
     #[test]
