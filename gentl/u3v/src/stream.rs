@@ -29,6 +29,32 @@ pub fn stream_id(index: u32) -> String {
     format!("Stream{index}")
 }
 
+/// Round a byte count up to the 4-byte chunk-tag alignment (§5.5.6: chunk
+/// data is padded so the chunk ID/length tag stays 32-bit aligned).
+fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
+
+/// Chunk region of an extended-chunk block (§5.5.5.2): the image is the
+/// first chunk (image data padded to 4 bytes, then its 8-byte tag), so the
+/// GenTL chunk block starts right after that tag. `valid_payload_size`
+/// bounds the valid payload — transfer padding may follow it — and the
+/// recorded region never exceeds the bytes actually copied into the buffer.
+fn extended_chunk_region(
+    image_bytes: usize,
+    valid_payload_size: u64,
+    written: usize,
+    layout_id: u32,
+) -> Option<gentl_core::ds::ChunkRegion> {
+    let chunk_start = align4(image_bytes).checked_add(8)?;
+    let valid = usize::try_from(valid_payload_size).ok()?.min(written);
+    (valid > chunk_start).then_some(gentl_core::ds::ChunkRegion {
+        offset: chunk_start,
+        len: valid - chunk_start,
+        layout_id: u64::from(layout_id),
+    })
+}
+
 /// Preferred size of one payload transfer (§5.2.1.3 "equal sized
 /// blocks"). A 1 KiB multiple and well inside every USB limit — EXCEPT
 /// the one found the hard way (vgige bring-up 2026-10-27): a 1 MiB
@@ -606,6 +632,7 @@ fn read_block(
         padding_x: u32::from(leader.padding_x),
         padding_y: 0,
         payload_bytes: None,
+        chunk: None,
     };
     // Expected payload: the leader-derived size when the pixel format is
     // known, else the SIRM-declared SI Required Payload Size (§5.4.1.3) —
@@ -780,12 +807,29 @@ fn read_block(
     // (CR-86st), making payload_bytes() match the valid rows. Carry the
     // byte count actually written as well: U3V has no GVSP trailer byte
     // count, and an unknown PixelFormat must still report SIZE_FILLED.
-    let meta = FrameMeta {
+    let image_meta = FrameMeta {
         height: trailer.size_y.min(meta.height),
-        payload_bytes: Some(written as usize),
         ..meta
     };
-    let _ = trailer.valid_payload_size; // valid size is implied by meta rows
+    // Extended chunk (§5.5.5.2): the payload is the image as the first
+    // chunk (image data padded to 4 bytes, then its 8-byte tag) followed by
+    // additional chunks. valid_payload_size bounds the payload; transfer
+    // padding may follow. Chunk tags are little-endian (§5.5.6/CR-91st).
+    let chunk = if leader.is_extended_chunk() {
+        extended_chunk_region(
+            image_meta.payload_bytes().unwrap_or(0),
+            trailer.valid_payload_size,
+            written as usize,
+            trailer.chunk_layout_id,
+        )
+    } else {
+        None
+    };
+    let meta = FrameMeta {
+        payload_bytes: Some(written as usize),
+        chunk,
+        ..image_meta
+    };
     if sink.on_frame(leader.block_id, meta, &[]).is_some() {
         state.stats.blocks_delivered += 1;
     }
@@ -920,5 +964,186 @@ mod tests {
         };
         assert_eq!(s.alignment(), 4);
         assert!(!s.additional_modes());
+    }
+
+    /// U3V extended chunk (§5.5.5.2): the image is the first chunk, so its
+    /// padded data plus 8-byte tag separates the image from the additional
+    /// chunk block that GenTL reports as the chunk region.
+    #[test]
+    fn extended_chunk_region_starts_after_the_image_chunk_tag() {
+        // 640x480 Mono8 = 307200 bytes (already 4-byte aligned).
+        let region = extended_chunk_region(307_200, 307_216, 307_216, 9).expect("chunk region");
+        assert_eq!(region.offset, 307_208);
+        assert_eq!(region.len, 8);
+        assert_eq!(region.layout_id, 9);
+
+        // Unaligned image bytes are padded to 4 before the tag (§5.5.6).
+        let region = extended_chunk_region(307_201, 307_216, 307_216, 0).expect("padded");
+        assert_eq!(region.offset, 307_212);
+
+        // No chunk block when valid_payload_size stops at the image tag.
+        assert_eq!(extended_chunk_region(307_200, 307_208, 307_208, 1), None);
+        // Truncated transfer: the region is bounded by the bytes actually
+        // copied into the buffer.
+        let region = extended_chunk_region(100, 200, 150, 1).expect("bounded");
+        assert_eq!(region.offset, 108);
+        assert_eq!(region.len, 42);
+    }
+
+    /// The recorded region is exactly what the GenTL chunk API parses
+    /// (little-endian tags decoded from the end, §5.5.6 / CR-91st).
+    #[test]
+    fn chunk_region_parses_into_chunk_spans() {
+        let region = extended_chunk_region(8, 32, 32, 3).expect("chunk region");
+        let mut payload = vec![0u8; 32];
+        let mut block = Vec::new();
+        block.extend_from_slice(&[0xAB; 8]); // chunk data
+        block.extend_from_slice(&2u32.to_le_bytes()); // chunk ID
+        block.extend_from_slice(&8u32.to_le_bytes()); // data length
+        payload[region.offset..region.offset + block.len()].copy_from_slice(&block);
+
+        let chunks = gentl_core::chunk::parse_chunks(
+            &payload[region.offset..region.offset + region.len],
+            false,
+        )
+        .expect("chunk tags");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].id, 2);
+        assert_eq!(chunks[0].len, 8);
+        assert_eq!(chunks[0].offset, 0);
+    }
+
+    /// A fully scripted extended-chunk block through the real receiver:
+    /// leader with the extended-chunk bit, image payload + image-chunk tag +
+    /// one metadata chunk, and the 36-byte extended trailer. The delivered
+    /// frame must carry the chunk region and its tags must parse into the
+    /// GenTL chunk layout (§5.5.5.2/§5.5.6).
+    #[test]
+    fn extended_chunk_block_delivers_a_parseable_chunk_region() {
+        use crate::packets::{
+            encode_image_leader, encode_image_trailer_extended, ImageLeader, GENCP_SUCCESS,
+            PAYLOAD_TYPE_EXTENDED_CHUNK_BIT,
+        };
+        use crate::usbio::UsbPipe;
+        use std::collections::VecDeque;
+        use std::io::Cursor;
+        use std::sync::Mutex;
+
+        /// Bulk-IN pipe fed from a byte cursor, one scripted transfer size
+        /// per read (the USB2 host controller boundary the receiver sees).
+        struct ScriptedPipe {
+            data: Mutex<Cursor<Vec<u8>>>,
+            script: Mutex<VecDeque<usize>>,
+        }
+
+        impl UsbPipe for ScriptedPipe {
+            fn read_bulk(&self, buf: &mut [u8], _timeout: std::time::Duration) -> GentlResult<u32> {
+                let Some(want) = self.script.lock().expect("script").pop_front() else {
+                    return Err(GentlError::Timeout);
+                };
+                let want = want.min(buf.len());
+                let mut data = self.data.lock().expect("data");
+                let pos = data.position() as usize;
+                let bytes = data.get_ref();
+                buf[..want].copy_from_slice(&bytes[pos..pos + want]);
+                data.set_position((pos + want) as u64);
+                Ok(want as u32)
+            }
+            fn write_bulk(&self, _buf: &[u8], _timeout: std::time::Duration) -> GentlResult<()> {
+                Ok(())
+            }
+            fn flush(&self) {}
+            fn set_raw_io(&self) -> GentlResult<()> {
+                Ok(())
+            }
+            fn max_packet(&self) -> u16 {
+                512
+            }
+        }
+
+        const MPS: usize = 512;
+        const BLOCK_ID: u64 = 1;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]); // 2x2 Mono8 image
+        payload.extend_from_slice(&1u32.to_le_bytes()); // image chunk ID
+        payload.extend_from_slice(&4u32.to_le_bytes()); // image chunk length
+        payload.extend_from_slice(&[0xAA; 8]); // metadata chunk data
+        payload.extend_from_slice(&0x1000u32.to_le_bytes()); // chunk ID
+        payload.extend_from_slice(&8u32.to_le_bytes()); // chunk data length
+        let valid = payload.len() as u64;
+
+        let leader = encode_image_leader(&ImageLeader {
+            leader_size: crate::packets::IMAGE_LEADER_LEN as u16,
+            block_id: BLOCK_ID,
+            payload_type: crate::packets::PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT,
+            timestamp: 42,
+            pixel_format: 0x0108_0001, // Mono8
+            size_x: 2,
+            size_y: 2,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+        });
+        let trailer = encode_image_trailer_extended(BLOCK_ID, GENCP_SUCCESS, valid, 2, 0x1234);
+
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&leader);
+        stream.resize(MPS, 0); // leader piece: one full MPS transfer
+        stream.extend_from_slice(&payload); // payload piece: short transfer
+        let trailer_at = stream.len();
+        stream.extend_from_slice(&trailer);
+        stream.resize(trailer_at + MPS, 0); // trailer piece: one full MPS transfer
+
+        let pipe = ScriptedPipe {
+            data: Mutex::new(Cursor::new(stream)),
+            script: Mutex::new(VecDeque::from([MPS, payload.len(), MPS])),
+        };
+        let geometry = TransferGeometry {
+            transfer_size: MPS as u32,
+            transfer_count: 0,
+            final1: payload.len() as u32,
+            final2: 0,
+            max_leader: crate::packets::IMAGE_LEADER_LEN as u32,
+            max_trailer: crate::packets::IMAGE_EXTENDED_CHUNK_TRAILER_LEN as u32,
+        };
+        let core = Arc::new(DsCore::new());
+        let id = core
+            .announce_owned(64, std::ptr::null_mut())
+            .expect("announce");
+        core.queue_buffer(id).expect("queue");
+        core.start_acquisition(1).expect("start");
+        let stop = AtomicBool::new(false);
+        let mut state = ReceiverState::default();
+        let outcome = read_block(
+            &pipe,
+            &core,
+            &mut state,
+            &stop,
+            &geometry,
+            0,
+        );
+        assert!(matches!(outcome, BlockOutcome::Completed));
+
+        let (meta, filled, base) = core
+            .with_buffer(id, |b| (b.meta, b.filled_size, b.base_ptr() as *const u8))
+            .expect("buffer");
+        let meta = meta.expect("delivered meta");
+        assert_eq!(filled, payload.len());
+        assert_eq!(
+            meta.chunk,
+            Some(gentl_core::ds::ChunkRegion {
+                offset: 12,
+                len: 16,
+                layout_id: 0x1234,
+            })
+        );
+        // SAFETY: the buffer is 64 bytes, the region lies inside it.
+        let block = unsafe { std::slice::from_raw_parts(base.add(12), 16) };
+        let chunks = gentl_core::chunk::parse_chunks(block, false).expect("chunk tags");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].id, 0x1000);
+        assert_eq!(chunks[0].len, 8);
+        // GenTL reports offsets relative to the buffer base (offset 12+0).
+        assert_eq!(chunks[0].offset, 0);
     }
 }

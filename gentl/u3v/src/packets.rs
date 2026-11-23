@@ -469,12 +469,16 @@ pub const TRAILER_MAGIC: u32 = 0x5456_3355;
 
 /// Payload types (§5.5.5 Table 5-6).
 pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
-/// Bit 14 of payload_type: extended chunk mode (§5.5.5.2).
-#[allow(dead_code)] // extended-chunk payloads are rejected, not decoded
+/// Bit 14 of payload_type: extended chunk mode (§5.5.5.2). The image payload
+/// then carries the image as its first chunk plus additional chunks in the
+/// chunk format of §5.5.6.
 pub const PAYLOAD_TYPE_EXTENDED_CHUNK_BIT: u16 = 0x4000;
 
 pub const IMAGE_LEADER_LEN: usize = 52;
 pub const IMAGE_TRAILER_LEN: usize = 32;
+/// Extended-chunk image trailer: the standard trailer plus `chunk_layout_id`
+/// (§5.5.5.2.3 Table 5-10: offset 32, 4 bytes).
+pub const IMAGE_EXTENDED_CHUNK_TRAILER_LEN: usize = 36;
 
 /// Decoded image leader (§5.5.5.1.1 Table 5-7, all little-endian).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,9 +504,17 @@ pub enum LeaderError {
     UnsupportedPayloadType(u16),
 }
 
-/// Decode and validate an image leader. `payload_type` must be plain
-/// Image (0x0001): this producer streams image payloads only; the caller
-/// classifies leaders before reserving buffers.
+impl ImageLeader {
+    /// Extended chunk mode (§5.5.5.2): payload carries the image as its
+    /// first chunk followed by additional chunk data.
+    pub fn is_extended_chunk(&self) -> bool {
+        self.payload_type & PAYLOAD_TYPE_EXTENDED_CHUNK_BIT != 0
+    }
+}
+
+/// Decode and validate an image leader. `payload_type` must be the plain
+/// Image type or the same type with the extended-chunk bit set (§5.5.5.2);
+/// any other payload type is classified as unsupported.
 pub fn decode_image_leader(buf: &[u8]) -> Result<ImageLeader, LeaderError> {
     if buf.len() < IMAGE_LEADER_LEN {
         return Err(LeaderError::TooShort);
@@ -518,7 +530,7 @@ pub fn decode_image_leader(buf: &[u8]) -> Result<ImageLeader, LeaderError> {
         return Err(LeaderError::BadSize);
     }
     let payload_type = u16::from_le_bytes([buf[18], buf[19]]);
-    if payload_type != PAYLOAD_TYPE_IMAGE {
+    if payload_type & !PAYLOAD_TYPE_EXTENDED_CHUNK_BIT != PAYLOAD_TYPE_IMAGE {
         return Err(LeaderError::UnsupportedPayloadType(payload_type));
     }
     Ok(ImageLeader {
@@ -543,6 +555,9 @@ pub struct ImageTrailer {
     pub status: u16,
     pub valid_payload_size: u64,
     pub size_y: u32,
+    /// Extended-chunk layout id (§5.5.5.2.3); 0 for the standard 32-byte
+    /// trailer or when the transmitter does not support layout ids.
+    pub chunk_layout_id: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -607,7 +622,37 @@ pub fn decode_image_trailer(buf: &[u8]) -> Result<ImageTrailer, TrailerError> {
         status: u16::from_le_bytes([buf[16], buf[17]]),
         valid_payload_size: u64::from_le_bytes(buf[20..28].try_into().expect("len checked")),
         size_y: u32::from_le_bytes([buf[28], buf[29], buf[30], buf[31]]),
+        // §5.5.5.2.3: extended-chunk trailers append chunk_layout_id at
+        // offset 32 and report the longer trailer_size.
+        chunk_layout_id: if usize::from(trailer_size) >= IMAGE_EXTENDED_CHUNK_TRAILER_LEN
+            && buf.len() >= IMAGE_EXTENDED_CHUNK_TRAILER_LEN
+        {
+            u32::from_le_bytes([buf[32], buf[33], buf[34], buf[35]])
+        } else {
+            0
+        },
     })
+}
+
+/// Encode an extended-chunk image trailer (§5.5.5.2.3 Table 5-10): the
+/// standard trailer plus `chunk_layout_id` — the device/transmitter side.
+pub fn encode_image_trailer_extended(
+    block_id: u64,
+    status: u16,
+    valid_payload_size: u64,
+    size_y: u32,
+    chunk_layout_id: u32,
+) -> [u8; IMAGE_EXTENDED_CHUNK_TRAILER_LEN] {
+    let mut out = [0u8; IMAGE_EXTENDED_CHUNK_TRAILER_LEN];
+    out[..IMAGE_TRAILER_LEN].copy_from_slice(&encode_image_trailer(
+        block_id,
+        status,
+        valid_payload_size,
+        size_y,
+    ));
+    out[6..8].copy_from_slice(&(IMAGE_EXTENDED_CHUNK_TRAILER_LEN as u16).to_le_bytes());
+    out[32..36].copy_from_slice(&chunk_layout_id.to_le_bytes());
+    out
 }
 
 /// A decoded device event (§4.1.3.3.2): prefix U3VE + CCD(EVENT_CMD) +
@@ -940,5 +985,61 @@ mod tests {
         assert_eq!(t.status, U3V_STATUS_DATA_OVERRUN);
         assert_eq!(t.valid_payload_size, 307_200);
         assert_eq!(t.size_y, 470);
+    }
+
+    /// §5.5.5.2: the extended-chunk payload type is an image payload with
+    /// bit 14 set; the trailer then carries `chunk_layout_id`
+    /// (§5.5.5.2.3 Table 5-10) and reports the 36-byte trailer size.
+    #[test]
+    fn extended_chunk_leader_and_trailer_roundtrip() {
+        let leader = encode_image_leader(&ImageLeader {
+            leader_size: IMAGE_LEADER_LEN as u16,
+            block_id: 7,
+            payload_type: PAYLOAD_TYPE_IMAGE | PAYLOAD_TYPE_EXTENDED_CHUNK_BIT,
+            timestamp: 1,
+            pixel_format: 0x0108_0001,
+            size_x: 640,
+            size_y: 480,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+        });
+        let decoded = decode_image_leader(&leader).expect("extended chunk leader");
+        assert!(decoded.is_extended_chunk());
+        assert_eq!(decoded.payload_type, 0x4001);
+
+        // The standard trailer has no chunk layout id.
+        let t = decode_image_trailer(&encode_image_trailer(7, GENCP_SUCCESS, 4096, 480))
+            .expect("standard trailer");
+        assert_eq!(t.chunk_layout_id, 0);
+        assert!(!new_image_leader(PAYLOAD_TYPE_IMAGE).is_extended_chunk());
+
+        // Extended trailer: layout id present, longer trailer_size.
+        let t = decode_image_trailer(&encode_image_trailer_extended(
+            7,
+            GENCP_SUCCESS,
+            4096,
+            480,
+            0xDEAD_BEEF,
+        ))
+        .expect("extended trailer");
+        assert_eq!(t.chunk_layout_id, 0xDEAD_BEEF);
+        assert_eq!(t.trailer_size, IMAGE_EXTENDED_CHUNK_TRAILER_LEN as u16);
+        assert_eq!(t.valid_payload_size, 4096);
+    }
+
+    fn new_image_leader(payload_type: u16) -> ImageLeader {
+        ImageLeader {
+            leader_size: IMAGE_LEADER_LEN as u16,
+            block_id: 0,
+            payload_type,
+            timestamp: 0,
+            pixel_format: 0,
+            size_x: 0,
+            size_y: 0,
+            offset_x: 0,
+            offset_y: 0,
+            padding_x: 0,
+        }
     }
 }

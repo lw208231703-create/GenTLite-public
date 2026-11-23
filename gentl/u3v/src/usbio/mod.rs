@@ -112,12 +112,26 @@ pub(crate) enum ReadAbort {
 /// is raised again. The stream is disabled at this point, so a short timeout
 /// is enough to drain data already queued by the old session.
 pub(crate) fn drain_stale(pipe: &dyn UsbPipe) {
+    // Consume leftovers from the previous session, then cancel the read that
+    // finally timed out: the stream pipe keeps timed-out transfers parked,
+    // and a parked 64 KiB request would otherwise be completed by the first
+    // block of the new session (observed as "leader magic" desync after a
+    // geometry change). Abort+reset leaves the endpoint quiescent.
     let mut buf = vec![0u8; 64 * 1024];
-    for _ in 0..32 {
-        if pipe.read_bulk(&mut buf, Duration::from_millis(1)).is_err() {
-            break;
+    let mut drained = 0usize;
+    for _ in 0..64 {
+        match pipe.read_bulk(&mut buf, Duration::from_millis(1)) {
+            Ok(n) => {
+                drained += n as usize;
+                if n == 0 {
+                    break;
+                }
+            }
+            Err(_) => break,
         }
     }
+    let _ = drained;
+    pipe.cancel_pending_read();
 }
 
 /// One read with stop-flag polling. `in_block` controls the grace: a

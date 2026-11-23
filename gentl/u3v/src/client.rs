@@ -35,7 +35,7 @@ use crate::stream::{
 };
 use crate::types::FoundDevice;
 
-pub use crate::usbio::UsbPipe;
+pub use crate::usbio::{InterfaceSet, UsbPipe};
 
 /// Errors of the facade API.
 #[derive(Debug)]
@@ -72,6 +72,9 @@ pub struct U3vCamera {
     /// Live DEI pump, if any (§5.4.2). Drop order: receiver first, then
     /// the pump thread observes `stop` and exits before the pipes.
     events: Mutex<Option<EventPump>>,
+    /// Owner of the interface handles the pipes reference (None for fake
+    /// pipes). Declared last so it drops after every pipe clone.
+    ifaces: Option<Arc<InterfaceSet>>,
 }
 
 impl U3vCamera {
@@ -85,20 +88,23 @@ impl U3vCamera {
     /// ABRM/SBRM bootstrap (§4.2).
     pub fn open(instance_id: &str) -> GentlResult<Self> {
         let opened = crate::discovery::open_device_all(instance_id);
-        let ifaces = crate::usbio::InterfaceSet::collect(opened)?;
+        let ifaces = Arc::new(crate::usbio::InterfaceSet::collect(opened)?);
         let control_out = ifaces.control_out.clone().ok_or_else(|| {
             GentlError::Io("device lacks a bulk OUT control endpoint (R-11cd)".into())
         })?;
         let control_in = ifaces.control_in.clone().ok_or_else(|| {
             GentlError::Io("device lacks a bulk IN control endpoint (R-11cd)".into())
         })?;
-        // Clone the pipe handles (cheap Arc clones; InterfaceSet is not
-        // consumed because it implements Drop on the Windows backend).
+        // The pipes reference the interface handles by raw value: the whole
+        // InterfaceSet must outlive them. Keep an Arc in the camera and hand
+        // clones to every stream/event consumer (the set closes the USB
+        // handles only when the last owner drops).
         Self::from_parts_full(
             control_out,
             control_in,
             ifaces.stream_in.clone(),
             ifaces.event_in.clone(),
+            Some(Arc::clone(&ifaces)),
         )
     }
 
@@ -110,7 +116,7 @@ impl U3vCamera {
         control_in: Arc<dyn UsbPipe>,
         stream_in: Vec<Arc<dyn UsbPipe>>,
     ) -> GentlResult<Self> {
-        Self::from_parts_full(control_out, control_in, stream_in, None)
+        Self::from_parts_full(control_out, control_in, stream_in, None, None)
     }
 
     /// Build a camera with an optional Device Event Interface endpoint.
@@ -120,7 +126,7 @@ impl U3vCamera {
         stream_in: Vec<Arc<dyn UsbPipe>>,
         event_in: Option<Arc<dyn UsbPipe>>,
     ) -> GentlResult<Self> {
-        Self::from_parts_full(control_out, control_in, stream_in, event_in)
+        Self::from_parts_full(control_out, control_in, stream_in, event_in, None)
     }
 
     fn from_parts_full(
@@ -128,6 +134,7 @@ impl U3vCamera {
         control_in: Arc<dyn UsbPipe>,
         stream_in: Vec<Arc<dyn UsbPipe>>,
         event_in: Option<Arc<dyn UsbPipe>>,
+        ifaces: Option<Arc<InterfaceSet>>,
     ) -> GentlResult<Self> {
         let mut client = GenCpClient::new(control_out, control_in);
         let bootstrap = read_bootstrap(&mut client)?;
@@ -137,6 +144,7 @@ impl U3vCamera {
             stream_in,
             event_in,
             events: Mutex::new(None),
+            ifaces,
         })
     }
 
@@ -210,6 +218,7 @@ impl U3vCamera {
             pipe,
             sirm,
             geometry: Mutex::new(None),
+            _ifaces: self.ifaces.clone(),
         })
     }
 }
@@ -244,9 +253,13 @@ impl U3vCamera {
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = std::sync::mpsc::channel::<packets::EventPacket>();
         let pump_stop = Arc::clone(&stop);
+        // The event pipe references the interface handles: keep the owner
+        // alive for as long as the pump thread runs.
+        let pump_ifaces = self.ifaces.clone();
         let pump = match std::thread::Builder::new()
             .name("u3v-events".into())
             .spawn(move || {
+                let _ifaces = pump_ifaces;
                 let mut buf = vec![0u8; 4096];
                 while !pump_stop.load(Ordering::Relaxed) {
                     match pipe.read_bulk(&mut buf, EVENTS_POLL) {
@@ -348,6 +361,9 @@ pub struct U3vStream {
     pipe: Arc<dyn UsbPipe>,
     sirm: SirmInfo,
     geometry: Mutex<Option<TransferGeometry>>,
+    /// Keeps the interface handles alive while this stream outlives its
+    /// owning camera (None for fake pipes).
+    _ifaces: Option<Arc<InterfaceSet>>,
 }
 
 /// One received data block (U3V 1.2 §5.2/§5.5).
@@ -385,10 +401,16 @@ impl U3vStream {
 
     /// Drop Stream Enable (§5.4.1.2: 0 while active aborts the stream).
     /// Called by `Drop` as well — safe to call twice.
+    ///
+    /// Also cancels a read that the receiver left outstanding: the pipe
+    /// object is shared by every `U3vStream` of the camera, so a transfer
+    /// parked by the previous session would otherwise complete with
+    /// ERROR_OPERATION_ABORTED (995) inside the next session's first read.
     pub fn stop(&self) {
         if let Ok(c) = self.client.lock() {
             stream::disable_sirm(&c, &self.sirm);
         }
+        self.pipe.cancel_pending_read();
     }
 
     /// Pull the next block, waiting up to `timeout` for its first piece.
@@ -522,6 +544,7 @@ fn read_block_alloc(
         padding_x: u32::from(leader.padding_x),
         padding_y: 0,
         payload_bytes: None,
+        chunk: None,
     };
     let expected = meta.payload_bytes().unwrap_or(required_payload as usize);
 

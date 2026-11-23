@@ -306,11 +306,16 @@ impl InterfaceSet {
                 USB_PROTOCOL_STREAMING => {
                     for p in pipes {
                         if p.is_in {
+                            // Stream reads must keep a timed-out transfer
+                            // outstanding: aborting it (the control/event
+                            // policy) resets the endpoint and the device
+                            // sees EPIPE mid-write, killing a healthy stream
+                            // (same finding as the pre-port receiver).
                             set.stream_in.push(Arc::new(WinUsbPipe {
                                 handle: h,
                                 pipe: p.pipe_id,
                                 mps: p.max_packet,
-                                keep_pending: false,
+                                keep_pending: true,
                                 pending: std::sync::Mutex::new(None),
                             }));
                         }
@@ -353,8 +358,15 @@ struct WinUsbPipe {
 
 /// An outstanding WinUSB read: the staging buffer is owned here because
 /// the driver writes into it until completion.
+///
+/// The OVERLAPPED lives in a Box on purpose: the kernel writes the
+/// completion status (and transferred length) back through the pointer
+/// supplied at submission time, so moving that structure after the call
+/// would leave `WinUsb_GetOverlappedResult` reading zeroed memory (the
+/// transferred length then always reads 0 while the data actually
+/// arrived — found 2026-11-23 on the U3V stream endpoint).
 struct PendingRead {
-    overlapped: Overlapped,
+    overlapped: Box<Overlapped>,
     buf: Vec<u8>,
 }
 
@@ -378,7 +390,7 @@ impl UsbPipe for WinUsbPipe {
             .map_err(|_| GentlError::Io("pipe pending lock poisoned".into()))?;
         if pending.is_none() {
             let mut p = PendingRead {
-                overlapped: Overlapped::new()?,
+                overlapped: Box::new(Overlapped::new()?),
                 buf: vec![0u8; buf.len()],
             };
             let mut read: u32 = 0;
