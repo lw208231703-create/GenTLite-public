@@ -966,3 +966,35 @@ fn device_events_are_relayed_to_the_opened_message_channel() {
         "no events after the host closed the message channel"
     );
 }
+
+/// GigE Vision 16.5 allows a READMEM/WRITEMEM to cover several contiguous
+/// registers (32-bit alignment only). Words served by the virtual device
+/// must be answered locally instead of forwarding the whole block to the
+/// camera: SCPS0+SCPD0 and SCC0+SCCFG0 are adjacent virtual channel words.
+#[test]
+fn multi_word_block_access_to_virtual_registers() {
+    let s = start(false);
+    let scps_value = reg::scps_make(1500);
+    s.remote.write_reg(reg::SCPS0, scps_value).unwrap();
+    let mut pair = [0u8; 8];
+    s.remote.read_mem(reg::SCPS0, &mut pair).unwrap();
+    assert_eq!(
+        &pair[0..4],
+        &scps_value.to_be_bytes(),
+        "SCPS0 word is served locally"
+    );
+    assert_eq!(&pair[4..8], &0u32.to_be_bytes(), "SCPD0 word is served locally");
+
+    let mut scc = [0u8; 8];
+    s.remote.read_mem(reg::SCC0, &mut scc).unwrap();
+    assert_eq!(scc, [0u8; 8], "SCC0 + SCCFG0 are local zeros");
+
+    // The same block size on the read-only SCC0 must be rejected by the
+    // local dispatch (WRITE_PROTECT), not forwarded to the camera.
+    let err = s.remote.write_mem(reg::SCC0, &[0u8; 8]).unwrap_err();
+    assert_eq!(
+        err,
+        GentlError::GevStatus(GEV_STATUS_WRITE_PROTECT),
+        "virtual read-only register answers WRITE_PROTECT locally"
+    );
+}

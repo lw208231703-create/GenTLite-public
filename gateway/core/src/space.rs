@@ -714,6 +714,62 @@ impl RegisterSpace {
         self.write_reg(addr, value)
     }
 
+    /// Whether one 32-bit word is served by the virtual device itself
+    /// rather than forwarded to the downstream camera. Mirrors the local
+    /// dispatch in [`RegisterSpace::read_reg`]/[`RegisterSpace::write_reg`]
+    /// and lets a multi-word READMEM/WRITEMEM compose virtual register
+    /// words locally instead of routing the whole block to the camera.
+    fn is_virtual_reg(&self, addr: u32) -> bool {
+        if reg::stream_channel_addr(addr).is_some() {
+            return true;
+        }
+        if addr >= CUSTOM_BASE && addr < CUSTOM_BASE + (CUSTOM_SLOTS as u32) * 4 {
+            return true;
+        }
+        if addr >= XML_BASE_V && addr < self.xml.base() + self.xml.blob().len() as u32 {
+            return true;
+        }
+        if matches!(
+            addr,
+            reg::PERSISTENT_IP_ADDRESS
+                | reg::PERSISTENT_SUBNET_MASK
+                | reg::PERSISTENT_DEFAULT_GATEWAY
+        ) {
+            return true;
+        }
+        if matches!(
+            addr,
+            reg::VERSION
+                | reg::DEVICE_MODE
+                | reg::NET_IF_CAPABILITY
+                | reg::NET_IF_CONFIGURATION
+                | reg::CURRENT_SUBNET_MASK
+                | reg::NUM_NETWORK_INTERFACES
+                | reg::CCP
+                | reg::HEARTBEAT_TIMEOUT
+                | reg::NUM_STREAM_CHANNELS
+                | reg::NUM_MESSAGE_CHANNELS
+                | reg::MESSAGE_CHANNEL_CAPABILITY
+                | reg::MESSAGE_CHANNEL_PORT
+                | reg::MESSAGE_CHANNEL_DEST_ADDRESS
+                | reg::MESSAGE_CHANNEL_TRANSMISSION_TIMEOUT
+                | reg::MESSAGE_CHANNEL_RETRY_COUNT
+                | reg::MESSAGE_CHANNEL_SOURCE_PORT
+                | reg::STREAMING_CAPABILITY
+                | reg::STREAMING_CONFIGURATION
+                | reg::DEVICE_MAC_HIGH
+                | reg::DEVICE_MAC_LOW
+                | reg::CURRENT_IP
+                | reg::GVCP_CAPABILITY
+        ) {
+            return true;
+        }
+        if addr >= reg::FIRST_URL && addr < reg::SECOND_URL {
+            return true;
+        }
+        self.identity_bytes(addr, 4).is_some()
+    }
+
     /// PACKETRESEND (§16.7.2): route the request to the virtual stream's
     /// front session (the relay owns the only channel, index 0).
     pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
@@ -799,6 +855,34 @@ impl RegisterSpace {
         if count == 4 && virtual_reg {
             return self.read_reg(addr).map(|value| value.to_be_bytes().to_vec());
         }
+        // A larger READMEM may legally span contiguous virtual registers
+        // (GigE Vision §16.5 only requires 32-bit alignment). If any word of
+        // the range is served locally, compose the block word by word:
+        // virtual words through read_reg, the rest through the camera's
+        // register read, encoded big-endian like any READMEM word.
+        let mut pos = addr;
+        let mut any_virtual = false;
+        while pos < end {
+            if self.is_virtual_reg(pos) {
+                any_virtual = true;
+                break;
+            }
+            pos += 4;
+        }
+        if any_virtual {
+            let mut out = Vec::with_capacity(count as usize);
+            let mut pos = addr;
+            while pos < end {
+                let value = if self.is_virtual_reg(pos) {
+                    self.read_reg(pos)?
+                } else {
+                    self.back_read_reg(pos)?
+                };
+                out.extend_from_slice(&value.to_be_bytes());
+                pos += 4;
+            }
+            return Ok(out);
+        }
         // Pass through. Ranges overlapping the virtualized slots above
         // (First URL / custom window / blob) but not contained in them are
         // unusual; the camera's answer for the range is forwarded.
@@ -867,6 +951,34 @@ impl RegisterSpace {
             );
         if data.len() == 4 && virtual_reg {
             return self.write_reg(addr, u32::from_be_bytes(data[..4].try_into().expect("u32")));
+        }
+        // Multi-word WRITEMEM spanning virtual registers: handle each word
+        // through the local/forwarded register dispatch (see read_block).
+        let mut pos = addr;
+        let mut any_virtual = false;
+        while pos < end {
+            if self.is_virtual_reg(pos) {
+                any_virtual = true;
+                break;
+            }
+            pos += 4;
+        }
+        if any_virtual {
+            let mut pos = addr;
+            let mut offset = 0usize;
+            while pos < end {
+                let word = u32::from_be_bytes(
+                    data[offset..offset + 4].try_into().expect("4-byte word"),
+                );
+                if self.is_virtual_reg(pos) {
+                    self.write_reg(pos, word)?;
+                } else {
+                    self.back_write_reg(pos, word)?;
+                }
+                pos += 4;
+                offset += 4;
+            }
+            return Ok(());
         }
         let mut owned;
         let payload = if self.back_endian == RegisterEndian::Little {
