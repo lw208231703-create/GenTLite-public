@@ -1097,3 +1097,42 @@ flag 0x01 与 0x80 对同一相机的 READREG/WRITEREG **都应答**（flag_prob
   验证完成，2×2 矩阵收官。**
 
 （踩坑全记录归档：见 docs/20-design/u3v-gadget-bringup-pitfalls.md——按内核/FF协议/Windows宿主/线程健壮性/调试纪律五层整理，含最终可用配置快照。）
+
+## Q40: FORCEIP on the virtual GigE device (relay boundary)
+
+**Spec:** GigE Vision 3.0 §§16.2.1–16.2.2, R-147cd ("The FORCEIP command MUST
+be supported by all devices"), R-149cd (MAC mismatch → silent discard),
+R-150cd (an open control channel → silent discard), R-151cd (static_IP = 0 →
+close streams and restart the IP configuration without an ACK), R-152cd
+(static_IP != 0 → change the device address, then ACK).
+
+**Situation:** the virtual device's MAC/IP are the gateway host's up-facing
+NIC. Honouring a forced non-zero address would mean rebinding the host
+interface (root-only, breaks other host networking, and the gateway would
+become unreachable on the old address while nothing else reconfigures it).
+
+**Decision (v1):** the command is parsed and ordered per the spec
+(`DeviceHandler::force_ip`, simulator implements the full device behaviour),
+but the relay's virtual device **silently discards** a request for its own MAC
+— with a warning on stderr — instead of reconfiguring the host NIC.
+`static_IP = 0` still performs the required stream close (R-151cd). Hosts that
+want to recover a gateway with a lost address must reconfigure the NIC by
+other means. R-147cd is therefore deliberately not honoured on the relay
+front (protocol handling is present; the re-addressing side effect is out of
+scope for a proxy device).
+
+**Verification:** `gentl/simulator/tests/e2e.rs`
+(`force_ip_command_end_to_end`: ACK, applied address, foreign-MAC and
+occupied-channel discards) and `gateway/cli/tests/relay_e2e.rs`
+(`force_ip_to_the_virtual_device_is_discarded`).
+
+## Q41: 网关事件中继的 ACK/重传（MCTT/MCRC）v1 取舍
+
+**规范**：GigE Vision 3.0 §12.3（CR-101cd/CR-102cd/CR-103cd）：应用写 MCTT 后设备必须为消息通道消息置 ACKNOWLEDGE 位并按 MCRC 重传，直到收到 EVENT_ACK。
+
+**情况**：网关把下游相机的事件**原样转发**给宿主，转发路径中没有事件重传缓冲；若声明 MCTT 生效，就必须实现"等 ACK + 超时重传"，否则会在丢包时静默丢失事件且违反 §12.3。
+
+**v1 决策**：虚拟设备的 MCTT/MCRC 写入被接受但读回 0，转发的事件数据报不置 ACK 位（等价于 MCTT=0 的设备：CR-103cd 允许应用不要求 ACK）。收益：宿主不会等待不存在的 ACK，事件丢失可由相机侧/宿主侧重开通道恢复。代价：事件通道没有逐事件可靠性保证。
+
+**后续**：真实相机/宿主有明确事件可靠性需求时，给网关加事件重传队列（按 MCRC 重试、收 EVENT_ACK）后再放开 MCTT 语义。验证脚本：`relay_e2e::device_events_are_relayed_to_the_opened_message_channel`。
+

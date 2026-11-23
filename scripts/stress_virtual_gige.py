@@ -16,6 +16,13 @@ def main():
     parser.add_argument("--device", help="device ID; default: first discovered")
     parser.add_argument("--dll", default="target/debug/gentl_gige.dll", help="gentl-gige DLL path")
     parser.add_argument("--packet-size", type=int, default=1500, help="fixed GVSP total packet size")
+    parser.add_argument(
+        "--payload",
+        type=int,
+        default=4 * 1024 * 1024,
+        help="announced buffer size in bytes (default covers the null camera's "
+        "1280x1024 Mono16 payload; a too-small buffer makes the producer drop every frame)",
+    )
     args = parser.parse_args()
     if args.frames <= 0:
         parser.error("--frames must be positive")
@@ -51,6 +58,7 @@ def main():
     dev_close = fn("DevClose", [P])
     dev_port = fn("DevGetPort", [P, C.POINTER(P)])
     write_port = fn("GCWritePort", [P, U64, P, C.POINTER(SZ)])
+    read_port = fn("GCReadPort", [P, U64, P, C.POINTER(SZ)])
     register_event = fn("GCRegisterEvent", [P, I32, C.POINTER(P)])
     unregister_event = fn("GCUnregisterEvent", [P, I32])
     announce = fn("DSAnnounceBuffer", [P, P, SZ, P, C.POINTER(P)])
@@ -90,6 +98,7 @@ def main():
         check(if_num(iface, C.byref(nd)), "IFGetNumDevices")
         if nd.value < 1:
             raise RuntimeError("no virtual GigE device")
+        expect_w, expect_h = 0, 0
         if args.device:
             device_id = args.device.encode()
         else:
@@ -101,7 +110,26 @@ def main():
         check(dev_open_ds(dev, b"Stream0", C.byref(ds)), "DevOpenDataStream")
         check(register_event(ds, 1, C.byref(ev)), "GCRegisterEvent")
 
-        payload = 1280 * 1024
+        # The null camera keeps Width/Height/PixelFormat in ordinary user
+        # registers (0x41000/0x41004/0x41008) whose values any earlier client
+        # (e.g. NI MAX) may have changed: read the live geometry instead of
+        # assuming the factory defaults. GVCP register values are big-endian.
+        port = P()
+        check(dev_port(dev, C.byref(port)), "DevGetPort")
+
+        def read_reg_value(addr):
+            raw = C.create_string_buffer(4)
+            size = SZ(4)
+            check(read_port(port, addr, raw, C.byref(size)), f"GCReadPort 0x{addr:08X}")
+            return int.from_bytes(raw.raw[:4], "big")
+
+        width = read_reg_value(0x0004_1000)
+        height = read_reg_value(0x0004_1004)
+        pixel_format = read_reg_value(0x0004_1008)
+        bpp = 1 if pixel_format == 0x0108_0001 else 2
+        frame_bytes = width * height * bpp
+        payload = max(args.payload, frame_bytes)
+        print(f"camera={width}x{height} pixel_format=0x{pixel_format:08X} payload={payload}")
         buffers = [C.create_string_buffer(payload) for _ in range(4)]
         for buf in buffers:
             handle = P()
@@ -112,10 +140,9 @@ def main():
 
         t0 = time.perf_counter()
         check(start(ds, 0, U64(-1).value), "DSStartAcquisition")
-        port = P()
-        check(dev_port(dev, C.byref(port)), "DevGetPort")
         size = SZ(4)
-        check(write_port(port, 0x0004_0000, (1).to_bytes(4, "little"), C.byref(size)), "AcquisitionStart")
+        check(write_port(port, 0x0004_0000, (1).to_bytes(4, "big"), C.byref(size)), "AcquisitionStart")
+        expect_w, expect_h = width, height
         for index in range(args.frames):
             raw = C.create_string_buffer(C.sizeof(EventData))
             size = SZ(C.sizeof(EventData))
@@ -131,7 +158,7 @@ def main():
             check(buffer_info(ds, event.buffer, 11, C.byref(dtype), C.byref(height), C.byref(size)), "height")
             size = SZ(1)
             check(buffer_info(ds, event.buffer, 7, C.byref(dtype), C.byref(incomplete), C.byref(size)), "incomplete")
-            if (width.value, height.value, incomplete.value) != (1280, 1024, 0):
+            if (width.value, height.value, incomplete.value) != (expect_w, expect_h, 0):
                 raise RuntimeError(
                     f"bad frame {index}: {width.value}x{height.value} incomplete={incomplete.value}"
                 )
@@ -143,7 +170,7 @@ def main():
         print(f"GIGE GRAB OK: {args.frames}/{args.frames} frames, {elapsed:.3f}s, {args.frames/elapsed:.3f} fps")
         check(stop(ds, 0), "DSStopAcquisition")
         size = SZ(4)
-        check(write_port(port, 0x0004_0000, (0).to_bytes(4, "little"), C.byref(size)), "AcquisitionStop")
+        check(write_port(port, 0x0004_0000, (0).to_bytes(4, "big"), C.byref(size)), "AcquisitionStop")
     finally:
         if ev.value:
             event_kill(ev)

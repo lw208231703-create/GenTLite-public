@@ -61,3 +61,60 @@
 3. 多品牌矩阵：不同 PixelFormat、可变帧、短包、非默认包大小及多 tap。
 4. 第三方宿主：我方 CTI 与第三方 producer 分开验收；pylon/MVS 原生发现失败仍是已知边界。
 5. 将模拟器结果与真机结果分开记录，不用“模拟链路通过”替代真机验收。
+
+## G. 2026-11 规范补齐批次（已完成）
+
+以 `notes/` 规范书 + NI MAX 实际行为为基准的一轮系统性修补（详见
+`compliance/spec-audit/2026-11-gap-closure.md`，含逐项条款/文件/验收）：
+
+- **GenTL producer**：GCGetInfo 真实实现、全入口点 panic 守卫、chunk 全链路（解析器 + GigE §24.4/§25.1 与 U3V §5.5.5.2 双编解码 + `DSGetBufferChunkData`）、GigE `WRITEMEM`（§16.6，R-185cd）与对齐状态码修正。
+- **模拟相机**：控制通道心跳看门狗（§10.5 R-075cd/R-076cd）、FORCEIP 完整设备语义（§16.2）、扩展 chunk 发射（§25.1）、虚拟 null 相机 TestPattern/UserSetControl 真实语义（SFNC）。
+- **网关**：下行相机心跳 worker（含 EA 丢失自动恢复）、back-gige 写路径（4B→WRITEREG、多字→WRITEMEM）、前端能力/身份本地虚拟化（持久 IP 不再被转发/破坏）、FORCEIP 安全边界（OPEN-QUESTIONS Q40）、chunk 中继（GigE 前端重发扩展 chunk、U3V 前端剔除）、XML 内容哈希 URL 防宿主陈旧缓存。
+- **验收**：`cargo test --workspace` 260/260；本地 NI MAX：Attributes **167**（+5 新 SFNC 节点）、Compatibility Report **96/96 Pass、0 Fail**（~30 fps）。
+- **新增工具**：`scripts/validate_genicam_xml.py`（用 NI 自带 GenApi XSD 校验 XML，支持 `--fetch` 从设备拉取；在 NI 验收前必跑）。
+
+仍待外部条件：板端重部署 + 板端 NI MAX 复测；真实相机矩阵（back-u3v、back-gige×front-u3v）；`gentl/simulator` 的 TestPattern/UserSet 对齐（可选）；U3V 虚拟前端 chunk 发射（可选）。
+
+## H. 2026-11-23 板端部署与验收（已完成）
+
+- 源码已同步到板子（`/root/GenTLite-public`，旧版本备份 `/root/GenTLite-public.prev-20261123`），aarch64 原生构建通过；`vgige-gige.service` / `vgige.service` 均 active 且加载新 XML（27992B）。
+- 板端 NI MAX（Windows 宿主）验收：ENUM 发现板端虚拟 GigE 相机；**Attributes 169 项**；**Compatibility Report 96/96 Pass、0 FAIL**。
+- 板端自动化测试（aarch64）：**247 passed / 0 failed**（gentl-core/gvcp/simulator/gige/u3v + vgige-core/back-null/front-gige/front-u3v）。
+- 2026-11-23 追加：网关虚拟 GigE 前端实现 **GVSP PACKETRESEND**（§16.7 缓存重传 + 能力位广播），重新部署后板端 `/TEST_NETWORK` 由 91 Pass/5 FAIL 变为 **96 Pass / 0 FAIL**。
+- 仍待外部条件：真实 GigE/U3V 相机矩阵、U3V 虚拟相机的 NI 驱动切换（可选）、网关 GVSP resend 缓存（可选增强）。
+
+## I. 2026-11-23 收尾补充（第 20–22 轮）
+
+- **设备事件中继**：网关新增 `MessageRelay` seam；GigE 后端（§12 消息通道/§17 EVENT，原始数据报转发）与 U3V 后端（§4.1.3.3/§5.4.2 DEI 事件 → §17.1.1/§17.2.1 数据报）均已接通；CLI 对任何支持事件的 backend 自动启用虚拟消息通道，无事件后端保持 0 通道（§36.22 诚实声明）。验证：`relay_e2e::device_events_are_relayed_to_the_opened_message_channel` + back-u3v 事件转换单测。
+- **板端 30 分钟长跑**：54000/54000 帧、29.999 fps、0 丢帧、RSS 稳定、服务无重启（第 22 轮）。
+- **本地 NI 复测（最新构建）**：Attributes 169、Compatibility Report 96/96 Pass、0 FAIL。
+- **U3V 板端矩阵**：追加第三方宿主证据 —— Basler pylon 枚举 0 个 U3V 设备，与 NI 不列出、我方 WinUSB `WinUsb_WritePipe: 6` 一致；结论仍是"需要驱动重绑（需授权）/ 干净 Windows 主机 / 真实 U3V 相机"三选一。
+- 验收材料索引：`compliance/README.md`（含复跑命令）；主报告 `compliance/spec-audit/2026-11-gap-closure.md` 第 13 节为最终验收汇总。
+- 事件通道逐事件重传（MCTT/MCRC）v1 取舍见 `OPEN-QUESTIONS.md` Q41。
+
+## J. 2026-11-23 U3V 驱动重绑授权后的排查（第 25 轮）
+
+- 结论：**不需要驱动重绑**——板端 U3V gadget 的 MI_00 已是 libwdi WinUSB 绑定，问题在我们自己的代码。
+- 修复 3 个缺陷：①`gentl-u3v` facade 打开后丢弃 `InterfaceSet` 导致 WinUSB 句柄失效（WritePipe 6 / AV）；②Windows stream 管道误用 cancel-on-timeout（keep_pending 应为 true，解释板端 EPIPE/AIO timeout）；③网关 XmlMerger 对已含 SmartCamera 的下游 XML 重复注入（NI XML 加载失败）。均有单测/回归（270 passed / 0 failed）。
+- 修复后：网关 U3V→GigE 正常启动、XML 通过 GenApi XSD、NI ENUM 出现设备且读到 169 属性。
+- 仍待解决：Windows 从 stream 端点读到 0 长度 transfer（ZLP；AIO/同步同表现），需板端 `send()` 日志 + USB2/SS 描述符对照继续定位。
+
+## K. 2026-11-23 链路/USB 速率排查（第 26 轮）
+
+- 以太网 1Gbps 根因：Windows 网卡高级属性 `*SpeedDuplex` 被固定为 1.0Gbps（板端 r8169/RTL8226B PHY 通告 1000/2500）。需管理员执行 `Set-NetAdapterAdvancedProperty -Name '以太网' -RegistryKeyword '*SpeedDuplex' -DisplayValue '自动侦测'`，预期协商 2.5Gbps（5G 超出板端 PHY）。
+- USB 已确认 SuperSpeed：板端 `/sys/class/udc/fc000000.usb/current_speed = super-speed`，非 USB2 回退。
+- U3V 遗留：新增板端 `VGIGE_U3V_SEND_LOG` / `VGIGE_U3V_MAXBURST` 诊断开关；直连测试期间 stream 端点无发送、主机读 0 长度完成，问题仍在定位（与 USB 速率无关）。
+
+## L. 2026-11-23 2.5G 复核 + U3V 端点定位（第 27 轮）
+
+- 2.5G 已协商成功（Windows LinkSpeed=2.5Gbps，板端 2500Mb/s），实测 TCP **279 MB/s ≈ 2.24 Gbps**。
+- U3V 端点级证据：pyusb 确认 USB 3.2/3 接口/端点齐全；板端 emitter 已提交 leader(52)+payload(512KiB)；主机 WinUSB 在 **event(0x82)/stream(0x83) 关联接口** 的 bulk IN 读取均**立即返回 0 字节**，control(0x81) 正常；RAW/AIO 因素已排除。
+- 结论：问题收敛到 **WinUSB 关联接口 bulk IN 读取**（或 gadget 关联接口 I/O 前置条件）；下一步对照 pylon/NI 驱动行为并核查 `WinUsb_SetCurrentAlternateSetting`/每接口独立 WinUsb_Initialize。
+
+## M. 2026-11-23 U3V 全链路打通（最终）
+
+- 根因与修复：OVERLAPPED 结构体被移动导致完成长度读 0（改 Box）；网关块截止时间误用轮询窗口（改 max(1s)）；`U3vStream::stop()` 未取消遗留读（补 cancel_pending_read）；残留数据导致 leader 失步（drain 后再取消）；失步后整会话 dead（改可恢复 reopen，自动重读 SIRM 适配新几何）；resend 缓存扩到 8 块/256 MiB。
+- 结果：**NI CameraValidator 属性矩阵 96/96 Pass、0 FAIL**（169 属性）；直接 GenTL U3V producer 50/50 帧；网关 U3V→GigE 20/20 帧；270 tests / 0 failed / 0 warning。
+- 板端已重新部署干净构建并重启服务（备份 prev5）。
+- 以太网 2.5 Gbps + USB SuperSpeed 均已确认（实测 TCP 279 MB/s）。
+
