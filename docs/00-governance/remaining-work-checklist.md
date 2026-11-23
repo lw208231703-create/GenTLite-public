@@ -118,3 +118,9 @@
 - 板端已重新部署干净构建并重启服务（备份 prev5）。
 - 以太网 2.5 Gbps + USB SuperSpeed 均已确认（实测 TCP 279 MB/s）。
 
+## N. 2026-11-23 外部 review 复核（GenTL 事件/chunk、PENDING_ACK、网关块访问、LLA）
+
+- 复核结论：review 的 6 组问题中 5 组为真缺陷（另补充发现 GigE EVENT_DATA_VALUE 缺 24 字节标准头），1 组（GenCP 临时超时）为兼容性缺口而非硬性 MUST；EventGetInfo 子结论不成立（已撤回）。
+- 修复：genlt-core 增加 ParsingChunkData + event_id_hex；genlt-gige/u3v 修正 EVENT_DATA_ID/VALUE、EventFlush/Kill、chunk 错误码；gvcp 与 u3v/control 采用 PENDING_ACK time_to_completion；gateway 支持多 word 虚拟寄存器块访问；simulator 强制 LLA 常开。
+- 验证：275 tests / 0 failed / 0 warning；提交 ed1292d、9d5a6d5、00e7984、8bdf600、ddf4452。
+
