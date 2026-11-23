@@ -76,6 +76,7 @@ fn packet_resend_recovers_dropped_payloads_end_to_end() {
             pixel_format: PF,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     // Loss model (§16.7 regression hook): two packets of block 1. At the

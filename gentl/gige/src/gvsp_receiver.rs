@@ -202,6 +202,7 @@ fn frame_meta(l: &ImageLeader) -> FrameMeta {
         padding_x: l.padding_x,
         padding_y: l.padding_y,
         payload_bytes: None,
+        chunk: None,
     }
 }
 
@@ -628,21 +629,54 @@ impl GvspReassembler {
     /// completed block to the engine.
     fn deliver(&mut self, sink: &DsCore, block: &Block, trailer_body: &[u8]) {
         // Trailer sanity: the delivered row count must match the leader,
-        // and — when the pixel format has a known bytes-per-pixel value —
-        // the accumulated payload must reach the expected size (catches
+        // and the accumulated payload must reach the expected size (catches
         // blocks whose tail packets never arrived). Unknown formats cannot
         // be checked this way (Q21).
-        let rows_ok = decode_image_trailer_body(trailer_body)
-            .map(|size_y| size_y == block.leader.size_y)
-            .unwrap_or(false);
-        if !rows_ok {
-            self.stats.malformed += 1;
-        }
-        let size_ok = frame_meta(&block.leader)
-            .payload_bytes()
-            .map(|expected| expected == block.bytes_written)
-            .unwrap_or(true);
-        if !rows_ok || !size_ok {
+        //
+        // Extended chunk mode (§25.1): the payload is the image chunk
+        // (image data padded to 4 bytes, then its 8-byte tag) followed by
+        // chunk data whose length the trailer reports; the block may carry
+        // packet padding after it, so bytes_written may exceed the valid
+        // payload. GenTL then reports the chunk block separately
+        // (§6.3.5.13) instead of folding it into the image payload.
+        let mut chunk = None;
+        let valid = if block.leader.is_extended_chunk() {
+            match decode_image_extended_trailer_body(trailer_body) {
+                Some((size_y, chunk_len, layout_id)) => {
+                    let image_bytes = frame_meta(&block.leader).payload_bytes().unwrap_or(0);
+                    let chunk_start = align4(image_bytes) + 8;
+                    let total_valid = chunk_start + usize::try_from(chunk_len).unwrap_or(0);
+                    if chunk_len > 0 && block.bytes_written >= total_valid {
+                        chunk = Some(gentl_core::ds::ChunkRegion {
+                            offset: chunk_start,
+                            len: chunk_len as usize,
+                            layout_id: u64::from(layout_id),
+                        });
+                    }
+                    (Some(size_y == block.leader.size_y), total_valid)
+                }
+                None => (Some(false), block.bytes_written),
+            }
+        } else {
+            (
+                Some(
+                    decode_image_trailer_body(trailer_body)
+                        .map(|size_y| size_y == block.leader.size_y)
+                        .unwrap_or(false),
+                ),
+                frame_meta(&block.leader).payload_bytes().unwrap_or(block.bytes_written),
+            )
+        };
+        let (rows_ok, valid_bytes) = valid;
+        let size_ok = if block.leader.is_extended_chunk() {
+            block.bytes_written >= valid_bytes
+        } else {
+            frame_meta(&block.leader)
+                .payload_bytes()
+                .map(|expected| expected == block.bytes_written)
+                .unwrap_or(true)
+        };
+        if rows_ok != Some(true) || !size_ok {
             // Gapped/broken blocks are dropped instead of delivering
             // incomplete buffers; the reserved buffer returns to the
             // input pool.
@@ -651,7 +685,8 @@ impl GvspReassembler {
             return;
         }
         let mut meta = frame_meta(&block.leader);
-        meta.payload_bytes = Some(block.bytes_written);
+        meta.payload_bytes = Some(valid_bytes.min(block.bytes_written));
+        meta.chunk = chunk;
         if sink.on_frame(block.block_id, meta, &[]).is_some() {
             self.stats.frames_delivered += 1;
             if block.resend_touched {
@@ -662,9 +697,14 @@ impl GvspReassembler {
     }
 }
 
+/// Round a byte count up to the 4-byte chunk-tag alignment (§24.4: chunk
+/// data is padded so the chunk ID/length tag stays 32-bit aligned).
+fn align4(n: usize) -> usize {
+    (n + 3) & !3
+}
+
 /// Is `id` inside one of the block's missing intervals?
-fn in_gap(block: &Block, id: u32) -> bool {
-    block
+fn in_gap(block: &Block, id: u32) -> bool {    block
         .gaps
         .range(..=id)
         .next_back()
@@ -814,6 +854,7 @@ mod tests {
         let leader = ImageLeader {
             field_id: 0,
             field_count: 0,
+            payload_type: gentl_gvcp::gvsp::PAYLOAD_TYPE_IMAGE,
             timestamp: ts,
             pixel_format: PF,
             size_x: W,
@@ -932,6 +973,7 @@ mod tests {
         let leader_body = encode_image_leader_body_legacy(&ImageLeader {
             field_id: 0,
             field_count: 0,
+            payload_type: gentl_gvcp::gvsp::PAYLOAD_TYPE_IMAGE,
             timestamp: u64::from(pattern_seed),
             pixel_format: PF,
             size_x: W,

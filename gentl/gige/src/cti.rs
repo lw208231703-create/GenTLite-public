@@ -129,6 +129,9 @@ pub struct GevDevice {
     /// (GenTL 1.6 §6.3.4.6: a second open of the same ID is
     /// GC_ERR_RESOURCE_IN_USE).
     pub opened_streams: Mutex<HashSet<String>>,
+    /// Message-channel device events (GenTL `EVENT_REMOTE_DEVICE`): at most
+    /// one module per event type plus the receiver pump (see events.rs).
+    pub events: crate::events::DeviceEvents,
     pub parent: Weak<GevInterface>,
 }
 

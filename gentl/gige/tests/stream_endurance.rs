@@ -49,6 +49,7 @@ fn endurance_100_frames_no_gaps() {
             pixel_format: PF,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     let server = cam.start(0).expect("start sim camera");

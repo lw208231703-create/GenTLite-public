@@ -119,6 +119,7 @@ impl GevDevice {
             stop_heartbeat: stop,
             heartbeat_thread: Mutex::new(Some(thread)),
             opened_streams: Mutex::new(HashSet::new()),
+            events: crate::events::DeviceEvents::default(),
             parent: Arc::downgrade(iface),
         }))
     }
@@ -142,6 +143,9 @@ impl GevDevice {
         if let Some(t) = self.heartbeat_thread.lock().ok().and_then(|mut g| g.take()) {
             let _ = t.join();
         }
+        // Close the message channel before releasing CCP (devices may refuse
+        // message-channel register writes to non-primary applications).
+        self.events.close(&self.client);
         if self.access != DeviceAccess::Monitor {
             if let Ok(c) = self.client.lock() {
                 let _ = c.write_reg(registers::CCP, 0);

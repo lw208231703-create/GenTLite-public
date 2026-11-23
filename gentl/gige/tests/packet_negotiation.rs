@@ -94,6 +94,7 @@ fn packet_size_negotiation_end_to_end() {
             pixel_format: PF,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     let server = cam.start(0).expect("start sim camera");
@@ -279,6 +280,7 @@ fn packet_size_fallback_to_factory_scps_and_restart() {
             pixel_format: PF,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     cam.set_test_packets(false);

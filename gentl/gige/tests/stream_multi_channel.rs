@@ -76,6 +76,7 @@ fn data_stream_two_channel_fanout() {
             pixel_format: PF,
             channels: 2,
             legacy_headers: false,
+            chunk: None,
         },
     );
     let server = cam.start(0).expect("start sim camera");

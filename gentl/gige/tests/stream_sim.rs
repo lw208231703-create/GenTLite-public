@@ -79,6 +79,7 @@ fn data_stream_end_to_end() {
             pixel_format: PF,
             channels: 1,
             legacy_headers: false,
+            chunk: None,
         },
     );
     let server = cam.start(0).expect("start sim camera");
@@ -387,6 +388,92 @@ fn data_stream_end_to_end() {
             GC_ERR_SUCCESS
         );
         assert_eq!(filled, payload_size, "BUFFER_INFO_SIZE_FILLED");
+
+        // GenTL 1.6 completeness: a single-part buffer MUST answer NO_DATA to
+        // the part query (§6.3.5.15), a contiguous buffer has one virtual
+        // segment (§6.3.5.21), and stacked buffer info must round-trip.
+        let mut parts = 99u32;
+        assert_eq!(
+            DSGetNumBufferParts(ds, nd.buffer_handle, &mut parts),
+            GC_ERR_NO_DATA
+        );
+        assert_eq!(parts, 0);
+        let mut segments = 0u32;
+        assert_eq!(
+            DSGetNumBufferSegments(ds, nd.buffer_handle, &mut segments),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(segments, 1);
+        let mut seg_size = 0usize;
+        let mut seg_type: InfoDataType = 0;
+        let mut seg_len = std::mem::size_of::<usize>();
+        assert_eq!(
+            DSGetBufferSegmentInfo(
+                ds,
+                nd.buffer_handle,
+                0,
+                1, /* SEGMENT_INFO_SIZE */
+                &mut seg_type,
+                (&mut seg_size as *mut usize).cast(),
+                &mut seg_len
+            ),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(seg_size, payload_size, "segment covers the whole buffer");
+        let mut seg_incomplete = 1u8;
+        let mut seg_len = 1usize;
+        assert_eq!(
+            DSGetBufferSegmentInfo(
+                ds,
+                nd.buffer_handle,
+                0,
+                2, /* SEGMENT_INFO_IS_INCOMPLETE */
+                &mut seg_type,
+                (&mut seg_incomplete as *mut u8).cast(),
+                &mut seg_len
+            ),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(seg_incomplete, 0);
+        let mut seg_len = std::mem::size_of::<usize>();
+        assert_eq!(
+            DSGetBufferSegmentInfo(
+                ds,
+                nd.buffer_handle,
+                1,
+                1,
+                &mut seg_type,
+                (&mut seg_size as *mut usize).cast(),
+                &mut seg_len
+            ),
+            GC_ERR_INVALID_INDEX,
+            "there is exactly one segment"
+        );
+        let mut stacked_w = 0usize;
+        let mut stacked_h = 0usize;
+        let mut stacked = [
+            DSBufferInfoStacked {
+                i_info_cmd: 10, /* BUFFER_INFO_WIDTH */
+                i_type: 0,
+                p_buffer: (&mut stacked_w as *mut usize).cast(),
+                i_size: std::mem::size_of::<usize>(),
+                i_result: -1,
+            },
+            DSBufferInfoStacked {
+                i_info_cmd: 11, /* BUFFER_INFO_HEIGHT */
+                i_type: 0,
+                p_buffer: (&mut stacked_h as *mut usize).cast(),
+                i_size: std::mem::size_of::<usize>(),
+                i_result: -1,
+            },
+        ];
+        assert_eq!(
+            DSGetBufferInfoStacked(ds, nd.buffer_handle, stacked.as_mut_ptr(), stacked.len()),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(stacked[0].i_result, GC_ERR_SUCCESS);
+        assert_eq!(stacked[1].i_result, GC_ERR_SUCCESS);
+        assert_eq!((stacked_w, stacked_h), (W as usize, H as usize));
         let mut b = 0u8;
         assert_eq!(
             DSGetBufferInfo(ds, nd.buffer_handle, 7, &mut dtype, (&mut b as *mut u8).cast(), &mut size),
@@ -413,6 +500,67 @@ fn data_stream_end_to_end() {
         // Back into the input pool.
         assert_eq!(DSQueueBuffer(ds, nd.buffer_handle), GC_ERR_SUCCESS);
     }
+
+    // -- Port module completeness: stacked access + URL module -------------
+    let mut stacked = [
+        PortRegisterStackEntry {
+            address: u64::from(REG_WIDTH),
+            p_buffer: (&mut w as *mut [u8; 4]).cast(),
+            size: 4,
+        },
+        PortRegisterStackEntry {
+            address: u64::from(REG_HEIGHT),
+            p_buffer: (&mut h as *mut [u8; 4]).cast(),
+            size: 4,
+        },
+    ];
+    unsafe {
+        *stacked[0].p_buffer.cast::<[u8; 4]>() = [0u8; 4];
+        *stacked[1].p_buffer.cast::<[u8; 4]>() = [0u8; 4];
+    }
+    let mut n_entries = stacked.len();
+    assert_eq!(
+        GCReadPortStacked(port_h, stacked.as_mut_ptr(), &mut n_entries),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(n_entries, 2);
+    assert_eq!(u32::from_be_bytes(w), W, "stacked read: width");
+    assert_eq!(u32::from_be_bytes(h), H, "stacked read: height");
+    let mut n_entries = stacked.len();
+    assert_eq!(
+        GCWritePortStacked(port_h, stacked.as_mut_ptr(), &mut n_entries),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(n_entries, 2);
+
+    let mut url_count = 0u32;
+    assert_eq!(GCGetNumPortURLs(port_h, &mut url_count), GC_ERR_SUCCESS);
+    assert_eq!(url_count, 1);
+    let (r, url) = get_string(|s, n| {
+        GCGetPortURLInfo(port_h, 0, 0 /* URL_INFO_URL */, &mut dtype, s as *mut c_void, n)
+    });
+    assert_eq!(r, GC_ERR_SUCCESS);
+    assert!(url.starts_with("local:"), "URL: {url}");
+    let mut scheme = -1i32;
+    let mut size = std::mem::size_of::<i32>();
+    assert_eq!(
+        GCGetPortURLInfo(
+            port_h,
+            0,
+            9, /* URL_INFO_SCHEME */
+            &mut dtype,
+            (&mut scheme as *mut i32).cast(),
+            &mut size
+        ),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(scheme, 0, "URL_SCHEME_LOCAL");
+    let mut size = 1usize;
+    assert_eq!(
+        GCGetPortURLInfo(port_h, 1, 0, &mut dtype, ptr::null_mut(), &mut size),
+        GC_ERR_INVALID_ID,
+        "only one URL exists"
+    );
 
     // -- Teardown -----------------------------------------------------------
     assert_eq!(DSStopAcquisition(ds, 0), GC_ERR_SUCCESS);
