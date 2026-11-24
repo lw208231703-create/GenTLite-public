@@ -132,3 +132,9 @@
 - 待办：宿主机 NI-IMAQ 驱动异常（niimaqk.sys 缺失、NIPALK 加载失败），需重启/修复 NI 安装后重跑 NI 矩阵（本机环境问题，已在 compliance §23 记录）。
 - 提交：5519b08、8232d88、ddb7993、422985d、434a1cf。
 
+## P. 2026-11-24 第三轮 review 复核（虚拟 U3V 严格性）
+
+- 两项均为真缺陷：全零传输几何被接受（应为 U3V_STATUS_SI_REGISTERS_INCONSISTENT）、SIRM 快照未覆盖全部 RW* 字段。
+- 修复：Stream Enable 前置校验（required leader/trailer、payload capacity、Standard 模式、对齐）且失败不锁存；快照扩展为 7 个 RW* 字段；emitter fail-closed。
+- 验证：286 tests / 0 failed / 0 warnings；板端 GenTL U3V producer 20/20 帧（2,621,440 B/帧）。
+
