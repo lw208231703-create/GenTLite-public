@@ -28,6 +28,13 @@ pub trait DeviceHandler: Send + 'static {
     /// Read one 32-bit register. Err(status) is a GEV status code.
     fn read_reg(&self, addr: u32) -> Result<u32, u16>;
 
+    /// Peer-aware register read. Devices implementing primary/secondary
+    /// access rules (GigE Vision 10.1) override this; the default keeps the
+    /// peer-independent behavior.
+    fn read_reg_from(&self, _peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+        self.read_reg(addr)
+    }
+
     /// Write one 32-bit register. Err(status) is a GEV status code.
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16>;
 
@@ -47,10 +54,20 @@ pub trait DeviceHandler: Send + 'static {
     /// GEV status code. Must succeed atomically (all bytes or error).
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16>;
 
+    /// Peer-aware memory read (access rules, GigE Vision 10.1).
+    fn read_mem_from(&self, _peer: SocketAddr, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+        self.read_mem(addr, count)
+    }
+
     /// Write bytes at `addr` to device memory. Devices without WRITEMEM
     /// support keep the default NOT_IMPLEMENTED response.
     fn write_mem(&self, _addr: u32, _data: &[u8]) -> Result<(), u16> {
         Err(GEV_STATUS_NOT_IMPLEMENTED)
+    }
+
+    /// Peer-aware memory write (access rules, GigE Vision 10.1).
+    fn write_mem_from(&self, _peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.write_mem(addr, data)
     }
 
     /// PACKETRESEND_CMD (§16.7): retransmit the given packet-id range of
@@ -165,24 +182,20 @@ fn serve_loop<H: DeviceHandler>(
                         // 16.3.1: the address list entries are 32-bit aligned.
                         if addr % 4 != 0 {
                             status = GEV_STATUS_BAD_ALIGNMENT;
-                            values.clear();
                             break;
                         }
-                        match handler.read_reg(addr) {
+                        match handler.read_reg_from(peer, addr) {
                             Ok(v) => values.extend_from_slice(&v.to_be_bytes()),
                             Err(s) => {
                                 status = s;
-                                values.clear();
                                 break;
                             }
                         }
                     }
                 }
-                let len = if status == GEV_STATUS_SUCCESS {
-                    values.len()
-                } else {
-                    0
-                };
+                // R-165cd: the acknowledge length reflects the registers
+                // that were successfully read, even on a later failure.
+                let len = values.len();
                 AckHeader::new(status, READREG_ACK, len as u16, cmd.req_id).encode(&mut ack);
                 out.extend_from_slice(&ack);
                 out.extend_from_slice(&values);
@@ -222,7 +235,7 @@ fn serve_loop<H: DeviceHandler>(
                     } else if count == 0 || count % 4 != 0 {
                         status = GEV_STATUS_BAD_ALIGNMENT;
                     } else {
-                        match handler.read_mem(addr, count) {
+                        match handler.read_mem_from(peer, addr, count) {
                             Ok(d) => {
                                 data.extend_from_slice(&addr.to_be_bytes());
                                 data.extend_from_slice(&d);
@@ -238,29 +251,37 @@ fn serve_loop<H: DeviceHandler>(
             }
             WRITEMEM_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
-                let mut addr = 0u32;
+                let addr = if payload_in.len() >= 8 {
+                    u32::from_be_bytes([payload_in[0], payload_in[1], payload_in[2], payload_in[3]])
+                } else {
+                    0
+                };
+                let mut written = 0u32;
                 if payload_in.len() < 8 {
                     status = GEV_STATUS_INVALID_PARAMETER;
                 } else if (payload_in.len() - 4) % 4 != 0 {
                     // R-188cd: a WRITEMEM length that is not a multiple of 4
                     // MUST answer BAD_ALIGNMENT.
                     status = GEV_STATUS_BAD_ALIGNMENT;
-                } else {
-                    addr = u32::from_be_bytes([payload_in[0], payload_in[1], payload_in[2], payload_in[3]]);
+                } else if addr % 4 != 0 {
                     // R-189c: an unaligned start address MUST answer
                     // BAD_ALIGNMENT.
-                    if addr % 4 != 0 {
-                        status = GEV_STATUS_BAD_ALIGNMENT;
-                    } else if let Err(s) = handler.write_mem(addr, &payload_in[4..]) {
-                        status = s;
-                    }
+                    status = GEV_STATUS_BAD_ALIGNMENT;
+                } else if let Err(s) = handler.write_mem_from(peer, addr, &payload_in[4..]) {
+                    status = s;
+                } else {
+                    written = payload_in.len() as u32 - 4;
                 }
-                let len = if status == GEV_STATUS_SUCCESS { 4 } else { 0 };
-                AckHeader::new(status, WRITEMEM_ACK, len, cmd.req_id).encode(&mut ack);
+                // R-193c/R-194cd: the WRITEMEM_ACK SCD is reserved u16 +
+                // index u16. On success index = bytes written; on failure it
+                // is the 0-based byte index where the error occurred (our
+                // device handlers fail atomically, i.e. index 0).
+                let index = if status == GEV_STATUS_SUCCESS { written as u16 } else { 0 };
+                let mut scd = [0u8; 4];
+                scd[2..4].copy_from_slice(&index.to_be_bytes());
+                AckHeader::new(status, WRITEMEM_ACK, 4, cmd.req_id).encode(&mut ack);
                 out.extend_from_slice(&ack);
-                if status == GEV_STATUS_SUCCESS {
-                    out.extend_from_slice(&addr.to_be_bytes());
-                }
+                out.extend_from_slice(&scd);
             }
             // PACKETRESEND (§16.7): fire-and-forget — CR-198ca forbids the
             // ACKNOWLEDGE flag and CR-201cd defines no PACKETRESEND_ACK,
@@ -348,7 +369,10 @@ mod tests {
             }
         }
 
-        fn read_reg(&self, _addr: u32) -> Result<u32, u16> {
+        fn read_reg(&self, addr: u32) -> Result<u32, u16> {
+            if addr == 0x0020_0000 {
+                return Err(GEV_STATUS_INVALID_ADDRESS);
+            }
             Ok(0x1122_3344)
         }
 
@@ -358,6 +382,16 @@ mod tests {
 
         fn read_mem(&self, _addr: u32, count: u16) -> Result<Vec<u8>, u16> {
             Ok(vec![0u8; count as usize])
+        }
+
+        fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+            if addr == 0x0020_0000 {
+                return Err(GEV_STATUS_INVALID_ADDRESS);
+            }
+            if data.len() > 64 {
+                return Err(GEV_STATUS_BAD_ALIGNMENT);
+            }
+            Ok(())
         }
     }
 
@@ -406,5 +440,51 @@ mod tests {
         payload[..4].copy_from_slice(&0x48u32.to_be_bytes());
         let reply = exchange(&server, READMEM_CMD, &payload);
         assert_eq!(ack_status(&reply), GEV_STATUS_SUCCESS);
+    }
+
+    /// R-193c/R-194cd: WRITEMEM_ACK is reserved u16 + index u16; on success
+    /// index is the number of bytes written.
+    #[test]
+    fn writemem_ack_carries_written_byte_count() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+        payload[4..].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let reply = exchange(&server, WRITEMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_SUCCESS);
+        assert_eq!(
+            &reply[HEADER_LEN..],
+            &[0, 0, 0, 4],
+            "reserved=0, index=bytes written"
+        );
+    }
+
+    /// R-194cd: a failed write reports index 0 (the failing byte offset).
+    #[test]
+    fn failed_writemem_ack_reports_error_index() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x0020_0000u32.to_be_bytes());
+        payload[4..].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let reply = exchange(&server, WRITEMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_INVALID_ADDRESS);
+        assert_eq!(&reply[HEADER_LEN..], &[0, 0, 0, 0]);
+    }
+
+    /// R-165cd: a multi-register READREG keeps the registers read before the
+    /// failing one and reports them in the acknowledge length.
+    #[test]
+    fn readreg_partial_success_keeps_earlier_values() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x40u32.to_be_bytes());
+        payload[4..].copy_from_slice(&0x0020_0000u32.to_be_bytes());
+        let reply = exchange(&server, READREG_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_INVALID_ADDRESS);
+        assert_eq!(
+            &reply[HEADER_LEN..],
+            &0x1122_3344u32.to_be_bytes(),
+            "the first register is still reported"
+        );
     }
 }

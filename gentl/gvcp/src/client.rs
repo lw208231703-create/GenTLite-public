@@ -199,10 +199,13 @@ impl GvcpClient {
         if status != GEV_STATUS_SUCCESS {
             return Err(GentlError::GevStatus(status));
         }
-        let ack_addr = decode_writemem_ack_payload(&datagram[HEADER_LEN..])
+        let (_reserved, index) = decode_writemem_ack_payload(&datagram[HEADER_LEN..])
             .ok_or_else(|| GentlError::Io("malformed WRITEMEM_ACK".into()))?;
-        if ack_addr != addr {
-            return Err(GentlError::Io("WRITEMEM_ACK address mismatch".into()));
+        if usize::from(index) != data.len() {
+            return Err(GentlError::Io(format!(
+                "WRITEMEM_ACK index {index} != written bytes {}",
+                data.len()
+            )));
         }
         Ok(())
     }

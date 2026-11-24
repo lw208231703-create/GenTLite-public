@@ -368,13 +368,18 @@ pub fn encode_writemem_cmd_payload(addr: u32, data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// WRITEMEM_ACK payload (§16.6.2): the written start address echoed back
-/// (R-190cd lets the application match the ack).
-pub fn decode_writemem_ack_payload(payload: &[u8]) -> Option<u32> {
+/// WRITEMEM_ACK SCD (§16.6.2 Figure 16-12, R-193c/R-194cd): a reserved
+/// u16 followed by `index`. On success `index` is the number of bytes
+/// successfully written; on failure it is the 0-based byte index where the
+/// error occurred.
+pub fn decode_writemem_ack_payload(payload: &[u8]) -> Option<(u16, u16)> {
     if payload.len() < 4 {
         return None;
     }
-    Some(u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]))
+    Some((
+        u16::from_be_bytes([payload[0], payload[1]]),
+        u16::from_be_bytes([payload[2], payload[3]]),
+    ))
 }
 
 pub fn encode_readmem_cmd_payload(addr: u32, count: u16) -> [u8; 8] {
@@ -633,8 +638,9 @@ mod tests {
         assert_eq!(&p[0..4], &0x2000_0100u32.to_be_bytes());
         assert_eq!(&p[4..], &data);
         assert_eq!(
-            decode_writemem_ack_payload(&0x2000_0100u32.to_be_bytes()),
-            Some(0x2000_0100)
+            decode_writemem_ack_payload(&[0, 0, 0x10, 0x00]),
+            Some((0, 0x1000)),
+            "reserved then index"
         );
         assert_eq!(decode_writemem_ack_payload(&[0, 0]), None);
     }
