@@ -38,6 +38,9 @@ struct EventPump {
 
 #[derive(Default)]
 pub struct DeviceEvents {
+    /// Serializes register/unregister/close so check+insert+pump start is
+    /// atomic with respect to concurrent callers (GenTL 6.3.7.1).
+    lifecycle: Mutex<()>,
     modules: Arc<Mutex<HashMap<EventType, Arc<DeviceEventModule>>>>,
     pump: Mutex<Option<EventPump>>,
 }
@@ -47,6 +50,11 @@ impl DeviceEvents {
         if event_type != gentl_core::types::EVENT_REMOTE_DEVICE {
             return Err(GentlError::NotImplemented("device event type"));
         }
+        let _lifecycle = device
+            .events
+            .lifecycle
+            .lock()
+            .map_err(|_| GentlError::Io("events lifecycle lock poisoned".into()))?;
         let module = {
             let mut modules = device.events.modules.lock().map_err(|_| GentlError::Io("events lock poisoned".into()))?;
             if modules.contains_key(&event_type) {
@@ -127,6 +135,10 @@ impl DeviceEvents {
     }
 
     pub fn unregister(&self, event_type: EventType) -> GentlResult<()> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| GentlError::Io("events lifecycle lock poisoned".into()))?;
         let module = self
             .modules
             .lock()
@@ -138,6 +150,10 @@ impl DeviceEvents {
     }
 
     pub fn close(&self, device: &U3vDevice) {
+        let _lifecycle = match self.lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
         if let Ok(modules) = self.modules.lock() {
             for module in modules.values() {
                 module.queue.mark_dead();

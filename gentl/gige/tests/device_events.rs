@@ -237,6 +237,52 @@ fn gige_device_events_flow_over_the_message_channel() {
         "the event module's queue is dead after unregister"
     );
 
+    // -- Concurrent registration: exactly one caller wins ------------------
+    // GenTL 6.3.7.1: one registration per module/event type. The check and
+    // insert run under one lifecycle lock, so N racing registrations must
+    // yield exactly one success and N-1 GC_ERR_RESOURCE_IN_USE (no duplicate
+    // handles, no overwritten module entry).
+    let dev_addr = dev as usize;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let dev = dev_addr as DevHandle;
+                let mut h: EventHandle = ptr::null_mut();
+                let r = GCRegisterEvent(dev, EVENT_REMOTE_DEVICE, &mut h);
+                tx.send((r, h as usize)).unwrap();
+            });
+        }
+        drop(tx);
+    });
+    let results: Vec<(GCError, usize)> = rx.iter().collect();
+    assert_eq!(results.len(), 8);
+    assert_eq!(
+        results.iter().filter(|(r, _)| *r == GC_ERR_SUCCESS).count(),
+        1,
+        "exactly one concurrent registration succeeds"
+    );
+    assert_eq!(
+        results
+            .iter()
+            .filter(|(r, _)| *r == GC_ERR_RESOURCE_IN_USE)
+            .count(),
+        7,
+        "the losing registrations answer GC_ERR_RESOURCE_IN_USE"
+    );
+    let winner = results
+        .iter()
+        .find(|(r, _)| *r == GC_ERR_SUCCESS)
+        .map(|(_, h)| *h)
+        .unwrap();
+    assert_ne!(winner, 0, "the winner got a usable event handle");
+    assert_eq!(
+        GCUnregisterEvent(dev, EVENT_REMOTE_DEVICE),
+        GC_ERR_SUCCESS,
+        "the concurrent registration can be unregistered"
+    );
+
     assert_eq!(DevClose(dev), GC_ERR_SUCCESS);
     assert_eq!(IFClose(iface), GC_ERR_SUCCESS);
     assert_eq!(TLClose(tl), GC_ERR_SUCCESS);

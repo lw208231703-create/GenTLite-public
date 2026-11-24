@@ -50,6 +50,9 @@ struct EventPump {
 /// event type (GenTL 1.6 §6.3.7.1) and the shared message-channel pump.
 #[derive(Default)]
 pub struct DeviceEvents {
+    /// Serializes the register/unregister/close lifecycle so the
+    /// check-and-insert and the event-pump start/stop are one atomic step.
+    lifecycle: Mutex<()>,
     modules: Arc<Mutex<HashMap<EventType, Arc<DeviceEventModule>>>>,
     pump: Mutex<Option<EventPump>>,
 }
@@ -66,6 +69,13 @@ impl DeviceEvents {
         if event_type != EVENT_REMOTE_DEVICE {
             return Err(GentlError::NotImplemented("device event type"));
         }
+        // GenTL 6.3.7.1: one registration per module and event type. The
+        // lifecycle guard keeps check+insert+start_pump atomic with respect
+        // to a concurrent register/unregister.
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| GentlError::Io("events lifecycle lock poisoned".into()))?;
         let module = {
             let mut modules = self
                 .modules
@@ -97,6 +107,10 @@ impl DeviceEvents {
         client: &Arc<Mutex<GvcpClient>>,
         event_type: EventType,
     ) -> GentlResult<()> {
+        let _lifecycle = self
+            .lifecycle
+            .lock()
+            .map_err(|_| GentlError::Io("events lifecycle lock poisoned".into()))?;
         let module = self
             .modules
             .lock()
@@ -110,6 +124,10 @@ impl DeviceEvents {
 
     /// Stop the pump and drop every module (device close path).
     pub fn close(&self, client: &Arc<Mutex<GvcpClient>>) {
+        let _lifecycle = match self.lifecycle.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
         self.stop_pump(client);
         if let Ok(mut modules) = self.modules.lock() {
             for module in modules.values() {
