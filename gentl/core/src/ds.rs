@@ -125,6 +125,11 @@ pub struct DsBuffer {
     pub new_data: bool,
     /// `BUFFER_INFO_SIZE_FILLED`.
     pub filled_size: usize,
+    /// `BUFFER_INFO_DATA_SIZE`: size of the data intended for the buffer.
+    /// For a deliberately delivered incomplete frame this is the original
+    /// complete size including the lost parts (GenTL 1.6 6.3.4.2), not the
+    /// number of bytes that happened to arrive.
+    pub data_size: usize,
     /// `BUFFER_INFO_IS_INCOMPLETE`.
     pub incomplete: bool,
     /// Frame metadata of the last fill, if any.
@@ -160,7 +165,10 @@ impl DsBuffer {
     fn reset_for_queue(&mut self) {
         self.state = BufferState::Queued;
         self.filled_size = 0;
+        self.data_size = 0;
         self.new_data = false;
+        self.incomplete = false;
+        self.meta = None;
     }
 }
 
@@ -382,6 +390,7 @@ impl DsCore {
             state: BufferState::Announced,
             new_data: false,
             filled_size: 0,
+            data_size: 0,
             incomplete: false,
             meta: None,
             block_id: 0,
@@ -715,6 +724,8 @@ impl FrameSink for DsCore {
             // count is defined by the frame metadata.
             b.filled_size = meta.payload_bytes().unwrap_or(0).min(b.size());
         }
+        // A complete frame: the intended and filled sizes coincide.
+        b.data_size = b.filled_size;
         b.state = BufferState::Filled;
         b.new_data = true;
         b.meta = Some(meta);
@@ -733,6 +744,11 @@ impl FrameSink for DsCore {
         };
         let b = p.find_mut(id).expect("in-flight id");
         if incomplete_to_output {
+            // DATA_SIZE keeps the original complete size (including the lost
+            // parts) while SIZE_FILLED stays the number of bytes actually
+            // received. Expected size was recorded when the block's leader
+            // was parsed (STREAM_INFO_PAYLOAD_SIZE bookkeeping).
+            b.data_size = self.expected_payload_size();
             b.state = BufferState::Filled;
             b.new_data = true;
             b.incomplete = true;
@@ -740,7 +756,7 @@ impl FrameSink for DsCore {
             drop(p);
             self.push_event(id);
         } else {
-            b.state = BufferState::Queued;
+            b.reset_for_queue();
             p.input.push_back(id);
         }
     }
@@ -956,14 +972,17 @@ mod tests {
         assert_eq!(core.queued_count(), 1);
         assert_eq!(core.await_delivery_count(), 0);
 
-        // Incomplete abort (kill): to the output queue, flagged.
+        // Incomplete abort (kill): to the output queue, flagged, and
+        // DATA_SIZE keeps the intended complete size (GenTL 1.6 6.3.4.2).
         let _t = core.begin_frame(64).unwrap();
+        core.set_expected_payload_size(64);
         core.abort_frame(true);
         assert_eq!(core.queued_count(), 0);
         assert_eq!(core.await_delivery_count(), 1);
         core.with_buffer(b0, |b| {
             assert_eq!(b.state, BufferState::Filled);
             assert!(b.incomplete);
+            assert_eq!(b.data_size, 64, "DATA_SIZE is the original frame size");
         }).unwrap();
         // Abort with nothing in flight is a no-op.
         core.abort_frame(false);

@@ -1182,9 +1182,15 @@ mod tests {
         r.abandon_block(&core, true);
         assert!(!r.has_in_flight());
         assert_eq!(core.await_delivery_count(), 1, "kill: incomplete to output");
+        let expected = core.expected_payload_size();
+        assert!(expected > 0, "the leader recorded the frame size");
         core.with_buffer(core.buffer_id_at(0).unwrap(), |b| {
             assert!(b.incomplete);
             assert_eq!(b.state, BufferState::Filled);
+            assert_eq!(
+                b.data_size, expected,
+                "DATA_SIZE reports the complete frame, including the lost block tail"
+            );
         })
         .unwrap();
         // Return the buffer to the input pool, then a fresh frame works.

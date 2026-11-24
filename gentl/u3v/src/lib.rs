@@ -1695,6 +1695,7 @@ pub extern "C" fn DSGetBufferID(
 
 /// One buffer's engine state, copied out of the pool for the info match.
 struct BufferSnapshot {
+    data_size: usize,
     base: *mut core::ffi::c_void,
     user_ptr: *mut core::ffi::c_void,
     size: usize,
@@ -1735,6 +1736,7 @@ pub extern "C" fn DSGetBufferInfo(
             state: b.state,
             new_data: b.new_data,
             filled_size: b.filled_size,
+            data_size: b.data_size,
             incomplete: b.incomplete,
             meta: b.meta,
             block_id: b.block_id,
@@ -1894,7 +1896,7 @@ pub extern "C" fn DSGetBufferInfo(
                     INFO_DATATYPE_SIZET,
                     p_buffer,
                     pi_size,
-                    &snap.filled_size,
+                    &snap.data_size,
                 ),
                 BUFFER_INFO_TIMESTAMP_NS => match need_meta(&snap) {
                     Ok(m) => {
@@ -1950,6 +1952,7 @@ pub extern "C" fn DSGetBufferChunkData(
             state: b.state,
             new_data: b.new_data,
             filled_size: b.filled_size,
+            data_size: b.data_size,
             incomplete: b.incomplete,
             meta: b.meta,
             block_id: b.block_id,
@@ -2860,6 +2863,7 @@ pub extern "C" fn DSGetBufferSegmentInfo(
             state: b.state,
             new_data: b.new_data,
             filled_size: b.filled_size,
+            data_size: b.data_size,
             incomplete: b.incomplete,
             meta: b.meta,
             block_id: b.block_id,
