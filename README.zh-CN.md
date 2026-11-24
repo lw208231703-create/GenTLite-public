@@ -15,8 +15,10 @@ Rust 实现，C ABI，MIT 许可。
 - GigE Vision（GVCP/GVSP，规范 3.0 / 1.2）与 USB3 Vision（GenCP
   1.3.1，规范 1.2）传输层实现
 - GenTL 1.6 C ABI——64 个导出函数；GVSP 零拷贝采集，U3V 分段重组采集
-- 全部 273 个 PFNC 像素格式；相机参数经相机自带 GenICam XML 调节；
-  Chunk、Buffer Parts 等可选能力按需实现
+- 可识别全部 273 个 PFNC 像素格式并计算非 planar 子集的 payload 尺寸
+  （planar 格式需要 GenTL Buffer Parts，当前未实现）；相机参数经相机自带
+  GenICam XML 调节；Chunk 已实现，Buffer Parts / Composite / Buffer-Stacks
+  返回 NOT_IMPLEMENTED
 
 ## 快速开始
 

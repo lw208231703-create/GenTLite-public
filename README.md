@@ -17,8 +17,10 @@ Written in Rust, C ABI, MIT licensed.
   spec 1.2) transport implementations
 - GenTL 1.6 C ABI — 64 entry points; zero-copy GVSP acquisition and
   segmented U3V reassembly
-- All 273 PFNC pixel formats; camera parameters via the camera's own
-  GenICam XML; optional Chunk and Buffer Parts features are implemented on demand
+- Recognition of all 273 PFNC pixel formats and payload-size computation for
+  the non-planar subset (planar formats need GenTL Buffer Parts, which are not
+  implemented); camera parameters via the camera's own GenICam XML; Chunk is
+  implemented, Buffer Parts / Composite / Buffer-Stacks report NOT_IMPLEMENTED
 
 ## Quick start
 

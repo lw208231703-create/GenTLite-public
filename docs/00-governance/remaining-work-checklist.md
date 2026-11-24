@@ -151,3 +151,9 @@
 - FORCEIP 非零地址：确认是已知强制条款缺口（Q40），在 compliance §26.1 明确列为"不支持"，不再宣称 relay front 全条款通过。
 - 验证：291 tests / 0 failed / 0 warnings；板端 GVCP UserSet/ROI 实测 + 服务重启持久化实测。
 
+## S. 2026-11-24 第六轮 review 复核（GVCP/U3V/GenTL）
+
+- 真缺陷 10 组已修：WRITEMEM_ACK 语义（双向）、GVCP 主/次权限与 EA↔CA 切换、R-072cd 控制通道释放清理、U3V 高位地址溢出、模拟器 1x 心跳、READREG 部分成功、U3V CommandResend、GCCloseLib/初始化门禁、stacked 查询语义、Current Speed 错误兜底；README 能力表述同步修正。
+- FORCEIP 非零地址仍是已记录的强制缺口（§26.1/Q40），不实现宿主 NIC 重绑定。
+- 验证：299 tests / 0 failed / 0 warnings；板端 GVCP ACK/权限/清理与 U3V 边界实测通过。
+
