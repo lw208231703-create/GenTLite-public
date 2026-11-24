@@ -341,24 +341,40 @@ impl RegisterFile {
             if !r.writable {
                 return Err(packets::GENCP_WRITE_PROTECT);
             }
+            if data.is_empty() {
+                return Ok(());
+            }
             if r.base == SIRM_BASE {
-                // R-72cd: read-only SIRM registers must reject writes even
-                // though the region as a whole is writable.
+                // R-72cd at byte granularity: GenCP WRITEMEM start/length are
+                // byte aligned (GenCP 4.4.1), so a 1..3-byte register write
+                // must merge with the existing bytes rather than index past
+                // the payload. Any read-only byte rejects the whole write.
                 let start = addr - SIRM_BASE;
-                let mut off = 0;
-                while off < len {
-                    if !sirm_offset_writable(start + off) {
+                for byte in 0..len {
+                    if !sirm_byte_writable(start + byte) {
                         return Err(packets::GENCP_WRITE_PROTECT);
                     }
-                    off += 4;
                 }
             }
             // 5.4.1.2: validate a 0->1 Stream Enable before the control
             // register is written, so a rejected enable leaves it at 0.
             let si_lo = SIRM_BASE + packets::sirm::SI_CONTROL;
-            let control_word = if r.base == SIRM_BASE && addr <= si_lo && addr + len > si_lo {
-                let off = (si_lo - addr) as usize;
-                let word = u32::from_le_bytes(data[off..off + 4].try_into().expect("u32"));
+            let si_hi = si_lo + 4;
+            let control_word = if r.base == SIRM_BASE && addr < si_hi && addr + len > si_lo {
+                // Merge the (possibly partial) write with the current
+                // register; a 1..3-byte write must not index past `data`.
+                let mut word = [0u8; 4];
+                {
+                    let m = r.mem.lock().expect("region lock");
+                    let off = (si_lo - r.base) as usize;
+                    word.copy_from_slice(&m[off..off + 4]);
+                }
+                let from = addr.max(si_lo);
+                let to = (addr + len).min(si_hi);
+                for a in from..to {
+                    word[(a - si_lo) as usize] = data[(a - addr) as usize];
+                }
+                let word = u32::from_le_bytes(word);
                 if word & !packets::sirm::CONTROL_STREAM_ENABLE != 0 {
                     return Err(packets::GENCP_INVALID_PARAMETER);
                 }
@@ -508,23 +524,21 @@ fn put_str(out: &mut Vec<u8>, s: &str, len: usize) {
     out.resize(out.len() + (len - bytes.len().min(len)), 0);
 }
 
-/// Build the device-local regions (ABRM/manifest/SBRM/XML/SIRM).
-/// SIRM offsets whose access type is RW or RW* (U3V 1.2 Table 5-2).
-/// Everything else in the SIRM is read-only and must reject writes
-/// (R-72cd).
-fn sirm_offset_writable(off: u64) -> bool {
+/// Byte-level SIRM write permission: every byte of an RW/RW* register is
+/// writable, every other byte is read-only and rejects the whole write
+/// (R-72cd). Byte granularity matters because GenCP WRITEMEM lengths are
+/// byte aligned (GenCP 4.4.1), so partial register writes are legal.
+fn sirm_byte_writable(off: u64) -> bool {
     use packets::sirm::*;
-    matches!(
-        off,
-        SI_CONTROL
-            | SI_MAX_LEADER_SIZE
-            | SI_PAYLOAD_TRANSFER_SIZE
-            | SI_PAYLOAD_TRANSFER_COUNT
-            | SI_PAYLOAD_FINAL1_SIZE
-            | SI_PAYLOAD_FINAL2_SIZE
-            | SI_MAX_TRAILER_SIZE
-            | SI_PAYLOAD_MODE
-    )
+    let within = |base: u64| off >= base && off < base + 4;
+    within(SI_CONTROL)
+        || within(SI_MAX_LEADER_SIZE)
+        || within(SI_PAYLOAD_TRANSFER_SIZE)
+        || within(SI_PAYLOAD_TRANSFER_COUNT)
+        || within(SI_PAYLOAD_FINAL1_SIZE)
+        || within(SI_PAYLOAD_FINAL2_SIZE)
+        || within(SI_MAX_TRAILER_SIZE)
+        || within(SI_PAYLOAD_MODE)
 }
 
 /// [R-58cd] current link speed as the SBRM expects it: the same bit layout
@@ -1046,5 +1060,111 @@ mod tests {
         assert!(rf.stream_enabled());
         assert!(enabled.load(Ordering::SeqCst));
         assert_eq!(rf.stream_geometry(), (2048, 1, 1024, 0));
+    }
+
+    /// GenCP WRITEMEM is byte aligned (GenCP 4.4.1): partial SI_CONTROL
+    /// writes must merge with the register and never index past the payload.
+    #[test]
+    fn partial_si_control_writes_merge_without_panicking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        let enabled = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = enabled.clone();
+        rf.set_stream_watcher(move |on| flag.store(on, Ordering::SeqCst));
+        let si = SIRM_BASE + packets::sirm::SI_CONTROL;
+        let write = |bytes: &[u8]| rf.write(si, bytes);
+        let read_control = || {
+            let mut b = [0u8; 4];
+            rf.read(si, &mut b).unwrap();
+            u32::from_le_bytes(b)
+        };
+
+        // 1-byte enable with an unprogrammed geometry: rejected, no panic,
+        // enable bit does not latch.
+        assert_eq!(
+            write(&[1]),
+            Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT)
+        );
+        assert_eq!(read_control(), 0);
+        assert!(!rf.stream_enabled());
+        assert!(!enabled.load(Ordering::SeqCst));
+
+        // Partial writes merge with the existing register.
+        program_valid_geometry(&rf);
+        assert_eq!(write(&[1]), Ok(()), "1-byte enable");
+        assert!(rf.stream_enabled());
+        assert_eq!(read_control(), 1);
+        assert_eq!(write(&[0]), Ok(()), "1-byte disable");
+        assert!(!rf.stream_enabled());
+        assert_eq!(read_control(), 0);
+        assert_eq!(write(&[1, 0]), Ok(()), "2-byte enable");
+        assert!(rf.stream_enabled());
+        assert_eq!(write(&[0, 0, 0]), Ok(()), "3-byte disable");
+        assert!(!rf.stream_enabled());
+
+        // Reserved bits are rejected even in a partial write.
+        assert_eq!(
+            write(&[0, 1]),
+            Err(packets::GENCP_INVALID_PARAMETER),
+            "byte 1 is reserved"
+        );
+
+        // A write that crosses into the read-only next register is rejected.
+        assert_eq!(
+            rf.write(si + 2, &[0, 0, 0, 0]),
+            Err(packets::GENCP_WRITE_PROTECT)
+        );
+        // A partial write into a read-only register is rejected too.
+        assert_eq!(
+            rf.write(SIRM_BASE + packets::sirm::SI_INFO + 1, &[0]),
+            Err(packets::GENCP_WRITE_PROTECT)
+        );
+    }
+
+    /// Partial writes to an RW* geometry register merge byte-wise and become
+    /// the value captured by the next Stream Enable.
+    #[test]
+    fn partial_rw_star_writes_merge_before_stream_enable() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        let put = |off: u64, v: u32| {
+            rf.write(SIRM_BASE + off, &v.to_le_bytes()).unwrap();
+        };
+        put(
+            packets::sirm::SI_MAX_LEADER_SIZE,
+            packets::IMAGE_LEADER_LEN as u32,
+        );
+        put(
+            packets::sirm::SI_MAX_TRAILER_SIZE,
+            packets::IMAGE_TRAILER_LEN as u32,
+        );
+        // 4096 written as two 2-byte pieces of the transfer size register.
+        rf.write(
+            SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE,
+            &[0x00, 0x10],
+        )
+        .unwrap();
+        rf.write(
+            SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE + 2,
+            &[0x00, 0x00],
+        )
+        .unwrap();
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 1);
+        rf.write(
+            SIRM_BASE + packets::sirm::SI_CONTROL,
+            &[packets::sirm::CONTROL_STREAM_ENABLE as u8],
+        )
+        .unwrap();
+        assert!(rf.stream_enabled());
+        assert_eq!(rf.stream_geometry(), (4096, 1, 0, 0));
+        let mut ts = [0u8; 4];
+        rf.read(SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, &mut ts)
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(ts), 4096);
     }
 }
