@@ -300,7 +300,7 @@ fn main() {
             Arc::new(Mutex::new(back))
         }
         #[cfg(feature = "back-null")]
-        BackKind::Null => Arc::new(Mutex::new(vgige_back_null::NullBack::new())),
+        BackKind::Null => Arc::new(Mutex::new(vgige_back_null::NullBack::persistent_default())),
         #[cfg(feature = "back-u3v")]
         BackKind::U3v => Arc::new(Mutex::new(U3vBack::open(&args.down).unwrap_or_else(|e| {
             eprintln!("vgige: opening the U3V camera {}: {e}", args.down);

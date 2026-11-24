@@ -7,7 +7,12 @@
 //!
 //! Parameter model:
 //! - Width/Height/OffsetX/OffsetY, ExposureTimeAbs, Gain and FrameRate
-//!   are writable and clamped to the XML ranges; unknown writes are no-ops.
+//!   are writable and clamped to the XML ranges and to the virtual sensor
+//!   (Width/Height + Offset must stay inside 4096x4096); unknown writes are
+//!   no-ops.
+//! - SFNC UserSetControl: Default loads factory settings, UserSet1 is saved
+//!   and restored, UserSetDefault is honoured by DeviceReset/power-up, and
+//!   `UserSetSave` is non-volatile (state file, see `persistent_default`).
 //! - The frame source crops the test pattern from the current ROI and
 //!   reports the corresponding payload size.
 //! - The built-in XML is little-endian: the null demo targets the U3V
@@ -17,6 +22,7 @@
 //! - The XML deliberately carries NO SmartCamera group: the gateway's
 //!   XmlMerger injects it on top, exactly like a real camera's XML.
 
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -537,6 +543,9 @@ pub struct NullBack {
     /// Saved feature set for SFNC `UserSet1` (UserSetSave/UserSetLoad have
     /// real semantics: the whole feature map is snapshotted and restored).
     saved: Arc<Mutex<std::collections::HashMap<u32, u32>>>,
+    /// Optional non-volatile user-set file (SFNC UserSetSave). `None` keeps
+    /// the simulator process-local; the CLI uses `persistent_default()`.
+    state_path: Option<PathBuf>,
     /// Device clock for `DeviceUptime` and the bootstrap timestamp counter.
     epoch: Instant,
 }
@@ -579,14 +588,196 @@ impl NullBack {
     }
 
     pub fn new() -> Self {
+        Self::with_state_path(None)
+    }
+
+    /// Process-local simulator state (tests, embedded users); `UserSetSave`
+    /// then only survives until the process exits.
+    fn with_state_path(path: Option<PathBuf>) -> Self {
         let defaults = Self::default_regs();
+        let (saved, default_selector) = match path.as_deref().and_then(Self::load_state) {
+            Some((saved, default_selector)) => (saved, default_selector),
+            None => (defaults.clone(), 0),
+        };
+        // SFNC 16.6: on power-up the device loads UserSetDefault (Default =
+        // factory settings).
+        let mut active = if default_selector == 1 {
+            saved.clone()
+        } else {
+            defaults
+        };
+        active.insert(REG_USER_SET_SELECTOR, 0);
+        active.insert(REG_USER_SET_SAVE, 0);
+        active.insert(REG_USER_SET_LOAD, 0);
+        active.insert(REG_USER_SET_DEFAULT, default_selector.min(1));
+        Self::clamp_roi(&mut active);
         Self {
-            regs: Arc::new(Mutex::new(defaults.clone())),
-            // A factory-fresh camera has a valid user set: saving without a
-            // prior UserSetSave would otherwise have nothing to restore.
-            saved: Arc::new(Mutex::new(defaults)),
+            regs: Arc::new(Mutex::new(active)),
+            saved: Arc::new(Mutex::new(saved)),
+            state_path: path,
             epoch: Instant::now(),
         }
+    }
+
+    /// Non-volatile simulator state: UserSet1 is saved to `path` (SFNC
+    /// UserSetSave requires non-volatile memory) and reloaded on startup.
+    pub fn persistent(path: PathBuf) -> Self {
+        Self::with_state_path(Some(path))
+    }
+
+    /// CLI constructor: `VGIGE_NULL_USERSET_PATH` overrides the platform
+    /// default. If the directory cannot be created the device still runs,
+    /// but user sets are process-local (logged once).
+    pub fn persistent_default() -> Self {
+        let path = Self::default_state_path();
+        if let Some(dir) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!(
+                    "vgige: null backend user-set storage {}: {e}; user sets are process-local",
+                    dir.display()
+                );
+                return Self::new();
+            }
+        }
+        Self::persistent(path)
+    }
+
+    fn default_state_path() -> PathBuf {
+        if let Some(path) = std::env::var_os("VGIGE_NULL_USERSET_PATH") {
+            return PathBuf::from(path);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            PathBuf::from("/var/lib/vgige/null-userset.txt")
+        }
+        #[cfg(windows)]
+        {
+            let base = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir);
+            base.join("vgige").join("null-userset.txt")
+        }
+        #[cfg(not(any(target_os = "linux", windows)))]
+        {
+            std::env::temp_dir().join("vgige-null-userset.txt")
+        }
+    }
+
+    /// Read the persisted `(UserSet1, UserSetDefault)` pair. Format:
+    /// `VGNUS1`, the default selector, then `address value` lines.
+    fn load_state(path: &Path) -> Option<(std::collections::HashMap<u32, u32>, u32)> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let mut lines = text.lines();
+        if lines.next()? != "VGNUS1" {
+            return None;
+        }
+        let default_selector = lines.next()?.parse::<u32>().ok()?.min(1);
+        let mut map = std::collections::HashMap::new();
+        for line in lines {
+            let mut fields = line.split_whitespace();
+            let addr = fields.next()?.parse::<u32>().ok()?;
+            let value = fields.next()?.parse::<u32>().ok()?;
+            if fields.next().is_some() {
+                return None;
+            }
+            map.insert(addr, value);
+        }
+        Some((map, default_selector))
+    }
+
+    /// Persist `saved` + the current UserSetDefault (best effort is not
+    /// enough for UserSetSave: a failed write must surface as an error).
+    fn persist_state(
+        &self,
+        saved: &std::collections::HashMap<u32, u32>,
+        default_selector: u32,
+    ) -> Result<(), u16> {
+        let Some(path) = &self.state_path else {
+            return Ok(());
+        };
+        let mut text = format!("VGNUS1\n{}\n", default_selector.min(1));
+        let mut entries: Vec<(u32, u32)> = saved
+            .iter()
+            .filter(|(addr, _)| {
+                !matches!(
+                    **addr,
+                    REG_USER_SET_SELECTOR | REG_USER_SET_SAVE | REG_USER_SET_LOAD
+                )
+            })
+            .map(|(addr, value)| (*addr, *value))
+            .collect();
+        entries.sort_unstable();
+        for (addr, value) in entries {
+            text.push_str(&format!("{addr} {value}\n"));
+        }
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, text).map_err(|_| 0x8FFFu16)?;
+        std::fs::rename(&tmp, path).map_err(|_| 0x8FFFu16)?;
+        Ok(())
+    }
+
+    /// Snapshot of the active features; command/selector registers are not
+    /// part of a user set.
+    fn user_set_snapshot(regs: &std::collections::HashMap<u32, u32>) -> std::collections::HashMap<u32, u32> {
+        let mut snapshot = regs.clone();
+        snapshot.insert(REG_USER_SET_SELECTOR, 0);
+        snapshot.insert(REG_USER_SET_SAVE, 0);
+        snapshot.insert(REG_USER_SET_LOAD, 0);
+        snapshot
+    }
+
+    /// Keep Width/Height + OffsetX/OffsetY inside the declared sensor
+    /// (SFNC: Width max is typically WidthMax - OffsetX; a region outside the
+    /// sensor has no pixel data to deliver).
+    fn clamp_roi(regs: &mut std::collections::HashMap<u32, u32>) {
+        let sensor_w = SENSOR_MAX;
+        let sensor_h = SENSOR_MAX;
+        let mut w = regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH).clamp(1, sensor_w);
+        let mut h = regs
+            .get(&REG_HEIGHT)
+            .copied()
+            .unwrap_or(HEIGHT)
+            .clamp(1, sensor_h);
+        let mut ox = regs
+            .get(&REG_OFFSET_X)
+            .copied()
+            .unwrap_or(0)
+            .min(sensor_w.saturating_sub(1));
+        let mut oy = regs
+            .get(&REG_OFFSET_Y)
+            .copied()
+            .unwrap_or(0)
+            .min(sensor_h.saturating_sub(1));
+        if ox + w > sensor_w {
+            ox = sensor_w - w;
+        }
+        if oy + h > sensor_h {
+            oy = sensor_h - h;
+        }
+        // Defensive: the reductions above keep both fits; clamp again in case
+        // a corrupted state file supplied both at the maximum.
+        w = w.min(sensor_w - ox).max(1);
+        h = h.min(sensor_h - oy).max(1);
+        regs.insert(REG_WIDTH, w);
+        regs.insert(REG_HEIGHT, h);
+        regs.insert(REG_OFFSET_X, ox);
+        regs.insert(REG_OFFSET_Y, oy);
+    }
+
+    /// Load one active set: `Default` = factory settings, `UserSet1` = the
+    /// saved set (SFNC 16.2/16.4).
+    fn load_active_set(&self, regs: &mut std::collections::HashMap<u32, u32>, selector: u32) {
+        let default_selector = regs.get(&REG_USER_SET_DEFAULT).copied().unwrap_or(0).min(1);
+        if selector == 1 {
+            *regs = self.saved.lock().expect("null saved lock").clone();
+        } else {
+            *regs = Self::default_regs();
+        }
+        regs.insert(REG_USER_SET_SELECTOR, selector);
+        regs.insert(REG_USER_SET_SAVE, 0);
+        regs.insert(REG_USER_SET_LOAD, 0);
+        regs.insert(REG_USER_SET_DEFAULT, default_selector);
+        Self::clamp_roi(regs);
     }
 }
 
@@ -640,7 +831,13 @@ impl CameraBack for NullBack {
                 regs.insert(addr, 0);
             }
             REG_WIDTH | REG_HEIGHT => {
-                regs.insert(addr, value.clamp(1, 4096));
+                let offset = if addr == REG_WIDTH {
+                    regs.get(&REG_OFFSET_X).copied().unwrap_or(0)
+                } else {
+                    regs.get(&REG_OFFSET_Y).copied().unwrap_or(0)
+                };
+                let max = SENSOR_MAX.saturating_sub(offset).max(1);
+                regs.insert(addr, value.clamp(1, max));
             }
             REG_PIXEL_FORMAT => {
                 if value == PFNC_MONO8 || value == PFNC_MONO16 {
@@ -648,7 +845,14 @@ impl CameraBack for NullBack {
                 }
             }
             REG_OFFSET_X | REG_OFFSET_Y => {
-                regs.insert(addr, value.min(4095));
+                let current = if addr == REG_OFFSET_X {
+                    regs.get(&REG_WIDTH).copied().unwrap_or(WIDTH)
+                } else {
+                    regs.get(&REG_HEIGHT).copied().unwrap_or(HEIGHT)
+                };
+                // SFNC: Width max is typically WidthMax - OffsetX; the offset
+                // therefore cannot push the current region past the sensor.
+                regs.insert(addr, value.min(SENSOR_MAX.saturating_sub(current)));
             }
             REG_EXPOSURE_US => {
                 regs.insert(addr, value.clamp(10, 100_000));
@@ -670,36 +874,61 @@ impl CameraBack for NullBack {
                     regs.insert(addr, value);
                 }
             }
-            REG_USER_SET_SELECTOR | REG_USER_SET_DEFAULT | REG_REVERSE_X | REG_REVERSE_Y => {
+            REG_USER_SET_SELECTOR | REG_REVERSE_X | REG_REVERSE_Y => {
                 if value <= 1 {
+                    regs.insert(addr, value);
+                }
+            }
+            REG_USER_SET_DEFAULT => {
+                if value <= 1 {
+                    // The default set selection is device configuration and
+                    // must survive a power cycle (SFNC 16.6).
+                    let saved = self.saved.lock().expect("null saved lock").clone();
+                    self.persist_state(&saved, value)?;
                     regs.insert(addr, value);
                 }
             }
             REG_USER_SET_SAVE => {
                 // SFNC UserSetSave: snapshot the active feature set into the
-                // selected user set (1 = UserSet1; Default is read-only).
+                // selected user set (1 = UserSet1; Default is read-only) and
+                // persist it to non-volatile memory.
                 let selector = regs.get(&REG_USER_SET_SELECTOR).copied().unwrap_or(0);
                 if value != 0 && selector == 1 {
-                    *self.saved.lock().expect("null saved lock") = regs.clone();
+                    let snapshot = Self::user_set_snapshot(&regs);
+                    let default_selector = regs.get(&REG_USER_SET_DEFAULT).copied().unwrap_or(0);
+                    self.persist_state(&snapshot, default_selector)?;
+                    *self.saved.lock().expect("null saved lock") = snapshot;
                 }
                 regs.insert(addr, 0);
             }
             REG_USER_SET_LOAD => {
-                // SFNC UserSetLoad: restore the selected user set.
+                // SFNC 16.2/16.4: Default restores factory settings,
+                // UserSet1 restores the saved set.
                 let selector = regs.get(&REG_USER_SET_SELECTOR).copied().unwrap_or(0);
-                if value != 0 && selector == 1 {
-                    let saved = self.saved.lock().expect("null saved lock").clone();
-                    *regs = saved;
+                if value != 0 {
+                    self.load_active_set(&mut regs, selector.min(1));
                 }
-                regs.insert(addr, 0);
+                regs.insert(REG_USER_SET_LOAD, 0);
             }
             REG_DEVICE_RESET => {
-                // SFNC DeviceReset: the command value restores factory
-                // defaults (a virtual reset — the process keeps running).
+                // SFNC DeviceReset/16.6: load UserSetDefault (Default =
+                // factory settings, UserSet1 = the saved set). User sets are
+                // non-volatile, so the reset must not erase them.
                 if value != 0 {
-                    let defaults = Self::default_regs();
-                    *regs = defaults.clone();
-                    *self.saved.lock().expect("null saved lock") = defaults;
+                    let default_selector =
+                        regs.get(&REG_USER_SET_DEFAULT).copied().unwrap_or(0).min(1);
+                    let saved = self.saved.lock().expect("null saved lock").clone();
+                    let mut next = if default_selector == 1 {
+                        saved
+                    } else {
+                        Self::default_regs()
+                    };
+                    next.insert(REG_USER_SET_SELECTOR, 0);
+                    next.insert(REG_USER_SET_SAVE, 0);
+                    next.insert(REG_USER_SET_LOAD, 0);
+                    next.insert(REG_USER_SET_DEFAULT, default_selector);
+                    Self::clamp_roi(&mut next);
+                    *regs = next;
                 }
             }
             _ => {}
@@ -1360,9 +1589,10 @@ mod tests {
     }
 
     /// SFNC UserSetControl has real semantics: save snapshots the feature
-    /// set, load restores it, and DeviceReset clears it back to factory.
+    /// set, UserSetLoad Default restores factory settings, and user sets
+    /// survive a DeviceReset (non-volatile).
     #[test]
-    fn user_set_save_and_load_restore_the_feature_set() {
+    fn user_set_save_load_and_default_restore() {
         let mut back = NullBack::new();
         back.write_reg(REG_WIDTH, 640).unwrap();
         back.write_reg(REG_HEIGHT, 480).unwrap();
@@ -1376,16 +1606,124 @@ mod tests {
         assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640);
         assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), 480);
 
-        // DeviceReset restores factory defaults and clears the saved set.
+        // SFNC 16.2: loading the Default user set restores factory settings.
+        back.write_reg(REG_WIDTH, 320).unwrap();
+        back.write_reg(REG_USER_SET_SELECTOR, 0).unwrap();
+        back.write_reg(REG_USER_SET_LOAD, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
+        assert_eq!(back.read_reg(REG_HEIGHT).unwrap(), HEIGHT);
+
+        // DeviceReset loads UserSetDefault; the saved set is non-volatile and
+        // therefore must survive the reset.
         back.write_reg(REG_DEVICE_RESET, 1).unwrap();
         assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH);
         back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
         back.write_reg(REG_USER_SET_LOAD, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640, "saved set survives reset");
+    }
+
+    /// SFNC 16.6: DeviceReset loads the set selected by UserSetDefault.
+    #[test]
+    fn device_reset_loads_the_selected_userset_default() {
+        let mut back = NullBack::new();
+        back.write_reg(REG_WIDTH, 640).unwrap();
+        back.write_reg(REG_HEIGHT, 480).unwrap();
+        back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
+        back.write_reg(REG_USER_SET_SAVE, 1).unwrap();
+        back.write_reg(REG_USER_SET_DEFAULT, 1).unwrap();
+
+        back.write_reg(REG_WIDTH, 320).unwrap();
+        back.write_reg(REG_DEVICE_RESET, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640, "UserSet1 at reset");
+        assert_eq!(back.read_reg(REG_USER_SET_DEFAULT).unwrap(), 1);
+
+        back.write_reg(REG_USER_SET_DEFAULT, 0).unwrap();
+        back.write_reg(REG_WIDTH, 320).unwrap();
+        back.write_reg(REG_DEVICE_RESET, 1).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH, "Default at reset");
+    }
+
+    /// UserSetSave must be non-volatile (SFNC 16.5): a process restart is
+    /// the simulator's power cycle.
+    #[test]
+    fn user_set_survives_a_restart() {
+        let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!(
+                "vgige-null-userset-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("userset.txt");
+        {
+            let mut back = NullBack::persistent(path.clone());
+            back.write_reg(REG_WIDTH, 640).unwrap();
+            back.write_reg(REG_HEIGHT, 480).unwrap();
+            back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
+            back.write_reg(REG_USER_SET_DEFAULT, 1).unwrap();
+            back.write_reg(REG_USER_SET_SAVE, 1).unwrap();
+        }
+        // Power-up loads UserSetDefault (UserSet1 here).
+        {
+            let mut back = NullBack::persistent(path.clone());
+            assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640);
+            assert_eq!(back.read_reg(REG_USER_SET_DEFAULT).unwrap(), 1);
+        }
+        // Switching UserSetDefault to Default persists as well; UserSet1 is
+        // still restorable after the restart.
+        {
+            let mut back = NullBack::persistent(path.clone());
+            back.write_reg(REG_USER_SET_DEFAULT, 0).unwrap();
+            back.write_reg(REG_WIDTH, 320).unwrap();
+        }
+        {
+            let mut back = NullBack::persistent(path.clone());
+            assert_eq!(back.read_reg(REG_WIDTH).unwrap(), WIDTH, "boots factory set");
+            back.write_reg(REG_USER_SET_SELECTOR, 1).unwrap();
+            back.write_reg(REG_USER_SET_LOAD, 1).unwrap();
+            assert_eq!(back.read_reg(REG_WIDTH).unwrap(), 640, "persisted UserSet1");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// SFNC Width/Height and OffsetX/OffsetY must describe a region inside
+    /// the declared sensor (Width max is typically WidthMax - OffsetX).
+    #[test]
+    fn roi_is_kept_inside_the_declared_sensor() {
+        let mut back = NullBack::new();
+        // Width first, then an offset: the offset is clamped to the room left.
+        back.write_reg(REG_WIDTH, 1000).unwrap();
+        back.write_reg(REG_OFFSET_X, SENSOR_MAX).unwrap();
+        assert_eq!(back.read_reg(REG_OFFSET_X).unwrap(), SENSOR_MAX - 1000);
+        // A width written with an offset in place is clamped to the room left.
+        back.write_reg(REG_WIDTH, SENSOR_MAX).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), SENSOR_MAX - (SENSOR_MAX - 1000));
+        // Offset and width never exceed the sensor, in either order.
+        back.write_reg(REG_WIDTH, 1000).unwrap();
+        back.write_reg(REG_OFFSET_X, 100).unwrap();
+        back.write_reg(REG_WIDTH, SENSOR_MAX).unwrap();
+        assert_eq!(back.read_reg(REG_WIDTH).unwrap(), SENSOR_MAX - 100);
         assert_eq!(
-            back.read_reg(REG_WIDTH).unwrap(),
-            WIDTH,
-            "a reset user set loads factory defaults"
+            back.read_reg(REG_OFFSET_X).unwrap() + back.read_reg(REG_WIDTH).unwrap(),
+            SENSOR_MAX
         );
+        // Height/OffsetY behave the same way.
+        back.write_reg(REG_HEIGHT, 1000).unwrap();
+        back.write_reg(REG_OFFSET_Y, SENSOR_MAX).unwrap();
+        assert_eq!(back.read_reg(REG_OFFSET_Y).unwrap(), SENSOR_MAX - 1000);
+        assert_eq!(
+            back.read_reg(REG_OFFSET_Y).unwrap() + back.read_reg(REG_HEIGHT).unwrap(),
+            SENSOR_MAX
+        );
+        // The payload follows the clamped ROI.
+        back.write_reg(REG_PIXEL_FORMAT, PFNC_MONO8).unwrap();
+        let expected = u64::from(back.read_reg(REG_WIDTH).unwrap())
+            * u64::from(back.read_reg(REG_HEIGHT).unwrap());
+        assert_eq!(back.payload_size().unwrap(), expected);
     }
 
     /// The XML exposes the SFNC features the register model implements, in
