@@ -856,6 +856,7 @@ impl DeviceHandler for SimRegMap {
             for x in 0..self.stream.channels.max(1) as u32 {
                 let _ = self.write_scp(x, 0);
             }
+            self.close_message_channel();
             return ForceIpOutcome::Ignore;
         }
         // R-152cd: install the temporary static IP configuration, then
@@ -879,6 +880,15 @@ impl DeviceHandler for SimRegMap {
 }
 
 impl SimRegMap {
+    /// R-151cd close path: MCP and MCDA go to zero and no further event is
+    /// delivered to the previous host.
+    fn close_message_channel(&self) {
+        let mut i = self.inner.lock().expect("sim regmap poisoned");
+        Self::w32(&mut i.boot, reg::MESSAGE_CHANNEL_PORT, 0);
+        Self::w32(&mut i.boot, reg::MESSAGE_CHANNEL_DEST_ADDRESS, 0);
+        i.message_dest = None;
+    }
+
     /// PACKETRESEND (§16.7.2): serve the request from the channel's
     /// last-block cache (or answer GEV_STATUS_PACKET_UNAVAILABLE when the
     /// block is gone — CR-205st).
@@ -1733,6 +1743,52 @@ mod tests {
         assert_eq!(
             m.read_reg(reg::NET_IF_CONFIGURATION).unwrap(),
             reg::IP_CFG_PERSISTENT_IP | reg::IP_CFG_DHCP | reg::IP_CFG_LLA
+        );
+    }
+
+    /// [R-151cd]: a FORCEIP restart (static_IP == 0) must also close the
+    /// message channel: MCP/MCDA read 0 and the old host receives no more
+    /// events.
+    #[test]
+    fn force_ip_restart_closes_the_message_channel() {
+        let m = test_map();
+        let rx = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .ok();
+        m.write_reg(
+            reg::MESSAGE_CHANNEL_DEST_ADDRESS,
+            u32::from(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+        m.write_reg(
+            reg::MESSAGE_CHANNEL_PORT,
+            reg::mcp_make(rx.local_addr().unwrap().port()),
+        )
+        .unwrap();
+        m.write_reg(REG_TEST_EVENT_ID, 7).unwrap();
+        m.write_reg(REG_TEST_EVENT_DATA_LEN, 0).unwrap();
+        m.write_reg(REG_TEST_EVENT_TRIGGER, 1).unwrap();
+        let mut buf = [0u8; 512];
+        assert!(rx.recv_from(&mut buf).is_ok(), "event before FORCEIP");
+
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
+        let request = ForceIpRequest {
+            mac: m.config.mac,
+            static_ip: 0,
+            subnet_mask: 0,
+            default_gateway: 0,
+        };
+        let outcome = gentl_gvcp::server::DeviceHandler::force_ip(&m, peer, request);
+        assert_eq!(outcome, gentl_gvcp::wire::ForceIpOutcome::Ignore);
+        assert_eq!(m.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(), 0);
+        assert_eq!(m.read_reg(reg::MESSAGE_CHANNEL_DEST_ADDRESS).unwrap(), 0);
+
+        m.write_reg(REG_TEST_EVENT_TRIGGER, 1).unwrap();
+        rx.set_read_timeout(Some(std::time::Duration::from_millis(300)))
+            .ok();
+        assert!(
+            rx.recv_from(&mut buf).is_err(),
+            "no events after the FORCEIP restart closed the message channel"
         );
     }
 }
