@@ -314,6 +314,7 @@ impl RegisterSpace {
         }
         if request.static_ip == 0 {
             self.channel.close();
+            self.close_message_channel();
             return ForceIpOutcome::Ignore;
         }
         eprintln!(
@@ -321,6 +322,17 @@ impl RegisterSpace {
             request.static_ip
         );
         ForceIpOutcome::Ignore
+    }
+
+    /// R-151cd: clear MCDA/MCP and stop forwarding events to the old host.
+    fn close_message_channel(&self) {
+        if let Ok(mut message) = self.message.lock() {
+            message.dest_address = 0;
+            message.port = 0;
+            if let Some(relay) = &message.relay {
+                relay.set_destination(None);
+            }
+        }
     }
 
     /// Bootstrap string slot bytes for `[addr, addr+count)`, zero padded.

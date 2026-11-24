@@ -422,11 +422,15 @@ fn custom_window_and_injected_xml() {
 
     // A 4-aligned read crossing the blob end is zero-padded (GenTL
     // §6.3.6.5 client-side alignment adaptation).
-    let tail = XML_BASE_V + len - 2;
+    let tail = (XML_BASE_V + len - 2) / 4 * 4;
     let mut padded = [0xFFu8; 4];
     s.remote.read_mem(tail, &mut padded).unwrap();
-    assert_eq!(padded[2], 0);
-    assert_eq!(padded[3], 0);
+    let start = (tail - XML_BASE_V) as usize;
+    for (i, byte) in padded.iter().enumerate() {
+        if start + i >= len as usize {
+            assert_eq!(*byte, 0, "byte {i} past the blob end is zero-padded");
+        }
+    }
 }
 
 #[test]
@@ -481,8 +485,11 @@ fn stream_relay_reemits_as_30_from_a_12_camera() {
     assert!(relayed >= 2, "FrameCountRelayed = {relayed}");
 
     // A first Start may reopen the channel while it is already open.
-    s.remote.write_reg(reg::SCP0, reg::scp_make(1)).unwrap();
-    assert_eq!(s.remote.read_reg(reg::SCP0).unwrap(), reg::scp_make(1));
+    assert_eq!(
+        gev(s.remote.write_reg(reg::SCP0, reg::scp_make(1)).unwrap_err()),
+        GEV_STATUS_BUSY,
+        "R-586cd: non-zero SCPx write while streaming is BUSY"
+    );
 
     // Close cascades: the real camera's channel is closed too (R-091ca).
     s.remote.write_reg(reg::SCP0, 0).unwrap();
@@ -997,4 +1004,140 @@ fn multi_word_block_access_to_virtual_registers() {
         GentlError::GevStatus(GEV_STATUS_WRITE_PROTECT),
         "virtual read-only register answers WRITE_PROTECT locally"
     );
+}
+
+/// [R-151cd]: the FORCEIP restart path (static_IP == 0) must close the
+/// message channel too: MCDA/MCP read back zero and the previously opened
+/// host stops receiving relayed events.
+#[test]
+fn force_ip_restart_closes_the_virtual_message_channel() {
+    let s = start(false);
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    rx.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.remote
+        .write_reg(
+            reg::MESSAGE_CHANNEL_DEST_ADDRESS,
+            u32::from(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+    s.remote
+        .write_reg(
+            reg::MESSAGE_CHANNEL_PORT,
+            reg::mcp_make(rx.local_addr().unwrap().port()),
+        )
+        .unwrap();
+    {
+        let mut down = s.down.lock().expect("down lock");
+        down.write_reg(REG_TEST_EVENT_ID, 7).unwrap();
+        down.write_reg(REG_TEST_EVENT_DATA_LEN, 0).unwrap();
+        down.write_reg(REG_TEST_EVENT_TRIGGER, 1).unwrap();
+    }
+    let mut buf = [0u8; 65536];
+    assert!(rx.recv_from(&mut buf).is_ok(), "event relayed before FORCEIP");
+
+    let up_port = s._up_server.local_port().unwrap();
+    let request = ForceIpRequest {
+        mac: UP_MAC,
+        static_ip: 0,
+        subnet_mask: 0,
+        default_gateway: 0,
+    };
+    let payload = encode_force_ip_payload(&request);
+    let mut datagram = vec![0u8; HEADER_LEN];
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: FORCEIP_CMD,
+        length: payload.len() as u16,
+        req_id: 9,
+    }
+    .encode(&mut header);
+    datagram.copy_from_slice(&header);
+    datagram.extend_from_slice(&payload);
+    let tx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    tx.send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port)).unwrap();
+
+    assert_eq!(
+        s.remote.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(),
+        0,
+        "MCP cleared by the restart"
+    );
+    assert_eq!(
+        s.remote
+            .read_reg(reg::MESSAGE_CHANNEL_DEST_ADDRESS)
+            .unwrap(),
+        0,
+        "MCDA cleared by the restart"
+    );
+    {
+        let mut down = s.down.lock().expect("down lock");
+        down.write_reg(REG_TEST_EVENT_TRIGGER, 1).unwrap();
+    }
+    rx.set_read_timeout(Some(Duration::from_millis(400))).ok();
+    assert!(
+        rx.recv_from(&mut buf).is_err(),
+        "no events after the FORCEIP restart closed the message channel"
+    );
+}
+
+/// R-562st rounding and the R-586cd/R-588cd in-stream write lock of the
+/// virtual stream channel: SCPSx readback reports the value actually used,
+/// and opening the stream freezes SCPx (non-zero writes are BUSY) and SCDAx.
+#[test]
+fn stream_registers_round_and_freeze_while_streaming() {
+    let s = start(false);
+    let min = reg::GVSP_HEADERS_OVERHEAD + 4;
+    s.remote.write_reg(reg::SCPS0, reg::scps_make(3)).unwrap();
+    assert_eq!(
+        reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
+        min,
+        "smaller than the minimum rounds up"
+    );
+    s.remote.write_reg(reg::SCPS0, reg::scps_make(65_535)).unwrap();
+    assert_eq!(
+        reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
+        65_532,
+        "larger than the maximum rounds down to a supported aligned size"
+    );
+    s.remote.write_reg(reg::SCPS0, reg::scps_make(2001)).unwrap();
+    assert_eq!(
+        reg::scps_packet_size(s.remote.read_reg(reg::SCPS0).unwrap()),
+        2000,
+        "unaligned size rounds down to the nearest supported value"
+    );
+
+    // Open the channel with the packet size the recv helper expects.
+    s.remote
+        .write_reg(
+            reg::SCPS0,
+            reg::scps_make(300 + reg::GVSP_HEADERS_OVERHEAD as u32),
+        )
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    rx.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    s.remote
+        .write_reg(reg::SCP0, reg::scp_make(rx.local_addr().unwrap().port()))
+        .unwrap();
+    let _ = recv_block(&rx);
+
+    // R-586cd: a non-zero SCPx write while streaming is BUSY (only zero,
+    // i.e. closing, is accepted).
+    assert_eq!(
+        gev(s.remote
+            .write_reg(reg::SCP0, reg::scp_make(9999))
+            .unwrap_err()),
+        GEV_STATUS_BUSY
+    );
+    // R-588cd: SCDAx is frozen while streaming.
+    assert_eq!(
+        gev(s.remote
+            .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+            .unwrap_err()),
+        GEV_STATUS_BUSY
+    );
+    // Closing is still allowed.
+    s.remote.write_reg(reg::SCP0, 0).unwrap();
 }

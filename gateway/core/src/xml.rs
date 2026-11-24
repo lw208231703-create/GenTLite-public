@@ -219,9 +219,107 @@ fn attach_to_root(xml: String, feature: &str) -> String {
 /// children are `<pFeature>` references (no nested categories), so the first
 /// close tag after the opening one is the matching one.
 fn category_close(xml: &str, name: &str) -> Option<usize> {
-    let open = format!("<Category Name=\"{name}\"");
-    let start = xml.find(&open)?;
-    xml[start..].find("</Category>").map(|p| start + p)
+    // Match the tag rather than a fixed attribute spelling: XML permits both
+    // quote styles and any attribute order, so `<Category Name='Root'>` and
+    // `<Category ToolTip="..." Name="Root">` must both be found.
+    let bytes = xml.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = xml[search..].find("<Category") {
+        let start = search + rel;
+        let mut after = start + "<Category".len();
+        // A tag name boundary: `<CategoryX` is not a Category element.
+        match bytes.get(after) {
+            Some(c) if c.is_ascii_whitespace() || *c == b'>' => {}
+            _ => {
+                search = after;
+                continue;
+            }
+        }
+        let Some(tag_end) = find_tag_end(bytes, after) else {
+            return None;
+        };
+        if attribute_value(&xml[after..tag_end], "Name") == Some(name) {
+            return xml[tag_end..].find("</Category>").map(|p| tag_end + p);
+        }
+        after = tag_end;
+        search = after;
+    }
+    None
+}
+
+/// Index of the `>` ending an element start tag, skipping quoted values.
+fn find_tag_end(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut quote = None;
+    for (i, &b) in bytes.iter().enumerate().skip(from) {
+        match quote {
+            Some(q) => {
+                if b == q {
+                    quote = None;
+                }
+            }
+            None => match b {
+                b'"' | b'\'' => quote = Some(b),
+                b'>' => return Some(i),
+                _ => {}
+            },
+        }
+    }
+    None
+}
+
+/// Value of one attribute in an element's attribute list, tolerant of either
+/// quote style and of arbitrary attribute order.
+fn attribute_value<'a>(attrs: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = attrs.as_bytes();
+    let mut i = 0;
+    loop {
+        while i < bytes.len() && (bytes[i].is_ascii_whitespace() || bytes[i] == b'/') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        let key_start = i;
+        while i < bytes.len() && bytes[i] != b'=' && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let attr_key = &attrs[key_start..i];
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            return None;
+        }
+        let value = if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let q = bytes[i];
+            i += 1;
+            let start = i;
+            while i < bytes.len() && bytes[i] != q {
+                i += 1;
+            }
+            let v = &attrs[start..i];
+            if i < bytes.len() {
+                i += 1;
+            }
+            v
+        } else {
+            let start = i;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            &attrs[start..i]
+        };
+        if attr_key == key {
+            return Some(value);
+        }
+    }
 }
 
 fn insert_at(mut xml: String, pos: usize, text: &str) -> String {
@@ -765,5 +863,38 @@ mod endian_tests {
         let out = rewrite_gige_identity(xml.to_owned());
         assert!(out.contains("<Value>Virtual GigE</Value>"));
         assert!(out.contains("<Value>NULL-0001-GE</Value>"));
+    }
+}
+
+#[cfg(test)]
+mod xml_category_tests {
+    use super::*;
+
+    fn close_pos(xml: &str) -> usize {
+        xml.find("</Category>").expect("close tag")
+    }
+
+    #[test]
+    fn category_close_accepts_both_quote_styles() {
+        let xml = "<Category Name=\"Root\"><pFeature>A</pFeature></Category>";
+        assert_eq!(category_close(xml, "Root"), Some(close_pos(xml)));
+        let xml = "<Category Name='Root'><pFeature>A</pFeature></Category>";
+        assert_eq!(category_close(xml, "Root"), Some(close_pos(xml)));
+    }
+
+    #[test]
+    fn category_close_accepts_attribute_order_and_other_attributes() {
+        let xml = "<Category ToolTip='r' Name='Root' NameSpace='x'><pFeature>A</pFeature></Category>";
+        assert_eq!(category_close(xml, "Root"), Some(close_pos(xml)));
+        // A different category is not mistaken for Root.
+        let xml = "<Category Name='Root2'></Category>";
+        assert_eq!(category_close(xml, "Root"), None);
+    }
+
+    #[test]
+    fn single_quoted_root_gets_the_smart_camera_link() {
+        let xml = "<RegisterDescription><Category Name='Root'>\n</Category></RegisterDescription>".to_string();
+        let out = attach_to_root(xml, "SmartCamera");
+        assert!(out.contains("<pFeature>SmartCamera</pFeature>"));
     }
 }

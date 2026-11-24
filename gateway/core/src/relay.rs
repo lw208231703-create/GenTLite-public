@@ -220,6 +220,11 @@ impl Relay {
                 Ok(())
             }
             reg::SCDA_OFFSET => {
+                // R-588cd: write access is disabled while the channel is
+                // streaming; the destination is frozen at open.
+                if self.inner.run.lock().expect("vgige relay run poisoned").is_some() {
+                    return Err(GEV_STATUS_BUSY);
+                }
                 self.with_regs_mut(|r| r.scda = value);
                 Ok(())
             }
@@ -349,8 +354,10 @@ impl Relay {
             .expect("vgige relay run poisoned")
             .is_some();
         if host_port != 0 {
+            // R-586cd: while streaming, only a zero write (close) is
+            // accepted; reopening in place is a BUSY write.
             if open {
-                self.close();
+                return Err(GEV_STATUS_BUSY);
             }
             if !self.stream_enabled {
                 // --no-stream control relay: the virtual device runs with
@@ -381,7 +388,24 @@ impl Relay {
         if self.inner.transmitting.load(Ordering::Relaxed) {
             return Err(GEV_STATUS_BUSY);
         }
-        self.with_regs_mut(|r| r.scps = value & !reg::SCPS_FIRE_TEST_PACKET);
+        // R-562st: unsupported sizes are rounded down to the nearest value
+        // the transmitter supports and the register reflects the rounded
+        // size (smaller than the minimum is rounded up). The virtual channel
+        // supports any 4-byte-aligned total between one GVSP header set plus
+        // a minimal payload and 65535 bytes.
+        const MIN_PACKET_SIZE: u32 =
+            reg::GVSP_HEADERS_OVERHEAD + 4;
+        const MAX_PACKET_SIZE: u32 = 65535;
+        let flags = value & !reg::SCPS_SIZE_MASK;
+        let requested = reg::scps_packet_size(value);
+        let rounded = requested
+            .clamp(MIN_PACKET_SIZE, MAX_PACKET_SIZE)
+            .max(MIN_PACKET_SIZE)
+            / 4
+            * 4;
+        // Keep the self-clearing fire bit out of the stored value; the other
+        // flag bits (do_not_fragment) are configuration and stay.
+        self.with_regs_mut(|r| r.scps = (flags & !reg::SCPS_FIRE_TEST_PACKET) | reg::scps_make(rounded));
         Ok(())
     }
 
