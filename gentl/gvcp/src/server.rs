@@ -155,11 +155,19 @@ fn serve_loop<H: DeviceHandler>(
             READREG_CMD => {
                 let mut values = Vec::new();
                 let mut status = GEV_STATUS_SUCCESS;
-                if payload_in.len() % 4 != 0 {
+                // GigE Vision 16.3.1: at least one register address must be
+                // present; a zero-length READREG is not a valid command.
+                if payload_in.is_empty() || payload_in.len() % 4 != 0 {
                     status = GEV_STATUS_INVALID_PARAMETER;
                 } else {
                     for chunk in payload_in.chunks_exact(4) {
                         let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                        // 16.3.1: the address list entries are 32-bit aligned.
+                        if addr % 4 != 0 {
+                            status = GEV_STATUS_BAD_ALIGNMENT;
+                            values.clear();
+                            break;
+                        }
                         match handler.read_reg(addr) {
                             Ok(v) => values.extend_from_slice(&v.to_be_bytes()),
                             Err(s) => {
@@ -207,7 +215,11 @@ fn serve_loop<H: DeviceHandler>(
                 } else {
                     let addr = u32::from_be_bytes([payload_in[0], payload_in[1], payload_in[2], payload_in[3]]);
                     let count = u16::from_be_bytes([payload_in[6], payload_in[7]]);
-                    if count == 0 || count % 4 != 0 {
+                    // R-177c/R-178cd: the read count is a positive multiple
+                    // of 4; R-179c: the start address must be 32-bit aligned.
+                    if addr % 4 != 0 {
+                        status = GEV_STATUS_BAD_ALIGNMENT;
+                    } else if count == 0 || count % 4 != 0 {
                         status = GEV_STATUS_BAD_ALIGNMENT;
                     } else {
                         match handler.read_mem(addr, count) {
@@ -305,5 +317,94 @@ fn serve_loop<H: DeviceHandler>(
         }
 
         let _ = socket.send_to(&out, peer);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+
+    struct Fake;
+
+    impl DeviceHandler for Fake {
+        fn discovery_info(&self) -> DiscoveryInfo {
+            DiscoveryInfo {
+                spec_version_major: 3,
+                spec_version_minor: 0,
+                device_mode: 0,
+                mac: [0x02, 0, 0, 0, 0, 1],
+                ip_config_options: 0,
+                ip_config_current: 0,
+                current_ip: u32::from(Ipv4Addr::LOCALHOST),
+                current_subnet_mask: 0,
+                default_gateway: 0,
+                manufacturer_name: "test".into(),
+                model_name: "test".into(),
+                device_version: "1".into(),
+                serial_number: "1".into(),
+                user_defined_name: String::new(),
+                manufacturer_info: String::new(),
+            }
+        }
+
+        fn read_reg(&self, _addr: u32) -> Result<u32, u16> {
+            Ok(0x1122_3344)
+        }
+
+        fn write_reg(&self, _addr: u32, _value: u32) -> Result<(), u16> {
+            Ok(())
+        }
+
+        fn read_mem(&self, _addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+            Ok(vec![0u8; count as usize])
+        }
+    }
+
+    fn exchange(server: &GvcpServer, command: u16, payload: &[u8]) -> Vec<u8> {
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut hdr = [0u8; HEADER_LEN];
+        CmdHeader::new(command, payload.len() as u16, 7).encode(&mut hdr);
+        let mut datagram = hdr.to_vec();
+        datagram.extend_from_slice(payload);
+        socket
+            .send_to(&datagram, (Ipv4Addr::LOCALHOST, server.local_port().unwrap()))
+            .unwrap();
+        let mut buf = [0u8; 2048];
+        let (n, _) = socket.recv_from(&mut buf).unwrap();
+        buf[..n].to_vec()
+    }
+
+    fn ack_status(reply: &[u8]) -> u16 {
+        AckHeader::decode(reply).expect("ack header").status
+    }
+
+    /// GigE Vision 16.3.1: at least one register must be read; an empty
+    /// address list is invalid, not a successful no-op.
+    #[test]
+    fn empty_readreg_is_rejected() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let reply = exchange(&server, READREG_CMD, &[]);
+        assert_eq!(ack_status(&reply), GEV_STATUS_INVALID_PARAMETER);
+        assert_eq!(reply.len(), HEADER_LEN, "no register data on error");
+    }
+
+    /// R-179c: an unaligned READMEM address must answer BAD_ALIGNMENT.
+    #[test]
+    fn unaligned_readmem_is_rejected() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x49u32.to_be_bytes());
+        payload[6..8].copy_from_slice(&4u16.to_be_bytes());
+        let reply = exchange(&server, READMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_BAD_ALIGNMENT);
+
+        // The aligned form still succeeds (regression guard).
+        payload[..4].copy_from_slice(&0x48u32.to_be_bytes());
+        let reply = exchange(&server, READMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_SUCCESS);
     }
 }
