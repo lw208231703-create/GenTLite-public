@@ -138,3 +138,9 @@
 - 修复：Stream Enable 前置校验（required leader/trailer、payload capacity、Standard 模式、对齐）且失败不锁存；快照扩展为 7 个 RW* 字段；emitter fail-closed。
 - 验证：286 tests / 0 failed / 0 warnings；板端 GenTL U3V producer 20/20 帧（2,621,440 B/帧）。
 
+## Q. 2026-11-24 第四轮 review 复核（SIRM 部分字节写）
+
+- 真回归：SI_CONTROL 的 1~3 字节写会 panic（GenCP 允许字节粒度 WRITEMEM）。
+- 修复：SIRM 逐字节权限；控制字用当前寄存器 + 本次字节合并后校验，不再越界切片；失败返回 GenCP 状态而非 panic。
+- 验证：288 tests / 0 failed / 0 warnings；板端 USB 部分字节写 ACK 正确、服务存活、streaming 20/20 帧。
+
