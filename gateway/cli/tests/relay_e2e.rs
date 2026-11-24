@@ -326,17 +326,21 @@ fn error_passthrough_matches_the_camera() {
         GEV_STATUS_BAD_ALIGNMENT
     );
 
-    // The virtual CCP denies a different privilege while occupied (0x8006),
-    // and repeats of the same request are accepted (R-069cd).
+    // R-069cd: repeats of the same request are accepted without a new
+    // connection; R-070cd: the primary switches privilege in place.
     s.remote
         .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
         .unwrap();
     s.remote
         .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+        .unwrap();
+    s.remote
+        .write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS)
         .unwrap();
     assert_eq!(
-        gev(s.remote.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap_err()),
-        GEV_STATUS_ACCESS_DENIED
+        s.remote.read_reg(reg::CCP).unwrap(),
+        reg::CCP_CONTROL_ACCESS,
+        "the primary switched EA -> CA without closing the channel"
     );
 }
 
@@ -1140,4 +1144,78 @@ fn stream_registers_round_and_freeze_while_streaming() {
     );
     // Closing is still allowed.
     s.remote.write_reg(reg::SCP0, 0).unwrap();
+}
+
+/// GigE Vision 10.1/R-072cd: exclusive access denies secondary applications,
+/// the primary switches EA<->CA in place, control access allows secondary
+/// reads only, and releasing the channel clears MCP/SCPx.
+#[test]
+fn peer_permissions_and_ccp_release_cleanup() {
+    let s = start(false);
+    let up_port = s._up_server.local_port().unwrap();
+    let secondary = GvcpClient::connect(Ipv4Addr::LOCALHOST, up_port).unwrap();
+
+    s.remote
+        .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+        .unwrap();
+    assert_eq!(
+        gev(secondary.read_reg(reg::VERSION).unwrap_err()),
+        GEV_STATUS_ACCESS_DENIED,
+        "R-063cd: exclusive access denies secondary reads"
+    );
+    assert_eq!(
+        gev(secondary
+            .write_reg(reg::USER_DEFINED_NAME, 1)
+            .unwrap_err()),
+        GEV_STATUS_ACCESS_DENIED
+    );
+
+    // R-070cd: the primary switches to control access in place.
+    s.remote
+        .write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS)
+        .unwrap();
+    assert!(
+        secondary.read_reg(reg::VERSION).is_ok(),
+        "control access allows secondary reads"
+    );
+    assert_eq!(
+        gev(secondary
+            .write_reg(reg::USER_DEFINED_NAME, 1)
+            .unwrap_err()),
+        GEV_STATUS_ACCESS_DENIED,
+        "R-170cd: only the primary may write"
+    );
+
+    // Open message/stream channels as the primary, then release the channel.
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.remote
+        .write_reg(
+            reg::MESSAGE_CHANNEL_DEST_ADDRESS,
+            u32::from(Ipv4Addr::LOCALHOST),
+        )
+        .unwrap();
+    s.remote
+        .write_reg(
+            reg::MESSAGE_CHANNEL_PORT,
+            reg::mcp_make(rx.local_addr().unwrap().port()),
+        )
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCP0, reg::scp_make(rx.local_addr().unwrap().port()))
+        .unwrap();
+    s.remote.write_reg(reg::CCP, 0).unwrap();
+
+    assert_eq!(
+        secondary.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(),
+        0,
+        "R-072cd: MCP cleared on control-channel close"
+    );
+    assert_eq!(
+        secondary.read_reg(reg::SCP0).unwrap(),
+        0,
+        "R-072cd: SCPx cleared on control-channel close"
+    );
 }

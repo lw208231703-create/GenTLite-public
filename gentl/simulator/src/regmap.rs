@@ -215,6 +215,9 @@ fn channel_word_index(off: u32) -> usize {
 struct CcpState {
     /// Granted privilege: reg::CCP_EXCLUSIVE_ACCESS, reg::CCP_CONTROL_ACCESS, or 0.
     flags: u32,
+    /// Primary application (control-channel peer): secondary applications
+    /// are restricted by R-063cd (exclusive) and R-170cd (writes).
+    peer: Option<SocketAddr>,
     /// CCP bits 16-19: incremented on every channel open, never 0 again
     /// after the first connection (saturating at 15).
     connection_count: u32,
@@ -224,27 +227,26 @@ struct CcpState {
 }
 
 impl Inner {
-    /// GenTL-style watchdog pair for the control channel:
-    /// - R-075cd: any valid command from the primary resets the heartbeat
-    ///   counter;
-    /// - R-076cd: without one for 3x the heartbeat timeout (§10.5) the
-    ///   device MUST close the control channel — modelled by releasing the
-    ///   granted privilege (the client's next command sees `CCP == 0`).
-    fn primary_contact(&mut self) {
+    /// R-076cd: more than one HEARTBEAT_TIMEOUT period without a control
+    /// message from the primary closes the control channel (state reset; the
+    /// caller performs the R-072cd stream/message cleanup).
+    fn expire_heartbeat(&mut self) -> bool {
         if self.ccp.flags == 0 {
-            return;
+            return false;
         }
-        let window = Duration::from_millis(3 * u64::from(self.heartbeat_ms));
+        let window = Duration::from_millis(u64::from(self.heartbeat_ms));
         if self
             .ccp
             .last_activity
-            .is_some_and(|last| last.elapsed() >= window)
+            .is_some_and(|last| last.elapsed() > window)
         {
             self.ccp.flags = 0;
+            self.ccp.peer = None;
             self.ccp.last_activity = None;
-            return;
+            true
+        } else {
+            false
         }
-        self.ccp.last_activity = Some(Instant::now());
     }
 }
 
@@ -321,14 +323,63 @@ impl SimRegMap {
         boot[addr as usize..addr as usize + n].copy_from_slice(&bytes[..n]);
     }
 
-    /// R-075cd heartbeat bookkeeping: every valid command from the primary
-    /// application refreshes the control-channel watchdog; an idle channel is
-    /// closed after 3x the heartbeat timeout (R-076cd, §10.5).
-    fn primary_contact(&self) {
-        self.inner
-            .lock()
-            .expect("sim regmap poisoned")
-            .primary_contact();
+    /// Authorize one command from `peer` (GigE Vision 10.1): the primary
+    /// application is the control-channel owner; during exclusive access
+    /// every other application is denied (R-063cd), during control access
+    /// writes are denied (R-170cd). Primary traffic resets the heartbeat; an
+    /// expired channel is closed and cleaned up (R-072cd).
+    fn authorize(&self, peer: SocketAddr, write: bool) -> Result<(), u16> {
+        let expired = {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            if i.ccp.flags == 0 {
+                return Ok(());
+            }
+            if i.expire_heartbeat() {
+                true
+            } else {
+                let exclusive = i.ccp.flags & reg::CCP_EXCLUSIVE_ACCESS != 0;
+                if i.ccp.peer == Some(peer) {
+                    i.ccp.last_activity = Some(Instant::now());
+                } else if write || exclusive {
+                    return Err(GEV_STATUS_ACCESS_DENIED);
+                }
+                false
+            }
+        };
+        if expired {
+            self.close_control_channel();
+        }
+        Ok(())
+    }
+
+    /// R-072cd: stop streaming and clear the message/GVSP connection state
+    /// when the primary control channel closes.
+    fn close_control_channel(&self) {
+        for x in 0..self.stream.channels.max(1) {
+            let _ = self.write_scp(x as u32, 0);
+        }
+        self.close_message_channel();
+    }
+
+    /// Heartbeat bookkeeping for the peer-less API (unit tests, embedded
+    /// users): such grants have `ccp.peer == None`. Channels granted through
+    /// the GVCP server carry a peer and are refreshed by `authorize`.
+    fn direct_contact(&self) {
+        let expired = {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            if i.ccp.flags == 0 || i.ccp.peer.is_some() {
+                return;
+            }
+            if i.expire_heartbeat() {
+                true
+            } else {
+                i.ccp.last_activity = Some(Instant::now());
+                false
+            }
+        };
+        if expired {
+            self.close_control_channel();
+        }
     }
 
     /// Test hook: send one EVENT_CMD (payload length 0) or EVENTDATA_CMD with
@@ -584,12 +635,12 @@ impl DeviceHandler for SimRegMap {
     }
 
     fn read_reg(&self, addr: u32) -> Result<u32, u16> {
+        self.direct_contact();
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
         // R-075cd: any valid command from the primary application resets the
         // heartbeat counter (and an idle channel times out, R-076cd).
-        self.primary_contact();
         if let Some((x, off)) = reg::stream_channel_addr(addr) {
             let i = self.inner.lock().expect("sim regmap poisoned");
             if Self::streaming_mode(&i) == reg::SCONF_PROTOCOL_GVRSP {
@@ -627,23 +678,26 @@ impl DeviceHandler for SimRegMap {
     }
 
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
+        self.direct_contact();
         if addr % 4 != 0 {
             return Err(GEV_STATUS_BAD_ALIGNMENT);
         }
-        self.primary_contact();
         if let Some((x, off)) = reg::stream_channel_addr(addr) {
             return self.write_stream_channel(x, off, value);
         }
         let mut i = self.inner.lock().expect("sim regmap poisoned");
         if addr == reg::CCP {
-            // Simplified CCP state machine (no peer identity, see module
-            // docs): 0 releases; when open, EA (priority over CA) or CA is
-            // granted and the connection counter increments; when occupied,
-            // a repeated identical request succeeds (R-069cd) and any other
-            // non-zero write is denied.
+            // CCP: 0 closes the primary control channel; the peer identity
+            // and access checks are enforced in `write_reg_from`/`authorize`.
+            // R-070cd: the primary may switch EA <-> CA without closing.
             if value == 0 {
                 i.ccp.flags = 0;
+                i.ccp.peer = None;
                 i.ccp.last_activity = None;
+                drop(i);
+                // R-072cd: closing the primary channel stops streaming and
+                // clears the message/GVSP connection state.
+                self.close_control_channel();
                 return Ok(());
             }
             let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
@@ -661,14 +715,15 @@ impl DeviceHandler for SimRegMap {
                 i.ccp.last_activity = Some(Instant::now());
                 return Ok(());
             }
-            return if requested == i.ccp.flags {
-                // R-069cd: a repeated identical request succeeds and counts
-                // as primary traffic for the heartbeat window.
-                i.ccp.last_activity = Some(Instant::now());
-                Ok(())
+            // R-069cd: a repeated request succeeds; R-070cd: the primary
+            // may switch between EA and CA without closing the channel.
+            i.ccp.flags = if requested & reg::CCP_EXCLUSIVE_ACCESS != 0 {
+                reg::CCP_EXCLUSIVE_ACCESS
             } else {
-                Err(GEV_STATUS_ACCESS_DENIED)
+                reg::CCP_CONTROL_ACCESS
             };
+            i.ccp.last_activity = Some(Instant::now());
+            return Ok(());
         }
         if addr == reg::MESSAGE_CHANNEL_DEST_ADDRESS || addr == reg::MESSAGE_CHANNEL_PORT {
             // §12.2: the channel opens when MCP carries a non-zero host port
@@ -803,13 +858,14 @@ impl DeviceHandler for SimRegMap {
     }
 
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+        self.direct_contact();
         // READMEM is a primary-application command like READREG: it resets
         // the heartbeat watchdog (R-075cd).
-        self.primary_contact();
         self.read_mapped(addr, count as u32)
     }
 
     fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.direct_contact();
         // R-185cd: WRITEMEM is mandatory for every device. R-188cd/R-189c:
         // a length that is not a multiple of 4 or an unaligned address is
         // BAD_ALIGNMENT.
@@ -828,6 +884,37 @@ impl DeviceHandler for SimRegMap {
             self.write_reg(word_addr, value)?;
         }
         Ok(())
+    }
+
+    fn write_reg_from(&self, peer: SocketAddr, addr: u32, value: u32) -> Result<(), u16> {
+        self.authorize(peer, true)?;
+        let result = self.write_reg(addr, value);
+        if result.is_ok() && addr == reg::CCP && value != 0 {
+            // The grant/switch above succeeded for this peer: record the
+            // primary application for later access checks.
+            self.inner.lock().expect("sim regmap poisoned").ccp.peer = Some(peer);
+        }
+        result
+    }
+
+    fn read_reg_from(&self, peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+        self.authorize(peer, false)?;
+        self.read_reg(addr)
+    }
+
+    fn read_mem_from(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        count: u16,
+    ) -> Result<Vec<u8>, u16> {
+        self.authorize(peer, false)?;
+        self.read_mem(addr, count)
+    }
+
+    fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.authorize(peer, true)?;
+        self.write_mem(addr, data)
     }
 
     fn force_ip(
@@ -895,7 +982,6 @@ impl SimRegMap {
     pub fn packet_resend(&self, channel: u16, block_id: u64, first: u32, last: u32) {
         // A resend request is a valid GVCP command from the primary
         // application, so it also refreshes the heartbeat (R-075cd).
-        self.primary_contact();
         self.scheduler.packet_resend(channel, block_id, first, last);
     }
 
@@ -1139,14 +1225,26 @@ impl DeviceHandler for SimDevice {
     fn read_reg(&self, addr: u32) -> Result<u32, u16> {
         self.map.read_reg(addr)
     }
+    fn read_reg_from(&self, peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+        self.map.read_reg_from(peer, addr)
+    }
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
         self.map.write_reg(addr, value)
+    }
+    fn write_reg_from(&self, peer: SocketAddr, addr: u32, value: u32) -> Result<(), u16> {
+        self.map.write_reg_from(peer, addr, value)
     }
     fn read_mem(&self, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
         self.map.read_mem(addr, count)
     }
+    fn read_mem_from(&self, peer: SocketAddr, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+        self.map.read_mem_from(peer, addr, count)
+    }
     fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.map.write_mem(addr, data)
+    }
+    fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.map.write_mem_from(peer, addr, data)
     }
     fn force_ip(
         &self,
@@ -1225,11 +1323,13 @@ mod tests {
             m.read_reg(reg::CCP).unwrap(),
             reg::CCP_EXCLUSIVE_ACCESS | (1 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
-        // Different privilege while occupied: denied.
+        // R-070cd: the primary switches privilege without closing the channel.
+        m.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS).unwrap();
         assert_eq!(
-            m.write_reg(reg::CCP, reg::CCP_CONTROL_ACCESS),
-            Err(GEV_STATUS_ACCESS_DENIED)
+            m.read_reg(reg::CCP).unwrap(),
+            reg::CCP_CONTROL_ACCESS | (1 << reg::CCP_CONNECTION_COUNT_SHIFT)
         );
+        m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
         // Release, then control access grants and bumps the counter. The
         // connection count never returns to zero (spec §36.46).
         m.write_reg(reg::CCP, 0).unwrap();
@@ -1597,7 +1697,7 @@ mod tests {
             reg::CCP_EXCLUSIVE_ACCESS
         );
 
-        // Keep-alive traffic inside the 1.5 s window keeps the channel open;
+        // Keep-alive traffic inside the 500 ms window keeps the channel open;
         // any command counts, not just a CCP read (R-075cd).
         for _ in 0..3 {
             std::thread::sleep(Duration::from_millis(200));
@@ -1609,6 +1709,15 @@ mod tests {
             );
         }
 
+        // Open the message/stream channels so the R-072cd cleanup is
+        // observable after the heartbeat closes the control channel.
+        m.write_reg(reg::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(Ipv4Addr::LOCALHOST))
+            .unwrap();
+        m.write_reg(reg::MESSAGE_CHANNEL_PORT, reg::mcp_make(40000))
+            .unwrap();
+        m.write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST)).unwrap();
+        m.write_reg(reg::SCP0, reg::scp_make(40001)).unwrap();
+
         // Idle past the window: the next command observes the closed channel
         // (CCP reads 0) and a new grant succeeds.
         std::thread::sleep(Duration::from_millis(1600));
@@ -1617,6 +1726,8 @@ mod tests {
                 & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS),
             0
         );
+        assert_eq!(m.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(), 0);
+        assert_eq!(m.read_reg(reg::SCP0).unwrap(), 0);
         m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
         assert_eq!(
             m.read_reg(reg::CCP).unwrap() & reg::CCP_EXCLUSIVE_ACCESS,
@@ -1789,6 +1900,62 @@ mod tests {
         assert!(
             rx.recv_from(&mut buf).is_err(),
             "no events after the FORCEIP restart closed the message channel"
+        );
+    }
+
+    /// GigE Vision 10.1 access rules and R-072cd release cleanup:
+    /// - exclusive access denies every other application (R-063cd);
+    /// - the primary switches EA<->CA in place (R-070cd);
+    /// - control access lets secondaries read but not write (R-170cd);
+    /// - releasing the channel clears MCP and SCPx (R-072cd).
+    #[test]
+    fn peer_permissions_and_ccp_release_cleanup() {
+        use gentl_gvcp::server::DeviceHandler;
+        let m = test_map();
+        let p1 = SocketAddr::from((Ipv4Addr::LOCALHOST, 40001));
+        let p2 = SocketAddr::from((Ipv4Addr::LOCALHOST, 40002));
+
+        DeviceHandler::write_reg_from(&m, p1, reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+            .expect("first application gets EA");
+        assert_eq!(
+            DeviceHandler::read_reg_from(&m, p2, reg::VERSION),
+            Err(GEV_STATUS_ACCESS_DENIED),
+            "R-063cd: exclusive access denies secondary reads"
+        );
+        assert_eq!(
+            DeviceHandler::write_reg_from(&m, p2, REG_EXPOSURE_TIME, 1),
+            Err(GEV_STATUS_ACCESS_DENIED)
+        );
+
+        // R-070cd: the primary switches to CA without releasing.
+        DeviceHandler::write_reg_from(&m, p1, reg::CCP, reg::CCP_CONTROL_ACCESS)
+            .expect("EA -> CA switch");
+        assert!(
+            DeviceHandler::read_reg_from(&m, p2, reg::VERSION).is_ok(),
+            "control access allows secondary reads"
+        );
+        assert_eq!(
+            DeviceHandler::write_reg_from(&m, p2, REG_EXPOSURE_TIME, 1),
+            Err(GEV_STATUS_ACCESS_DENIED),
+            "R-170cd: only the primary may write"
+        );
+
+        // Open the message and stream channels as the primary, then release.
+        DeviceHandler::write_reg_from(&m, p1, reg::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(Ipv4Addr::LOCALHOST)).unwrap();
+        DeviceHandler::write_reg_from(&m, p1, reg::MESSAGE_CHANNEL_PORT, reg::mcp_make(40000)).unwrap();
+        DeviceHandler::write_reg_from(&m, p1, reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST)).unwrap();
+        DeviceHandler::write_reg_from(&m, p1, reg::SCP0, reg::scp_make(40001)).unwrap();
+        DeviceHandler::write_reg_from(&m, p1, reg::CCP, 0).expect("primary releases");
+
+        assert_eq!(
+            DeviceHandler::read_reg_from(&m, p2, reg::MESSAGE_CHANNEL_PORT).unwrap(),
+            0,
+            "R-072cd: MCP cleared on control-channel close"
+        );
+        assert_eq!(
+            DeviceHandler::read_reg_from(&m, p2, reg::SCP0).unwrap(),
+            0,
+            "R-072cd: SCPx cleared on control-channel close"
         );
     }
 }

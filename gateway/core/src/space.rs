@@ -84,25 +84,30 @@ impl CcpState {
         if requested == 0 {
             return (Ok(()), false);
         }
+        let granted = if requested & reg::CCP_EXCLUSIVE_ACCESS != 0 {
+            reg::CCP_EXCLUSIVE_ACCESS
+        } else {
+            reg::CCP_CONTROL_ACCESS
+        };
         if self.flags == 0 {
-            self.flags = if requested & reg::CCP_EXCLUSIVE_ACCESS != 0 {
-                reg::CCP_EXCLUSIVE_ACCESS
-            } else {
-                reg::CCP_CONTROL_ACCESS
-            };
+            self.flags = granted;
             self.peer = peer;
             self.last_contact = Some(Instant::now());
             return (Ok(()), false);
         }
-        if self.peer.is_some() && peer.is_some() && peer != self.peer {
+        // R-070cd: the primary may switch between EA and CA without closing
+        // the channel; another application is denied (no CSE support).
+        let same_peer = match (self.peer, peer) {
+            (Some(owner), Some(requester)) => owner == requester,
+            (None, _) => true,
+            (Some(_), None) => false,
+        };
+        if !same_peer {
             return (Err(GEV_STATUS_ACCESS_DENIED), false);
         }
-        if requested == self.flags {
-            self.last_contact = Some(Instant::now());
-            (Ok(()), false)
-        } else {
-            (Err(GEV_STATUS_ACCESS_DENIED), false)
-        }
+        self.flags = granted;
+        self.last_contact = Some(Instant::now());
+        (Ok(()), false)
     }
 }
 
@@ -432,13 +437,15 @@ impl RegisterSpace {
 
     fn ccp_read(&self) -> u32 {
         let mut c = self.ccp.lock().expect("vgige ccp poisoned");
-        if c.expire_stale_grant() {
-            self.channel.close();
+        let expired = c.expire_stale_grant();
+        let flags = c.flags;
+        drop(c);
+        if expired {
+            // R-072cd: closing the primary control channel aborts streaming
+            // and clears the message channel state.
+            self.cleanup_control_channel();
         }
-        if c.flags != 0 {
-            c.last_contact = Some(Instant::now());
-        }
-        c.flags
+        flags
     }
 
     fn ccp_write(&self, value: u32, peer: Option<SocketAddr>) -> Result<(), u16> {
@@ -447,9 +454,69 @@ impl RegisterSpace {
         let (result, close) = c.update(value, peer);
         drop(c);
         if expired || close {
-            self.channel.close();
+            self.cleanup_control_channel();
         }
         result
+    }
+
+    /// R-072cd: closing the primary control channel stops streaming and
+    /// clears the message channel (MCP/MCDA) and GVSP stream (SCPx) state.
+    fn cleanup_control_channel(&self) {
+        self.channel.close();
+        self.close_message_channel();
+    }
+
+    /// GigE Vision 10.1 access rules: exclusive access denies every other
+    /// application (R-063cd), control access allows secondary reads only
+    /// (R-170cd writes). Primary traffic resets the heartbeat; an expired
+    /// channel is closed and cleaned up per R-076cd/R-072cd.
+    fn authorize(&self, peer: SocketAddr, write: bool) -> Result<(), u16> {
+        let expired = {
+            let mut c = self.ccp.lock().expect("vgige ccp poisoned");
+            if c.flags == 0 {
+                return Ok(());
+            }
+            if c.expire_stale_grant() {
+                true
+            } else {
+                let exclusive = c.flags & reg::CCP_EXCLUSIVE_ACCESS != 0;
+                if c.peer == Some(peer) {
+                    c.last_contact = Some(Instant::now());
+                } else if write || exclusive {
+                    return Err(GEV_STATUS_ACCESS_DENIED);
+                }
+                false
+            }
+        };
+        if expired {
+            self.cleanup_control_channel();
+        }
+        Ok(())
+    }
+
+    pub fn read_reg_from(&self, peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+        self.authorize(peer, false)?;
+        self.read_reg(addr)
+    }
+
+    pub fn read_mem_from(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        count: u16,
+    ) -> Result<Vec<u8>, u16> {
+        self.authorize(peer, false)?;
+        self.read_block(addr, count)
+    }
+
+    pub fn write_mem_from(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), u16> {
+        self.authorize(peer, true)?;
+        self.write_block(addr, data)
     }
 
     fn back_read_reg(&self, addr: u32) -> Result<u32, u16> {
@@ -723,6 +790,7 @@ impl RegisterSpace {
         if addr == reg::CCP {
             return self.ccp_write(value, Some(peer));
         }
+        self.authorize(peer, true)?;
         self.write_reg(addr, value)
     }
 
@@ -1028,6 +1096,11 @@ mod ccp_tests {
 
         let (r, _) = c.update(reg::CCP_EXCLUSIVE_ACCESS, Some(p1));
         assert_eq!(r, Ok(()));
+
+        // R-070cd: the primary may switch to control access in place.
+        let (r, _) = c.update(reg::CCP_CONTROL_ACCESS, Some(p1));
+        assert_eq!(r, Ok(()));
+        assert_eq!(c.flags, reg::CCP_CONTROL_ACCESS);
 
         let (r, _) = c.update(0, Some(p2));
         assert_eq!(r, Err(GEV_STATUS_ACCESS_DENIED));

@@ -142,6 +142,10 @@ impl DeviceHandler for GigEFront {
         self.space.read_reg(addr)
     }
 
+    fn read_reg_from(&self, peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+        self.space.read_reg_from(peer, addr)
+    }
+
     fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
         self.write_reg_from(
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
@@ -173,8 +177,16 @@ impl DeviceHandler for GigEFront {
         self.space.read_block(addr, count)
     }
 
+    fn read_mem_from(&self, peer: SocketAddr, addr: u32, count: u16) -> Result<Vec<u8>, u16> {
+        self.space.read_mem_from(peer, addr, count)
+    }
+
     fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.space.write_block(addr, data)
+    }
+
+    fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.space.write_mem_from(peer, addr, data)
     }
 }
 
