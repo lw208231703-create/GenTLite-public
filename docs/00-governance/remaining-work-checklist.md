@@ -144,3 +144,10 @@
 - 修复：SIRM 逐字节权限；控制字用当前寄存器 + 本次字节合并后校验，不再越界切片；失败返回 GenCP 状态而非 panic。
 - 验证：288 tests / 0 failed / 0 warnings；板端 USB 部分字节写 ACK 正确、服务存活、streaming 20/20 帧。
 
+## R. 2026-11-24 第五轮 review 复核（UserSet/事件注册/ROI/FORCEIP）
+
+- 真缺陷：UserSetLoad Default 无效果、DeviceReset 不读 UserSetDefault、UserSetSave 非非易失、ROI 可超出 4096×4096；均已修复并测试（UserSet 持久化文件；ROI 双向钳制）。
+- 事件注册：review 所述"并发重复成功"不成立（检查+插入同一锁），但补了 register/unregister/close lifecycle 互斥；8 线程并发测试 = 1 成功/7 RESOURCE_IN_USE。
+- FORCEIP 非零地址：确认是已知强制条款缺口（Q40），在 compliance §26.1 明确列为"不支持"，不再宣称 relay front 全条款通过。
+- 验证：291 tests / 0 failed / 0 warnings；板端 GVCP UserSet/ROI 实测 + 服务重启持久化实测。
+

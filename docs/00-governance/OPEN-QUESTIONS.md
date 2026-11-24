@@ -1126,6 +1126,12 @@ scope for a proxy device).
 occupied-channel discards) and `gateway/cli/tests/relay_e2e.rs`
 (`force_ip_to_the_virtual_device_is_discarded`).
 
+**Compliance status (2026-11-24):** this is a *known mandatory-requirement
+gap* of the relayed virtual GigE device (R-147cd/R-152cd). It is listed
+explicitly in `compliance/spec-audit/2026-11-gap-closure.md` §26 "known
+unsupported mandatory requirements"; the project must not claim full GigE
+Vision conformance for the relay front while this decision stands.
+
 ## Q41: 网关事件中继的 ACK/重传（MCTT/MCRC）v1 取舍
 
 **规范**：GigE Vision 3.0 §12.3（CR-101cd/CR-102cd/CR-103cd）：应用写 MCTT 后设备必须为消息通道消息置 ACKNOWLEDGE 位并按 MCRC 重传，直到收到 EVENT_ACK。
