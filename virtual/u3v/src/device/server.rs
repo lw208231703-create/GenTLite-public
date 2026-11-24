@@ -63,6 +63,17 @@ fn decode_command(cmd: &[u8]) -> Option<(packets::CommandCcd, &[u8])> {
 
 fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
     let (ccd, scd) = decode_command(cmd)?;
+    // R-134cd: a command with a valid prefix/command_id but the
+    // CommandResend flag set MUST answer U3V_STATUS_RESEND_NOT_SUPPORTED
+    // instead of being executed (U3V 1.2 has no resend semantics).
+    if ccd.flags & packets::FLAG_COMMAND_RESEND != 0 {
+        return Some(packets::encode_ack(
+            packets::U3V_STATUS_RESEND_NOT_SUPPORTED,
+            ccd.command_id.wrapping_add(1),
+            ccd.request_id,
+            &[],
+        ));
+    }
     match ccd.command_id {
         packets::READMEM_CMD => {
             let (addr, len) = packets::decode_readmem_scd(scd)?;
@@ -131,5 +142,96 @@ mod tests {
         short_write[8..10].copy_from_slice(&4u16.to_le_bytes());
         short_write.truncate(packets::CMD_OVERHEAD + 4);
         assert!(decode_command(&short_write).is_none());
+    }
+
+    /// R-134cd: CommandResend is not supported and must not execute the
+    /// command; the device answers U3V_STATUS_RESEND_NOT_SUPPORTED.
+    #[test]
+    fn command_resend_is_rejected_without_execution() {
+        use vgige_core::{BackIdentity, SharedBack};
+        let cfg = crate::DeviceConfig::from_parts(
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
+            b"<x/>",
+            4,
+            [0u8; 16],
+        );
+        let back: SharedBack = Arc::new(std::sync::Mutex::new(
+            vgige_back_null::NullBack::new(),
+        ));
+        let regs = RegisterFile::new(cfg, back);
+        let mut cmd = packets::encode_writemem(7, 0x0004_1000, &[0xAA; 4]);
+        cmd[4..6].copy_from_slice(
+            &(packets::FLAG_REQUEST_ACK | packets::FLAG_COMMAND_RESEND).to_le_bytes(),
+        );
+        let ack = dispatch(&cmd, &regs).expect("acknowledge");
+        assert_eq!(
+            u16::from_le_bytes([ack[4], ack[5]]),
+            packets::U3V_STATUS_RESEND_NOT_SUPPORTED
+        );
+        assert_eq!(
+            u16::from_le_bytes([ack[6], ack[7]]),
+            packets::WRITEMEM_ACK,
+            "the acknowledge keeps the command id + 1"
+        );
+        assert_eq!(
+            u16::from_le_bytes([ack[8], ack[9]]),
+            0,
+            "no SCD on the resend rejection"
+        );
+
+        // The rule applies to every valid command id, not just writes.
+        let mut read = packets::encode_readmem(8, 0x0000, 4);
+        read[4..6].copy_from_slice(
+            &(packets::FLAG_REQUEST_ACK | packets::FLAG_COMMAND_RESEND).to_le_bytes(),
+        );
+        let ack = dispatch(&read, &regs).expect("acknowledge");
+        assert_eq!(
+            u16::from_le_bytes([ack[4], ack[5]]),
+            packets::U3V_STATUS_RESEND_NOT_SUPPORTED
+        );
+        assert_eq!(
+            u16::from_le_bytes([ack[6], ack[7]]),
+            packets::READMEM_ACK
+        );
+    }
+
+    /// A high memory address must not wrap `addr + len` and kill the GenCP
+    /// service; the command answers GENCP_INVALID_ADDRESS.
+    #[test]
+    fn huge_address_write_answers_invalid_address() {
+        use vgige_core::{BackIdentity, SharedBack};
+        let cfg = crate::DeviceConfig::from_parts(
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
+            b"<x/>",
+            4,
+            [0u8; 16],
+        );
+        let back: SharedBack = Arc::new(std::sync::Mutex::new(
+            vgige_back_null::NullBack::new(),
+        ));
+        let regs = RegisterFile::new(cfg, back);
+        let cmd = packets::encode_writemem(9, u64::MAX - 3, &[1, 2, 3, 4]);
+        let ack = dispatch(&cmd, &regs).expect("acknowledge");
+        assert_eq!(
+            u16::from_le_bytes([ack[4], ack[5]]),
+            packets::GENCP_INVALID_ADDRESS
+        );
+        assert_eq!(u16::from_le_bytes([ack[6], ack[7]]), packets::WRITEMEM_ACK);
     }
 }

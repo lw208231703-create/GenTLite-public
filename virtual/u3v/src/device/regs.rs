@@ -40,8 +40,11 @@ struct Region {
 
 impl Region {
     fn contains(&self, addr: u64, len: u64) -> bool {
+        let Some(end) = addr.checked_add(len) else {
+            return false;
+        };
         addr >= self.base
-            && addr + len <= self.base + self.mem.lock().expect("region lock").len() as u64
+            && end <= self.base + self.mem.lock().expect("region lock").len() as u64
     }
 }
 
@@ -274,6 +277,9 @@ impl RegisterFile {
     /// One register/block read; Err is a GenCP status code (§4.3.2.1).
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), u16> {
         let len = buf.len() as u64;
+        let end = addr
+            .checked_add(len)
+            .ok_or(packets::GENCP_INVALID_ADDRESS)?;
         if (addr == ACQ_BASE + 0x08 || addr == SIRM_BASE + packets::sirm::SI_REQUIRED_PAYLOAD_SIZE)
             && (len == 4 || len == 8)
         {
@@ -286,7 +292,7 @@ impl RegisterFile {
         // Custom window first (it overlaps no device region, but the
         // dispatch is clearest ordered: device → window → camera).
         if addr >= u64::from(CUSTOM_BASE)
-            && addr + len <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
+            && end <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
         {
             if len % 4 != 0 || addr % 4 != 0 {
                 return Err(packets::GENCP_BAD_ALIGNMENT);
@@ -310,7 +316,7 @@ impl RegisterFile {
             }
             // R-58cd: Current Speed reflects the live link, not a constant.
             let speed_addr = SBRM_BASE + 0x40;
-            if addr <= speed_addr && addr + len > speed_addr {
+            if addr <= speed_addr && end > speed_addr {
                 let off = (speed_addr - addr) as usize;
                 buf[off..off + 4].copy_from_slice(&current_speed().to_le_bytes());
             }
@@ -323,11 +329,14 @@ impl RegisterFile {
     /// One register/block write; Err is a GenCP status code.
     pub fn write(&self, addr: u64, data: &[u8]) -> Result<(), u16> {
         let len = data.len() as u64;
+        let end = addr
+            .checked_add(len)
+            .ok_or(packets::GENCP_INVALID_ADDRESS)?;
         if (addr == ACQ_BASE || addr == ACQ_BASE + 4) && len == 4 {
             self.back_write(addr, data)?;
         }
         if addr >= u64::from(CUSTOM_BASE)
-            && addr + len <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
+            && end <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
         {
             if len != 4 || addr % 4 != 0 {
                 return Err(packets::GENCP_BAD_ALIGNMENT);
@@ -360,7 +369,7 @@ impl RegisterFile {
             // register is written, so a rejected enable leaves it at 0.
             let si_lo = SIRM_BASE + packets::sirm::SI_CONTROL;
             let si_hi = si_lo + 4;
-            let control_word = if r.base == SIRM_BASE && addr < si_hi && addr + len > si_lo {
+            let control_word = if r.base == SIRM_BASE && addr < si_hi && end > si_lo {
                 // Merge the (possibly partial) write with the current
                 // register; a 1..3-byte write must not index past `data`.
                 let mut word = [0u8; 4];
@@ -552,7 +561,9 @@ fn current_speed() -> u32 {
             return speed;
         }
     }
-    1 << 3
+    // R-58cd asks for the current link speed; when it cannot be probed,
+    // report "unknown" (no speed bit set) instead of claiming SuperSpeed.
+    0
 }
 
 #[cfg(target_os = "linux")]
@@ -796,7 +807,12 @@ mod tests {
         }
         let mut speed = [0u8; 4];
         rf.read(crate::SBRM_BASE + 0x40, &mut speed).unwrap();
-        assert_eq!(u32::from_le_bytes(speed), 0x08);
+        let speed = u32::from_le_bytes(speed);
+        assert_eq!(speed & 0xFFFF_FF80, 0, "reserved speed bits stay 0");
+        assert!(
+            speed == 0 || speed.count_ones() == 1,
+            "known speed must be one bmSpeedSupport bit, got 0x{speed:02X}"
+        );
         let _ = &mut b;
     }
 
@@ -1166,5 +1182,32 @@ mod tests {
         rf.read(SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, &mut ts)
             .unwrap();
         assert_eq!(u32::from_le_bytes(ts), 4096);
+    }
+
+    /// A malformed GenCP address must answer INVALID_ADDRESS instead of
+    /// wrapping `addr + len` and panicking on a huge custom-window slot.
+    #[test]
+    fn high_address_access_does_not_panic() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        let bad = u64::MAX - 3;
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            rf.read(bad, &mut buf),
+            Err(packets::GENCP_INVALID_ADDRESS),
+            "read overflow"
+        );
+        assert_eq!(
+            rf.write(bad, &[0u8; 4]),
+            Err(packets::GENCP_INVALID_ADDRESS),
+            "write overflow"
+        );
+        assert_eq!(
+            rf.write(u64::from(CUSTOM_BASE) + 5 * 4, &[0u8; 4]),
+            Ok(()),
+            "the boundary itself stays writable"
+        );
     }
 }
