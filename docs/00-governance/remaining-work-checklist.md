@@ -124,3 +124,11 @@
 - 修复：genlt-core 增加 ParsingChunkData + event_id_hex；genlt-gige/u3v 修正 EVENT_DATA_ID/VALUE、EventFlush/Kill、chunk 错误码；gvcp 与 u3v/control 采用 PENDING_ACK time_to_completion；gateway 支持多 word 虚拟寄存器块访问；simulator 强制 LLA 常开。
 - 验证：275 tests / 0 failed / 0 warning；提交 ed1292d、9d5a6d5、00e7984、8bdf600、ddf4452。
 
+## O. 2026-11-24 第二轮外部 review 复核
+
+- 结论：4 个新问题 + 3 个历史问题中 6 组为真缺陷/改进点；第 5 组的"模拟器同样违反"判断不准确（模拟器已实现 R-586cd/R-588cd/R-562st），网关侧确实缺失。
+- 修复：不完整缓冲区 DATA_SIZE；FORCEIP 关闭消息通道（模拟器+网关）；GVCP 服务端空 READREG/未对齐 READMEM 校验；XML 单引号/属性顺序；网关流寄存器严格状态与 SCPS 取整；U3V SIRM RO 权限与开流快照；U3V Current Speed 实测与 FunctionFS 字符串 ID 偏移。
+- 验证：285 tests / 0 failed / 0 warnings；板端 USB 描述符读回 index4/5/6 = GUID/Function/DeviceVersion，Current Speed 实测 super-speed；本机 U3V producer 枚举并打开成功。
+- 待办：宿主机 NI-IMAQ 驱动异常（niimaqk.sys 缺失、NIPALK 加载失败），需重启/修复 NI 安装后重跑 NI 矩阵（本机环境问题，已在 compliance §23 记录）。
+- 提交：5519b08、8232d88、ddb7993、422985d、434a1cf。
+
