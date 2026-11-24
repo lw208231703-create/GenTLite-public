@@ -592,6 +592,85 @@ fn data_stream_end_to_end() {
     );
     assert_eq!(payload_info, payload_size, "STREAM_INFO_PAYLOAD_SIZE");
 
+    // -- GenTL stacked query semantics (6.3.5.17/6.3.5.18) ----------------
+    // Force a known last error; per-entry stacked results must not change it.
+    let mut dummy_type: InfoDataType = 0;
+    let mut dummy_size = 0usize;
+    assert_eq!(
+        DSGetBufferInfo(
+            ds,
+            ptr::null_mut(),
+            9,
+            &mut dummy_type,
+            ptr::null_mut(),
+            &mut dummy_size
+        ),
+        GC_ERR_INVALID_HANDLE
+    );
+    let mut err_code: GCError = 0;
+    let mut err_size = 0usize;
+    assert_eq!(
+        GCGetLastError(&mut err_code, ptr::null_mut(), &mut err_size),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(err_code, GC_ERR_INVALID_HANDLE);
+
+    let mut filled = 0usize;
+    let mut entries = [
+        DSBufferInfoStacked {
+            i_info_cmd: 9,
+            i_type: 0,
+            p_buffer: (&mut filled as *mut usize).cast(),
+            i_size: std::mem::size_of::<usize>(),
+            i_result: GC_ERR_SUCCESS,
+        },
+        DSBufferInfoStacked {
+            i_info_cmd: 9999,
+            i_type: 0,
+            p_buffer: ptr::null_mut(),
+            i_size: 0,
+            i_result: GC_ERR_SUCCESS,
+        },
+    ];
+    assert_eq!(
+        DSGetBufferInfoStacked(ds, handles[0], entries.as_mut_ptr(), 2),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(entries[0].i_result, GC_ERR_SUCCESS);
+    assert_ne!(entries[1].i_result, GC_ERR_SUCCESS);
+    let mut after_code: GCError = 0;
+    let mut after_size = 0usize;
+    assert_eq!(
+        GCGetLastError(&mut after_code, ptr::null_mut(), &mut after_size),
+        GC_ERR_SUCCESS
+    );
+    assert_eq!(
+        after_code, err_code,
+        "stacked per-entry results must not change GCGetLastError"
+    );
+    assert_eq!(
+        DSGetBufferInfoStacked(ds, handles[0], ptr::null_mut(), 0),
+        GC_ERR_INVALID_PARAMETER,
+        "iNumInfos == 0 is invalid"
+    );
+    assert_eq!(
+        DSGetBufferPartInfoStacked(ds, handles[0], ptr::null_mut(), 0),
+        GC_ERR_INVALID_PARAMETER
+    );
+    let mut part = [DSBufferPartInfoStacked {
+        i_part_index: 0,
+        i_info_cmd: 0,
+        i_result: GC_ERR_SUCCESS,
+        i_type: 0,
+        p_buffer: ptr::null_mut(),
+        i_size: 0,
+    }];
+    assert_eq!(
+        DSGetBufferPartInfoStacked(ds, handles[0], part.as_mut_ptr(), 1),
+        GC_ERR_NOT_IMPLEMENTED,
+        "buffer parts are not implemented as a whole call"
+    );
+
     // EventFlush empties the queue; GCUnregisterEvent invalidates it.
     assert_eq!(EventFlush(ev), GC_ERR_SUCCESS);
     assert_eq!(EventKill(ev), GC_ERR_SUCCESS);

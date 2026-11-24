@@ -255,7 +255,18 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
 /// `every_export_body_is_panic_guarded` enforces that mechanically, and
 /// the default panic hook still reports the panic and backtrace on
 /// stderr, so containment does not hide the bug.
+/// Run an exported entry point: every GenTL function except GCInitLib
+/// requires a live GCInitLib (GenTL 1.6 §6.3.1.1/§6.3.1.4), and a panic must
+/// not cross the `extern "C"` boundary.
 fn guard(body: impl FnOnce() -> GCError) -> GCError {
+    if !LIB_INITIALIZED.load(Ordering::SeqCst) {
+        set_error(GC_ERR_NOT_INITIALIZED, "no preceding call to GCInitLib");
+        return GC_ERR_NOT_INITIALIZED;
+    }
+    guard_unchecked(body)
+}
+
+fn guard_unchecked(body: impl FnOnce() -> GCError) -> GCError {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(code) => code,
         Err(payload) => {
@@ -454,7 +465,7 @@ pub extern "C" fn GCGetLastError(
 
 #[cfg_attr(feature = "cti-exports", no_mangle)]
 pub extern "C" fn GCInitLib() -> GCError {
-    guard(|| {
+    guard_unchecked(|| {
         // GenTL 1.6 §6.3.1.4: double GCInitLib without an intervening
         // GCCloseLib returns GC_ERR_RESOURCE_IN_USE (no reference counting).
         if LIB_INITIALIZED.swap(true, Ordering::SeqCst) {
@@ -468,6 +479,7 @@ pub extern "C" fn GCInitLib() -> GCError {
 pub extern "C" fn GCCloseLib() -> GCError {
     guard(|| {
         LIB_INITIALIZED.store(false, Ordering::SeqCst);
+        TL_OPENED.store(false, Ordering::SeqCst);
         GC_ERR_SUCCESS
     })
 }
@@ -2727,11 +2739,9 @@ pub extern "C" fn DSGetBufferInfoStacked(
     i_num_infos: usize,
 ) -> GCError {
     guard(|| {
-        if i_num_infos == 0 {
-            return GC_ERR_SUCCESS;
-        }
-        if p_info_stacked.is_null() {
-            return fail(GentlError::InvalidParameter("pInfoStacked"));
+        if i_num_infos == 0 || p_info_stacked.is_null() {
+            // 6.3.5.17/6.3.5.18: iNumInfos == 0 is INVALID_PARAMETER.
+            return fail(GentlError::InvalidParameter("pInfoStacked/iNumInfos"));
         }
         {
             let ds = match ds_from(h_ds) {
@@ -2742,6 +2752,7 @@ pub extern "C" fn DSGetBufferInfoStacked(
                 return e;
             }
         }
+        let (saved_code, saved_text) = last_error();
         for i in 0..i_num_infos {
             let entry = unsafe { &mut *p_info_stacked.add(i) };
             let mut size = entry.i_size;
@@ -2755,7 +2766,7 @@ pub extern "C" fn DSGetBufferInfoStacked(
             );
             entry.i_size = size;
         }
-        set_error(GC_ERR_SUCCESS, "no error");
+        set_error(saved_code, &saved_text);
         GC_ERR_SUCCESS
     })
 }
@@ -2770,11 +2781,9 @@ pub extern "C" fn DSGetBufferPartInfoStacked(
     i_num_infos: usize,
 ) -> GCError {
     guard(|| {
-        if i_num_infos == 0 {
-            return GC_ERR_SUCCESS;
-        }
-        if p_info_stacked.is_null() {
-            return fail(GentlError::InvalidParameter("pInfoStacked"));
+        if i_num_infos == 0 || p_info_stacked.is_null() {
+            // 6.3.5.17/6.3.5.18: iNumInfos == 0 is INVALID_PARAMETER.
+            return fail(GentlError::InvalidParameter("pInfoStacked/iNumInfos"));
         }
         {
             let ds = match ds_from(h_ds) {
@@ -2785,22 +2794,9 @@ pub extern "C" fn DSGetBufferPartInfoStacked(
                 return e;
             }
         }
-        for i in 0..i_num_infos {
-            let entry = unsafe { &mut *p_info_stacked.add(i) };
-            let mut size = entry.i_size;
-            entry.i_result = DSGetBufferPartInfo(
-                h_ds,
-                h_buffer,
-                entry.i_part_index,
-                entry.i_info_cmd,
-                &mut entry.i_type,
-                entry.p_buffer,
-                &mut size,
-            );
-            entry.i_size = size;
-        }
-        set_error(GC_ERR_SUCCESS, "no error");
-        GC_ERR_SUCCESS
+        // This producer reports no buffer parts at all (6.3.5.15/6.3.5.18):
+        // querying parts is not implemented as a whole call.
+        fail(GentlError::NotImplemented("buffer parts"))
     })
 }
 stub!(DSGetNumFlows(h_ds: DSHandle, pi_num_flows: *mut u32));
@@ -2932,13 +2928,16 @@ mod tests {
     /// 2026-10 CI run killed `cargo test -p gentl-u3v --lib`.
     #[test]
     fn guard_turns_an_entry_point_panic_into_gc_error() {
-        assert_eq!(guard(|| GC_ERR_SUCCESS), GC_ERR_SUCCESS);
-        assert_eq!(guard(|| panic!("boom in an entry point")), GC_ERR_ERROR);
+        assert_eq!(guard_unchecked(|| GC_ERR_SUCCESS), GC_ERR_SUCCESS);
+        assert_eq!(
+            guard_unchecked(|| panic!("boom in an entry point")),
+            GC_ERR_ERROR
+        );
         let (code, text) = last_error();
         assert_eq!(code, GC_ERR_ERROR);
         assert!(
-            text.contains("boom in an entry point"),
-            "last error text carries the panic payload, got {text:?}"
+            text.contains("internal panic: boom in an entry point"),
+            "last-error text carries the panic payload, got {text:?}"
         );
     }
 
@@ -2959,8 +2958,14 @@ mod tests {
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
                 .collect();
+            let body = after[brace + 1..].trim_start();
+            let guarded = if name == "GCInitLib" {
+                body.starts_with("guard_unchecked(||")
+            } else {
+                body.starts_with("guard(||")
+            };
             assert!(
-                after[brace + 1..].trim_start().starts_with("guard(||"),
+                guarded,
                 "`{name}` does not wrap its body in guard(|| ...)"
             );
             checked += 1;
@@ -2979,7 +2984,7 @@ mod tests {
     /// run there.
     #[test]
     fn tl_lifecycle_and_error_paths() {
-        GCCloseLib();
+        assert_eq!(GCCloseLib(), GC_ERR_NOT_INITIALIZED);
         let mut tl: TLHandle = ptr::null_mut();
         assert_eq!(TLOpen(&mut tl), GC_ERR_NOT_INITIALIZED);
         // The legacy GCGetInfo is gated on GCInitLib as well (§6.3.1.2).
@@ -3196,5 +3201,34 @@ mod tests {
         let mut tl3: TLHandle = ptr::null_mut();
         assert_eq!(TLOpen(&mut tl3), GC_ERR_SUCCESS);
         assert_eq!(TLClose(tl3), GC_ERR_SUCCESS);
+
+        // GenTL 6.3.1.1: GCCloseLib after GCCloseLib -> NOT_INITIALIZED, and
+        // every module function after close is NOT_INITIALIZED too.
+        // 6.3.5.17/6.3.5.18: iNumInfos == 0 is INVALID_PARAMETER.
+        assert_eq!(
+            DSGetBufferInfoStacked(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0
+            ),
+            GC_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(
+            DSGetBufferPartInfoStacked(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0
+            ),
+            GC_ERR_INVALID_PARAMETER
+        );
+        assert_eq!(GCCloseLib(), GC_ERR_SUCCESS);
+        assert_eq!(GCCloseLib(), GC_ERR_NOT_INITIALIZED);
+        let mut n_after: u32 = 0;
+        assert_eq!(
+            TLGetNumInterfaces(ptr::null_mut(), &mut n_after),
+            GC_ERR_NOT_INITIALIZED
+        );
     }
 }
