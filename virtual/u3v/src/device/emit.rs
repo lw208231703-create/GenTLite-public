@@ -138,7 +138,7 @@ fn emit_block(
         .map_or(frame.payload.len(), |region| region.offset.saturating_sub(8))
         .min(frame.payload.len());
     let payload = &frame.payload[..image_len];
-    let (ts, count, f1, f2) = regs.programmed_geometry();
+    let (ts, count, f1, f2) = regs.stream_geometry();
     emit_payload(stream, payload, ts, count, f1, f2, || regs.stream_enabled())?;
 
     let trailer = packets::encode_image_trailer(

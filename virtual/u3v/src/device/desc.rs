@@ -363,7 +363,24 @@ fn device_strings(config: &DeviceConfig, vid: u16) -> [String; 6] {
 /// functionfs.h): str_count, lang_count, then per language a le16 langid
 /// followed by str_count NUL-terminated UTF-8 strings.
 fn ffs_strings_record(config: &DeviceConfig, vid: u16) -> Vec<u8> {
-    let strings = device_strings(config, vid);
+    // FunctionFS string IDs are absolute composite IDs: the configfs device
+    // strings own 1..3 (manufacturer/product/serial), so `usb_string_ids_n`
+    // starts the FunctionFS table at ID 4. The descriptors reference
+    // STR_GUID=4, STR_FUNCTION=5 and STR_DEVICE_VERSION=6, therefore the
+    // FunctionFS record must start with those three strings and pad the rest
+    // (the kernel accepts extra strings and maps the Nth supplied string to
+    // ID base+N). Previously the record used the logical 1..6 order, which
+    // shifted every class string by three IDs: index 6 returned the serial
+    // number instead of the Device Version (verified by USB string readback).
+    let logical = device_strings(config, vid);
+    let strings = vec![
+        logical[3].clone(), // STR_GUID = 4
+        logical[4].clone(), // STR_FUNCTION = 5
+        logical[5].clone(), // STR_DEVICE_VERSION = 6
+        String::new(),
+        String::new(),
+        String::new(),
+    ];
     let mut b = Vec::new();
     b.extend_from_slice(&(strings.len() as u32).to_le_bytes()); // str_count
     b.extend_from_slice(&1u32.to_le_bytes()); // lang_count
@@ -540,6 +557,20 @@ mod tests {
             }
         }
         assert_eq!(nul, 6, "six NUL-terminated strings");
+        // The FunctionFS table starts at composite ID 4 (configfs owns 1..3):
+        // the first three strings are exactly the IDs the class descriptors
+        // reference (STR_GUID/STR_FUNCTION/STR_DEVICE_VERSION).
+        let ffs_string = |n: usize| -> String {
+            let mut pos = 10;
+            for _ in 0..n {
+                pos += p[pos..].iter().position(|&b| b == 0).unwrap() + 1;
+            }
+            let end = pos + p[pos..].iter().position(|&b| b == 0).unwrap();
+            String::from_utf8_lossy(&p[pos..end]).into_owned()
+        };
+        assert_eq!(ffs_string(0), guid_string(&[0xAB; 16], 0x1234));
+        assert_eq!(ffs_string(1), "USB3 Vision Device");
+        assert_eq!(ffs_string(2), "1", "STR_DEVICE_VERSION = ID 6");
         // The ep0 STRING answer stays in USB descriptor format.
         assert_eq!(&set.usb_strings[..4], &[4, 0x03, 0x09, 0x04]);
     }

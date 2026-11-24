@@ -56,6 +56,10 @@ pub struct RegisterFile {
     /// GigE backend at this boundary.
     back_endian: RegisterEndian,
     sirm_control: Mutex<u32>,
+    /// R-73st: RW* SIRM values captured at Stream Enable and held until the
+    /// stream is disabled, so mid-stream writes do not change the geometry
+    /// of a running transmission.
+    sirm_snapshot: Mutex<Option<(u32, u32, u32, u32)>>,
     eirm_control: Mutex<u32>,
     event_in: Mutex<Option<Arc<dyn super::DeviceTransfers>>>,
     watcher: Mutex<Option<Box<dyn Fn(bool) + Send>>>,
@@ -80,6 +84,7 @@ impl RegisterFile {
             back,
             back_endian,
             sirm_control: Mutex::new(0),
+            sirm_snapshot: Mutex::new(None),
             eirm_control: Mutex::new(0),
             event_in: Mutex::new(None),
             watcher: Mutex::new(None),
@@ -124,6 +129,7 @@ impl RegisterFile {
                 & !packets::sirm::CONTROL_STREAM_ENABLE;
             m[off..off + 4].copy_from_slice(&v.to_le_bytes());
         }
+        *self.sirm_snapshot.lock().expect("sirm snapshot lock") = None;
         if let Some(w) = &*self.watcher.lock().expect("watcher lock") {
             w(false);
         }
@@ -158,6 +164,16 @@ impl RegisterFile {
             w(SIRM_BASE + packets::sirm::SI_PAYLOAD_FINAL1_SIZE),
             w(SIRM_BASE + packets::sirm::SI_PAYLOAD_FINAL2_SIZE),
         )
+    }
+
+    /// Geometry of the transmission currently running: the RW* values
+    /// captured when Stream Enable was set (R-73st). Falls back to the live
+    /// registers when no stream is running.
+    pub fn stream_geometry(&self) -> (u32, u32, u32, u32) {
+        if let Some(snapshot) = *self.sirm_snapshot.lock().expect("sirm snapshot lock") {
+            return snapshot;
+        }
+        self.programmed_geometry()
     }
 
     fn region(&self, addr: u64) -> Option<&Region> {
@@ -198,9 +214,17 @@ impl RegisterFile {
             return Ok(());
         }
         if let Some(r) = self.region(addr).filter(|r| r.contains(addr, len)) {
-            let m = r.mem.lock().expect("region lock");
-            let off = (addr - r.base) as usize;
-            buf.copy_from_slice(&m[off..off + buf.len()]);
+            {
+                let m = r.mem.lock().expect("region lock");
+                let off = (addr - r.base) as usize;
+                buf.copy_from_slice(&m[off..off + buf.len()]);
+            }
+            // R-58cd: Current Speed reflects the live link, not a constant.
+            let speed_addr = SBRM_BASE + 0x40;
+            if addr <= speed_addr && addr + len > speed_addr {
+                let off = (speed_addr - addr) as usize;
+                buf[off..off + 4].copy_from_slice(&current_speed().to_le_bytes());
+            }
             return Ok(());
         }
         self.back_read(addr, len)
@@ -228,6 +252,18 @@ impl RegisterFile {
             if !r.writable {
                 return Err(packets::GENCP_WRITE_PROTECT);
             }
+            if r.base == SIRM_BASE {
+                // R-72cd: read-only SIRM registers must reject writes even
+                // though the region as a whole is writable.
+                let start = addr - SIRM_BASE;
+                let mut off = 0;
+                while off < len {
+                    if !sirm_offset_writable(start + off) {
+                        return Err(packets::GENCP_WRITE_PROTECT);
+                    }
+                    off += 4;
+                }
+            }
             {
                 let mut m = r.mem.lock().expect("region lock");
                 let off = (addr - r.base) as usize;
@@ -247,6 +283,14 @@ impl RegisterFile {
                 *guard = v;
                 drop(guard);
                 if enabled != was {
+                    // R-73st: capture the RW* geometry on enable and hold it
+                    // until the stream is disabled.
+                    if enabled {
+                        *self.sirm_snapshot.lock().expect("sirm snapshot lock") =
+                            Some(self.programmed_geometry());
+                    } else {
+                        *self.sirm_snapshot.lock().expect("sirm snapshot lock") = None;
+                    }
                     if let Some(w) = &*self.watcher.lock().expect("watcher lock") {
                         w(enabled);
                     }
@@ -357,6 +401,66 @@ fn put_str(out: &mut Vec<u8>, s: &str, len: usize) {
 }
 
 /// Build the device-local regions (ABRM/manifest/SBRM/XML/SIRM).
+/// SIRM offsets whose access type is RW or RW* (U3V 1.2 Table 5-2).
+/// Everything else in the SIRM is read-only and must reject writes
+/// (R-72cd).
+fn sirm_offset_writable(off: u64) -> bool {
+    use packets::sirm::*;
+    matches!(
+        off,
+        SI_CONTROL
+            | SI_MAX_LEADER_SIZE
+            | SI_PAYLOAD_TRANSFER_SIZE
+            | SI_PAYLOAD_TRANSFER_COUNT
+            | SI_PAYLOAD_FINAL1_SIZE
+            | SI_PAYLOAD_FINAL2_SIZE
+            | SI_MAX_TRAILER_SIZE
+            | SI_PAYLOAD_MODE
+    )
+}
+
+/// [R-58cd] current link speed as the SBRM expects it: the same bit layout
+/// as bmSpeedSupport bits 0-6. Read live from the UDC that is bound to the
+/// gadget; falls back to SuperSpeed (bit 3) when the information is not
+/// available.
+fn current_speed() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(speed) = probe_udc_speed() {
+            return speed;
+        }
+    }
+    1 << 3
+}
+
+#[cfg(target_os = "linux")]
+fn probe_udc_speed() -> Option<u32> {
+    use std::fs;
+    // The gadget's UDC name: the single non-empty UDC file below configfs.
+    let mut udc = None;
+    for entry in fs::read_dir("/sys/kernel/config/usb_gadget").ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path().join("UDC");
+        if let Ok(name) = fs::read_to_string(&path) {
+            let name = name.trim();
+            if !name.is_empty() {
+                udc = Some(name.to_owned());
+                break;
+            }
+        }
+    }
+    let udc = udc?;
+    let speed = fs::read_to_string(format!("/sys/class/udc/{udc}/current_speed")).ok()?;
+    match speed.trim() {
+        "low-speed" => Some(1 << 0),
+        "full-speed" => Some(1 << 1),
+        "high-speed" => Some(1 << 2),
+        "super-speed" => Some(1 << 3),
+        "super-speed-plus" => Some(1 << 4),
+        _ => None,
+    }
+}
+
 fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     assert!(
         config.xml.len() <= XML_MAX,
@@ -640,5 +744,83 @@ mod tests {
         assert_eq!(back.lock().unwrap().read_reg(ACQ_BASE as u32).unwrap(), 1);
         rf.write(ACQ_BASE + 4, &0u32.to_le_bytes()).unwrap();
         assert_eq!(back.lock().unwrap().read_reg(ACQ_BASE as u32).unwrap(), 0);
+    }
+
+    fn null_cfg() -> DeviceConfig {
+        DeviceConfig::from_parts(
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
+            b"<x/>",
+            3072,
+            synthesize_guid("s"),
+        )
+    }
+
+    /// [R-72cd]: read-only SIRM registers reject writes with WRITE_PROTECT;
+    /// RW and RW* registers remain writable.
+    #[test]
+    fn sirm_read_only_registers_reject_writes() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        for off in [
+            packets::sirm::SI_INFO,
+            packets::sirm::SI_REQUIRED_PAYLOAD_SIZE,
+            packets::sirm::SI_REQUIRED_LEADER_SIZE,
+            packets::sirm::SI_REQUIRED_TRAILER_SIZE,
+            packets::sirm::SI_SUPPORTED_PAYLOAD_MODES,
+            packets::sirm::SI_GSIRM_ADDRESS,
+            packets::sirm::SI_GSIRM_SIZE,
+        ] {
+            let buf = [0u8; 8];
+            assert_eq!(
+                rf.write(SIRM_BASE + off, &buf[..if off == packets::sirm::SI_REQUIRED_PAYLOAD_SIZE { 8 } else { 4 }]),
+                Err(packets::GENCP_WRITE_PROTECT),
+                "offset 0x{off:02X} is read-only"
+            );
+        }
+        rf.write(SIRM_BASE + packets::sirm::SI_CONTROL, &1u32.to_le_bytes())
+            .expect("SI_CONTROL is RW");
+        rf.write(
+            SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE,
+            &100u32.to_le_bytes(),
+        )
+        .expect("RW* transfer size is writable");
+    }
+
+    /// [R-73st]: the RW* geometry is captured at Stream Enable and held
+    /// until the stream is disabled; mid-stream writes do not affect the
+    /// running transmission.
+    #[test]
+    fn sirm_geometry_is_snapshotted_at_stream_enable() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        let put = |off: u64, v: u32| {
+            rf.write(SIRM_BASE + off, &v.to_le_bytes()).unwrap();
+        };
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 1000);
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 2);
+        put(packets::sirm::SI_PAYLOAD_FINAL1_SIZE, 40);
+        put(packets::sirm::SI_PAYLOAD_FINAL2_SIZE, 8);
+        put(packets::sirm::SI_CONTROL, packets::sirm::CONTROL_STREAM_ENABLE);
+        assert_eq!(rf.stream_geometry(), (1000, 2, 40, 8));
+
+        // Mid-stream writes update the registers but not the snapshot.
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 2000);
+        assert_eq!(rf.stream_geometry(), (1000, 2, 40, 8));
+
+        // Disabling releases the snapshot: the live values apply again.
+        put(packets::sirm::SI_CONTROL, 0);
+        assert_eq!(rf.stream_geometry(), (2000, 2, 40, 8));
     }
 }
