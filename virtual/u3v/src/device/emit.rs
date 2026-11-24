@@ -160,13 +160,12 @@ fn emit_payload(
     enabled: impl Fn() -> bool,
 ) -> Result<(), StreamError> {
     if ts == 0 && count == 0 && f1 == 0 && f2 == 0 {
-        // Host enabled without programming: emit the payload as one
-        // piece (QoI — a standards-strict device would reject at Stream
-        // Enable with SI_REGISTERS_INCONSISTENT; Q39).
-        if !enabled() {
-            return Err(StreamError::Closed);
-        }
-        return stream.send(payload);
+        // 5.4.1.2 validation rejects this set at Stream Enable, so a zero
+        // snapshot must never reach the emitter; fail closed instead of
+        // silently sending the payload as one piece.
+        return Err(StreamError::Other(
+            "no SIRM payload transfer geometry programmed".into(),
+        ));
     }
     let planned: Vec<u32> = (0..count)
         .map(|_| ts)

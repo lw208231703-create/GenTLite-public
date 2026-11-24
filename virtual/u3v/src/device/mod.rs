@@ -360,7 +360,21 @@ mod tests {
         );
         let mut session = device.frame_session();
         let si_control = crate::SIRM_BASE + packets::sirm::SI_CONTROL;
-
+        // A standards-strict Stream Enable needs a complete geometry
+        // (5.4.1.2); the emitter-only parts of this test would otherwise be
+        // preceded by a rejected enable.
+        for (off, value) in [
+            (packets::sirm::SI_MAX_LEADER_SIZE, packets::IMAGE_LEADER_LEN as u32),
+            (packets::sirm::SI_MAX_TRAILER_SIZE, packets::IMAGE_TRAILER_LEN as u32),
+            (packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, vgige_back_null::PAYLOAD as u32),
+            (packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 1),
+        ] {
+            device
+                .inner
+                .regs
+                .write(crate::SIRM_BASE + off, &value.to_le_bytes())
+                .unwrap();
+        }
         device
             .inner
             .regs

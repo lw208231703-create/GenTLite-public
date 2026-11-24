@@ -45,6 +45,26 @@ impl Region {
     }
 }
 
+/// R-73st: the RW* registers of one streaming channel, captured when
+/// Stream Enable is raised. `SI_CONTROL` is plain RW, not part of it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SirmSnapshot {
+    pub max_leader: u32,
+    pub transfer_size: u32,
+    pub transfer_count: u32,
+    pub final1: u32,
+    pub final2: u32,
+    pub max_trailer: u32,
+    pub payload_mode: u32,
+}
+
+impl SirmSnapshot {
+    /// Transfer geometry consumed by the frame emitter.
+    fn geometry(&self) -> (u32, u32, u32, u32) {
+        (self.transfer_size, self.transfer_count, self.final1, self.final2)
+    }
+}
+
 /// Device-side ABRM/SBRM/SIRM register file with the gateway dispatch
 /// (local ranges + custom window + camera pass-through).
 pub struct RegisterFile {
@@ -56,10 +76,10 @@ pub struct RegisterFile {
     /// GigE backend at this boundary.
     back_endian: RegisterEndian,
     sirm_control: Mutex<u32>,
-    /// R-73st: RW* SIRM values captured at Stream Enable and held until the
-    /// stream is disabled, so mid-stream writes do not change the geometry
-    /// of a running transmission.
-    sirm_snapshot: Mutex<Option<(u32, u32, u32, u32)>>,
+    /// R-73st: every RW* SIRM register captured at Stream Enable and held
+    /// until the stream is disabled, so mid-stream writes do not change the
+    /// geometry of a running transmission.
+    sirm_snapshot: Mutex<Option<SirmSnapshot>>,
     eirm_control: Mutex<u32>,
     event_in: Mutex<Option<Arc<dyn super::DeviceTransfers>>>,
     watcher: Mutex<Option<Box<dyn Fn(bool) + Send>>>,
@@ -171,9 +191,78 @@ impl RegisterFile {
     /// registers when no stream is running.
     pub fn stream_geometry(&self) -> (u32, u32, u32, u32) {
         if let Some(snapshot) = *self.sirm_snapshot.lock().expect("sirm snapshot lock") {
-            return snapshot;
+            return snapshot.geometry();
         }
         self.programmed_geometry()
+    }
+
+    /// The complete RW* snapshot of the running stream, if any.
+    pub fn stream_snapshot(&self) -> Option<SirmSnapshot> {
+        *self.sirm_snapshot.lock().expect("sirm snapshot lock")
+    }
+
+    /// Read one SIRM register word; `off` is relative to the SIRM base.
+    fn sirm_word(&self, off: u64) -> u32 {
+        let r = self.region(SIRM_BASE).expect("sirm region");
+        let m = r.mem.lock().expect("region lock");
+        let b = off as usize;
+        u32::from_le_bytes(m[b..b + 4].try_into().expect("u32"))
+    }
+
+    /// Capture every RW* register (R-73st/Table 5-1).
+    fn read_sirm_rw_star(&self) -> SirmSnapshot {
+        use packets::sirm::*;
+        SirmSnapshot {
+            max_leader: self.sirm_word(SI_MAX_LEADER_SIZE),
+            transfer_size: self.sirm_word(SI_PAYLOAD_TRANSFER_SIZE),
+            transfer_count: self.sirm_word(SI_PAYLOAD_TRANSFER_COUNT),
+            final1: self.sirm_word(SI_PAYLOAD_FINAL1_SIZE),
+            final2: self.sirm_word(SI_PAYLOAD_FINAL2_SIZE),
+            max_trailer: self.sirm_word(SI_MAX_TRAILER_SIZE),
+            payload_mode: self.sirm_word(SI_PAYLOAD_MODE),
+        }
+    }
+
+    /// 5.4.1.2: a Stream Enable the device cannot honour is rejected with
+    /// U3V_STATUS_SI_REGISTERS_INCONSISTENT (or the alignment status from
+    /// R-121cd), and the enable bit must not latch.
+    fn validate_sirm_enable(&self, snap: &SirmSnapshot) -> Result<(), u16> {
+        use packets::sirm::*;
+        let alignment = 1u64 << (self.sirm_word(SI_INFO) >> 24);
+        for value in [
+            snap.max_leader,
+            snap.max_trailer,
+            snap.transfer_size,
+            snap.final1,
+            snap.final2,
+        ] {
+            if u64::from(value) % alignment != 0 {
+                return Err(packets::U3V_STATUS_SI_PAYLOAD_SIZE_NOT_ALIGNED);
+            }
+        }
+        // Additional payload modes are not implemented: only Standard
+        // Transfer (0 or the MODE_STANDARD bit) is acceptable.
+        if snap.payload_mode & !MODE_STANDARD != 0 {
+            return Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT);
+        }
+        if snap.max_leader < self.sirm_word(SI_REQUIRED_LEADER_SIZE)
+            || snap.max_trailer < self.sirm_word(SI_REQUIRED_TRAILER_SIZE)
+        {
+            return Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT);
+        }
+        let required_payload = self
+            .back
+            .lock()
+            .map_err(|_| packets::GENCP_ERROR)?
+            .payload_size()
+            .unwrap_or(self.config.payload_size);
+        let capacity = u64::from(snap.transfer_size) * u64::from(snap.transfer_count)
+            + u64::from(snap.final1)
+            + u64::from(snap.final2);
+        if capacity < required_payload {
+            return Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT);
+        }
+        Ok(())
     }
 
     fn region(&self, addr: u64) -> Option<&Region> {
@@ -264,14 +353,33 @@ impl RegisterFile {
                     off += 4;
                 }
             }
+            // 5.4.1.2: validate a 0->1 Stream Enable before the control
+            // register is written, so a rejected enable leaves it at 0.
+            let si_lo = SIRM_BASE + packets::sirm::SI_CONTROL;
+            let control_word = if r.base == SIRM_BASE && addr <= si_lo && addr + len > si_lo {
+                let off = (si_lo - addr) as usize;
+                let word = u32::from_le_bytes(data[off..off + 4].try_into().expect("u32"));
+                if word & !packets::sirm::CONTROL_STREAM_ENABLE != 0 {
+                    return Err(packets::GENCP_INVALID_PARAMETER);
+                }
+                let was = *self.sirm_control.lock().expect("sirm control lock")
+                    & packets::sirm::CONTROL_STREAM_ENABLE
+                    != 0;
+                let wants = word & packets::sirm::CONTROL_STREAM_ENABLE != 0;
+                if wants && !was {
+                    self.validate_sirm_enable(&self.read_sirm_rw_star())?;
+                }
+                Some(word)
+            } else {
+                None
+            };
             {
                 let mut m = r.mem.lock().expect("region lock");
                 let off = (addr - r.base) as usize;
                 m[off..off + data.len()].copy_from_slice(data);
             }
             // SI_CONTROL side effect: fire the stream watcher.
-            let si_lo = SIRM_BASE + packets::sirm::SI_CONTROL;
-            if addr <= si_lo && addr + len > si_lo {
+            if control_word.is_some() {
                 let v = {
                     let m = r.mem.lock().expect("region lock");
                     let off = (si_lo - r.base) as usize;
@@ -283,11 +391,11 @@ impl RegisterFile {
                 *guard = v;
                 drop(guard);
                 if enabled != was {
-                    // R-73st: capture the RW* geometry on enable and hold it
-                    // until the stream is disabled.
+                    // R-73st: capture every RW* register on enable and hold
+                    // the copy until the stream is disabled.
                     if enabled {
                         *self.sirm_snapshot.lock().expect("sirm snapshot lock") =
-                            Some(self.programmed_geometry());
+                            Some(self.read_sirm_rw_star());
                     } else {
                         *self.sirm_snapshot.lock().expect("sirm snapshot lock") = None;
                     }
@@ -787,13 +895,43 @@ mod tests {
                 "offset 0x{off:02X} is read-only"
             );
         }
-        rf.write(SIRM_BASE + packets::sirm::SI_CONTROL, &1u32.to_le_bytes())
-            .expect("SI_CONTROL is RW");
         rf.write(
             SIRM_BASE + packets::sirm::SI_PAYLOAD_TRANSFER_SIZE,
             &100u32.to_le_bytes(),
         )
         .expect("RW* transfer size is writable");
+        // 5.4.1.2: enabling with an unprogrammed/inconsistent set is rejected.
+        assert_eq!(
+            rf.write(
+                SIRM_BASE + packets::sirm::SI_CONTROL,
+                &packets::sirm::CONTROL_STREAM_ENABLE.to_le_bytes()
+            ),
+            Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT)
+        );
+        program_valid_geometry(&rf);
+        rf.write(
+            SIRM_BASE + packets::sirm::SI_CONTROL,
+            &packets::sirm::CONTROL_STREAM_ENABLE.to_le_bytes(),
+        )
+        .expect("SI_CONTROL is RW and the programmed geometry is valid");
+    }
+
+    /// Program a complete, valid Standard Transfer geometry for `null_cfg`.
+    fn program_valid_geometry(rf: &RegisterFile) {
+        let put = |off: u64, v: u32| {
+            rf.write(SIRM_BASE + off, &v.to_le_bytes()).unwrap();
+        };
+        put(
+            packets::sirm::SI_MAX_LEADER_SIZE,
+            packets::IMAGE_LEADER_LEN as u32,
+        );
+        put(
+            packets::sirm::SI_MAX_TRAILER_SIZE,
+            packets::IMAGE_TRAILER_LEN as u32,
+        );
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 2048);
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 1);
+        put(packets::sirm::SI_PAYLOAD_FINAL1_SIZE, 1024);
     }
 
     /// [R-73st]: the RW* geometry is captured at Stream Enable and held
@@ -808,19 +946,105 @@ mod tests {
         let put = |off: u64, v: u32| {
             rf.write(SIRM_BASE + off, &v.to_le_bytes()).unwrap();
         };
-        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 1000);
-        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 2);
-        put(packets::sirm::SI_PAYLOAD_FINAL1_SIZE, 40);
-        put(packets::sirm::SI_PAYLOAD_FINAL2_SIZE, 8);
+        put(
+            packets::sirm::SI_MAX_LEADER_SIZE,
+            packets::IMAGE_LEADER_LEN as u32,
+        );
+        put(
+            packets::sirm::SI_MAX_TRAILER_SIZE,
+            packets::IMAGE_TRAILER_LEN as u32,
+        );
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 2048);
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 1);
+        put(packets::sirm::SI_PAYLOAD_FINAL1_SIZE, 1024);
+        put(packets::sirm::SI_PAYLOAD_FINAL2_SIZE, 40);
         put(packets::sirm::SI_CONTROL, packets::sirm::CONTROL_STREAM_ENABLE);
-        assert_eq!(rf.stream_geometry(), (1000, 2, 40, 8));
+        assert_eq!(rf.stream_geometry(), (2048, 1, 1024, 40));
+        let snap = rf.stream_snapshot().expect("snapshot captured");
+        assert_eq!(
+            snap,
+            SirmSnapshot {
+                max_leader: packets::IMAGE_LEADER_LEN as u32,
+                transfer_size: 2048,
+                transfer_count: 1,
+                final1: 1024,
+                final2: 40,
+                max_trailer: packets::IMAGE_TRAILER_LEN as u32,
+                payload_mode: 0,
+            },
+            "R-73st captures every RW* register"
+        );
 
         // Mid-stream writes update the registers but not the snapshot.
-        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 2000);
-        assert_eq!(rf.stream_geometry(), (1000, 2, 40, 8));
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 3000);
+        put(packets::sirm::SI_MAX_LEADER_SIZE, 999);
+        put(packets::sirm::SI_PAYLOAD_MODE, packets::sirm::MODE_STANDARD);
+        assert_eq!(rf.stream_geometry(), (2048, 1, 1024, 40));
+        assert_eq!(rf.stream_snapshot().unwrap(), snap);
 
         // Disabling releases the snapshot: the live values apply again.
         put(packets::sirm::SI_CONTROL, 0);
-        assert_eq!(rf.stream_geometry(), (2000, 2, 40, 8));
+        assert_eq!(rf.stream_snapshot(), None);
+        assert_eq!(rf.stream_geometry(), (3000, 1, 1024, 40));
+    }
+
+    /// 5.4.1.2: an all-zero transfer geometry cannot be accepted; the enable
+    /// must not latch, the watcher must not fire, and the status is
+    /// U3V_STATUS_SI_REGISTERS_INCONSISTENT.
+    #[test]
+    fn stream_enable_rejects_inconsistent_geometry() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(NullBack)),
+        );
+        let enabled = std::sync::Arc::new(AtomicBool::new(false));
+        let flag = enabled.clone();
+        rf.set_stream_watcher(move |on| flag.store(on, Ordering::SeqCst));
+
+        let enable = || {
+            rf.write(
+                SIRM_BASE + packets::sirm::SI_CONTROL,
+                &packets::sirm::CONTROL_STREAM_ENABLE.to_le_bytes(),
+            )
+        };
+        assert_eq!(enable(), Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT));
+        assert!(!rf.stream_enabled(), "the enable bit must not latch");
+        assert!(!enabled.load(Ordering::SeqCst), "watcher must not fire");
+        let mut control = [0u8; 4];
+        rf.read(SIRM_BASE + packets::sirm::SI_CONTROL, &mut control)
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(control), 0, "SI_CONTROL stays 0");
+
+        // Leader/trailer maximums below the required sizes are rejected.
+        let put = |off: u64, v: u32| {
+            rf.write(SIRM_BASE + off, &v.to_le_bytes()).unwrap();
+        };
+        put(packets::sirm::SI_MAX_LEADER_SIZE, 1);
+        put(
+            packets::sirm::SI_MAX_TRAILER_SIZE,
+            packets::IMAGE_TRAILER_LEN as u32,
+        );
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 4096);
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_COUNT, 1);
+        assert_eq!(enable(), Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT));
+
+        // A payload capacity below SI Required Payload Size is rejected.
+        program_valid_geometry(&rf);
+        put(packets::sirm::SI_PAYLOAD_TRANSFER_SIZE, 1024);
+        put(packets::sirm::SI_PAYLOAD_FINAL1_SIZE, 0);
+        assert_eq!(enable(), Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT));
+
+        // Unsupported payload modes are rejected too.
+        program_valid_geometry(&rf);
+        put(packets::sirm::SI_PAYLOAD_MODE, 1 << 1);
+        assert_eq!(enable(), Err(packets::U3V_STATUS_SI_REGISTERS_INCONSISTENT));
+
+        // The valid set latches and captures the snapshot.
+        put(packets::sirm::SI_PAYLOAD_MODE, 0);
+        assert_eq!(enable(), Ok(()));
+        assert!(rf.stream_enabled());
+        assert!(enabled.load(Ordering::SeqCst));
+        assert_eq!(rf.stream_geometry(), (2048, 1, 1024, 0));
     }
 }
