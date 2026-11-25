@@ -172,5 +172,5 @@
 - 依据新转换的 `notes/markdown/*.md` 重新交叉核对；violations 与证据见 `compliance/spec-audit/2026-11-md-spec-review.md`（本机审计记录，compliance/ 未纳入版本库）。
 - 已修 wire 互通级：GVSP 3.0 leader body 36/u16 padding、GVSP flag 位序、MCP host_port 低 16 位、事件消息 EI/req_id、READREG ACCESS_DENIED header-only、FORCEIP broadcast 位；GenTL IS_COMPOSITE/IS_QUEUED；U3V block_id 0、request_id=0 写拒绝、DeviceInfo 长度扩展、SIZE_FILLED valid_payload_size。
 - 待修高优先级：GenTL Close 级联/EventHandle 失效、可变帧高、U3V 短包/ZLP、模拟器几何与 XML 一致性、U3V front AcquisitionMode 窗口遮蔽；中低优先级清单见审计文件 §3。
-- 验证：307 tests / 0 failed / 0 warnings（板端 GVSP/U3V 取流待重新部署复验）。
+- 验证：307 tests / 0 failed / 0 warnings；板端重新部署后 U3V 端到端 20/20 帧（2,621,440 B/帧），GigE 原始取流首包 56 字节（20+36 leader、payload_type=1、1280×1024、padding 0）。
 
