@@ -31,6 +31,11 @@ pub(crate) fn serve_loop(
             eprintln!("vgige: u3v control-IN stream closed; GenCP server stopping");
             break;
         }
+        // R-118cd: an acknowledge whose length is an MPS multiple must end
+        // the IN transfer with a zero-length packet.
+        if ack.len() % usize::from(inner.control_in.max_packet().max(1)) == 0 {
+            let _ = inner.control_in.send_zlp();
+        }
     }
 }
 
@@ -87,6 +92,15 @@ fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
     match ccd.command_id {
         packets::READMEM_CMD => {
             let (addr, len) = packets::decode_readmem_scd(scd)?;
+            // R-43cd: never answer with more than the advertised Maximum
+            // Acknowledge Transfer Length.
+            if packets::CMD_OVERHEAD + usize::from(len) > regs.max_ack_transfer_len() {
+                return Some(packets::encode_readmem_ack(
+                    packets::GENCP_INVALID_PARAMETER,
+                    ccd.request_id,
+                    &[],
+                ));
+            }
             let mut data = vec![0u8; len as usize];
             match regs.read(addr, &mut data) {
                 Ok(()) => Some(packets::encode_readmem_ack(
@@ -243,5 +257,40 @@ mod tests {
             packets::GENCP_INVALID_ADDRESS
         );
         assert_eq!(u16::from_le_bytes([ack[6], ack[7]]), packets::WRITEMEM_ACK);
+    }
+
+    #[test]
+    fn readmem_ack_is_capped_at_max_ack_transfer_length() {
+        use vgige_core::{BackIdentity, SharedBack};
+        let cfg = crate::DeviceConfig::from_parts(
+            BackIdentity {
+                manufacturer: "m".into(),
+                model: "m".into(),
+                device_version: "1".into(),
+                serial_number: "s".into(),
+                user_defined_name: String::new(),
+                spec_version_major: 1,
+                spec_version_minor: 2,
+            },
+            b"<x/>",
+            4,
+            [0u8; 16],
+        );
+        let back: SharedBack = Arc::new(std::sync::Mutex::new(
+            vgige_back_null::NullBack::new(),
+        ));
+        let regs = RegisterFile::new(cfg, back);
+        let cmd = packets::encode_readmem(9, 0x0000, 2000);
+        let ack = dispatch(&cmd, &regs).expect("acknowledge");
+        assert!(
+            ack.len() <= regs.max_ack_transfer_len(),
+            "R-43cd: ACK {} exceeds advertised max {}",
+            ack.len(),
+            regs.max_ack_transfer_len()
+        );
+        assert_eq!(
+            u16::from_le_bytes([ack[4], ack[5]]),
+            packets::GENCP_INVALID_PARAMETER
+        );
     }
 }

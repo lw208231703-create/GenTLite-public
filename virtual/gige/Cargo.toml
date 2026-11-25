@@ -9,3 +9,11 @@ edition.workspace = true
 vgige-core = { path = "../../gateway/core" }
 gentl-core = { path = "../../gentl/core" }
 gentl-gvcp = { path = "../../gentl/gvcp" }
+
+[target.'cfg(unix)'.dependencies]
+# IP_MTU_DISCOVER for the DF bit on GVSP test packets (§11.7).
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+# IP_DONTFRAGMENT for GVSP test packets (§11.7).
+windows-sys = { version = "0.59", features = ["Win32_Networking_WinSock"] }

@@ -686,7 +686,7 @@ fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
 /// design decision in docs/00-governance/OPEN-QUESTIONS.md Q40. Requests for
 /// other MACs are discarded by the same rule (R-149cd).
 #[test]
-fn force_ip_to_the_virtual_device_is_discarded() {
+fn force_ip_applies_the_temporary_virtual_address() {
     let s = start(false);
     let up_port = s._up_server.local_port().unwrap();
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
@@ -715,15 +715,24 @@ fn force_ip_to_the_virtual_device_is_discarded() {
         .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
         .unwrap();
     let mut reply = [0u8; 256];
-    assert!(
-        socket.recv(&mut reply).is_err(),
-        "a FORCEIP on the relay must be silently discarded"
+    let n = socket
+        .recv(&mut reply)
+        .expect("R-152cd: an applied FORCEIP is acknowledged");
+    assert!(n >= HEADER_LEN);
+    assert_eq!(
+        u16::from_be_bytes([reply[0], reply[1]]),
+        GEV_STATUS_SUCCESS,
+        "FORCEIP_ACK status"
     );
-    // The virtual identity is unchanged.
+    // The virtual identity follows the temporary address.
     let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, up_port).unwrap();
     assert_eq!(
         client.read_reg(reg::CURRENT_IP).unwrap(),
-        u32::from(Ipv4Addr::LOCALHOST)
+        u32::from(Ipv4Addr::new(192, 168, 1, 99))
+    );
+    assert_eq!(
+        client.read_reg(reg::CURRENT_SUBNET_MASK).unwrap(),
+        u32::from(Ipv4Addr::new(255, 255, 255, 0))
     );
 }
 
@@ -1322,6 +1331,49 @@ fn force_ip_sees_an_expired_heartbeat() {
         assert!(
             std::time::Instant::now() < deadline,
             "expired grant + FORCEIP restart closed the downstream stream (SCP0={scp:#x})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// R-076cd: the device closes the control channel after the heartbeat
+/// timeout even if no further command ever arrives (independent watchdog).
+#[test]
+fn heartbeat_watchdog_closes_stream_without_another_command() {
+    let s = start(false);
+    s.remote.write_reg(reg::HEARTBEAT_TIMEOUT, 500).unwrap();
+    s.remote
+        .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+        .unwrap();
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCP0, reg::scp_make(rx.local_addr().unwrap().port()))
+        .unwrap();
+    assert_ne!(
+        s.down.lock().expect("down lock").read_reg(reg::SCP0).unwrap(),
+        0,
+        "relay opened"
+    );
+
+    // No GVCP command is sent during this window.
+    std::thread::sleep(Duration::from_millis(800));
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let scp = s
+            .down
+            .lock()
+            .expect("down lock")
+            .read_reg(reg::SCP0)
+            .unwrap();
+        if scp == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "heartbeat watchdog did not close the stream (SCP0={scp:#x})"
         );
         std::thread::sleep(Duration::from_millis(20));
     }

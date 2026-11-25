@@ -54,6 +54,12 @@ pub trait DeviceTransfers: Send + Sync {
     /// MPS-sized chunks to model real endpoint behavior (and to exercise
     /// the host's UQ16 piece accumulation).
     fn max_packet(&self) -> u16;
+
+    /// R-118cd: terminate a control-IN transfer that is an MPS multiple
+    /// with a zero-length packet. Default: no-op for memory transports.
+    fn send_zlp(&self) -> Result<(), StreamError> {
+        Ok(())
+    }
     /// Drop/reset any transport-level async state. The stream front calls
     /// this when the host clears Stream Enable and again before the first
     /// frame of a new session (covering a fast 0→1 transition the emitter

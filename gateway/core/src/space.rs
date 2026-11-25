@@ -173,12 +173,12 @@ pub struct RegisterSpace {
     xml: Arc<XmlMerger>,
     /// Virtual identity: the up-facing NIC's IP/MAC (the camera's stay
     /// hidden from the client).
-    up_ip: u32,
+    up_ip: Arc<AtomicU32>,
     up_mac: [u8; 6],
     /// Virtual device bootstrap identity: spec version (major<<16|minor) and
     /// the up-facing subnet mask. Kept coherent with the discovery payload.
     spec_version: u32,
-    subnet_mask: u32,
+    subnet_mask: Arc<AtomicU32>,
     /// Virtual First URL slot content (512 bytes, NUL padded).
     url_slot: Arc<[u8; 512]>,
     /// Locally served bootstrap identity strings.
@@ -192,6 +192,7 @@ pub struct RegisterSpace {
     channel: Relay,
     ai_result: Arc<AtomicU32>,
     ai_score: Arc<AtomicU32>,
+    pending_timeout_ms: Arc<AtomicU32>,
 }
 
 impl Clone for RegisterSpace {
@@ -200,10 +201,10 @@ impl Clone for RegisterSpace {
             back: Arc::clone(&self.back),
             back_endian: self.back_endian,
             xml: Arc::clone(&self.xml),
-            up_ip: self.up_ip,
+            up_ip: Arc::clone(&self.up_ip),
             up_mac: self.up_mac,
             spec_version: self.spec_version,
-            subnet_mask: self.subnet_mask,
+            subnet_mask: Arc::clone(&self.subnet_mask),
             url_slot: Arc::clone(&self.url_slot),
             identity: self.identity.clone(),
             message: Arc::clone(&self.message),
@@ -212,6 +213,7 @@ impl Clone for RegisterSpace {
             channel: self.channel.clone(),
             ai_result: Arc::clone(&self.ai_result),
             ai_score: Arc::clone(&self.ai_score),
+            pending_timeout_ms: Arc::clone(&self.pending_timeout_ms),
         }
     }
 }
@@ -235,10 +237,10 @@ impl RegisterSpace {
             back,
             back_endian,
             xml,
-            up_ip: u32::from(up_ip),
+            up_ip: Arc::new(AtomicU32::new(u32::from(up_ip))),
             up_mac,
             spec_version: 0x0003_0000,
-            subnet_mask: 0,
+            subnet_mask: Arc::new(AtomicU32::new(0)),
             url_slot: Arc::new(url_slot),
             identity: IdentityStrings::default(),
             message: Arc::new(Mutex::new(MessageChannel::default())),
@@ -247,6 +249,7 @@ impl RegisterSpace {
             channel,
             ai_result: Arc::new(AtomicU32::new(0)),
             ai_score: Arc::new(AtomicU32::new(0)),
+            pending_timeout_ms: Arc::new(AtomicU32::new(1000)),
         }
     }
 
@@ -259,9 +262,19 @@ impl RegisterSpace {
     /// Keep the bootstrap registers (Version / subnet) coherent with the
     /// discovery identity. Called before the register space is shared with
     /// the front; the defaults are GigE Vision 3.0 and mask 0.
+    /// Current virtual device IPv4 address (FORCEIP-visible).
+    pub fn current_ip(&self) -> u32 {
+        self.up_ip.load(Ordering::SeqCst)
+    }
+
+    /// Current virtual device subnet mask.
+    pub fn current_subnet_mask(&self) -> u32 {
+        self.subnet_mask.load(Ordering::SeqCst)
+    }
+
     pub fn set_bootstrap(&mut self, spec_version: u32, subnet_mask: Ipv4Addr) {
         self.spec_version = spec_version;
-        self.subnet_mask = u32::from(subnet_mask);
+        self.subnet_mask.store(u32::from(subnet_mask), Ordering::SeqCst);
     }
 
     /// Enable the virtual message channel and route the camera's events
@@ -331,11 +344,26 @@ impl RegisterSpace {
             self.close_message_channel();
             return ForceIpOutcome::Ignore;
         }
-        eprintln!(
-            "vgige: FORCEIP to 0x{:08X} discarded: the virtual device lives on the up-facing NIC address (OPEN-QUESTIONS Q40)",
-            request.static_ip
-        );
-        ForceIpOutcome::Ignore
+        // R-152cd: install the temporary static address before the ACK.
+        // The gateway's virtual identity (CURRENT_IP/CURRENT_SUBNET_MASK and
+        // discovery) moves with it; the OS NIC address itself is a platform
+        // concern outside this process. Apply while no control grant exists.
+        self.up_ip.store(request.static_ip, Ordering::SeqCst);
+        self.subnet_mask
+            .store(request.subnet_mask, Ordering::SeqCst);
+        ForceIpOutcome::Ack
+    }
+
+    /// Independent heartbeat watchdog (R-076cd): expire an idle grant and
+    /// run the R-072cd cleanup even when no further command arrives.
+    pub fn tick(&self) {
+        let expired = {
+            let mut ccp = self.ccp.lock().expect("vgige ccp poisoned");
+            ccp.expire_stale_grant()
+        };
+        if expired {
+            self.cleanup_control_channel();
+        }
     }
 
     /// R-151cd: clear MCDA/MCP and stop forwarding events to the old host.
@@ -604,11 +632,14 @@ impl RegisterSpace {
                 // active scheme).
                 return Ok(reg::IP_CFG_LLA)
             }
-            reg::CURRENT_SUBNET_MASK => return Ok(self.subnet_mask),
+            reg::CURRENT_SUBNET_MASK => return Ok(self.subnet_mask.load(Ordering::SeqCst)),
             reg::NUM_NETWORK_INTERFACES => return Ok(1),
             reg::CCP => return Ok(self.ccp_read()),
             reg::HEARTBEAT_TIMEOUT => {
                 return Ok(self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms)
+            }
+            reg::PENDING_TIMEOUT => {
+                return Ok(self.pending_timeout_ms.load(Ordering::SeqCst))
             }
             reg::NUM_STREAM_CHANNELS => return Ok(1),
             reg::DEVICE_MAC_HIGH => {
@@ -622,7 +653,7 @@ impl RegisterSpace {
                     self.up_mac[5],
                 ]))
             }
-            reg::CURRENT_IP => return Ok(self.up_ip),
+            reg::CURRENT_IP => return Ok(self.up_ip.load(Ordering::SeqCst)),
             reg::GVCP_CAPABILITY => {
                 // The capability bits must describe THIS device (§36.29):
                 // the virtual server answers READREG/WRITEREG/READMEM, serves
@@ -794,6 +825,10 @@ impl RegisterSpace {
         }
         if addr == reg::HEARTBEAT_TIMEOUT {
             self.ccp.lock().expect("vgige ccp poisoned").heartbeat_ms = value.max(500);
+            return Ok(());
+        }
+        if addr == reg::PENDING_TIMEOUT {
+            self.pending_timeout_ms.store(value.max(1), Ordering::SeqCst);
             return Ok(());
         }
         self.back_write_reg(addr, value)

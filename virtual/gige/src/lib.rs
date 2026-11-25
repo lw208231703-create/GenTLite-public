@@ -119,6 +119,7 @@ impl GigEFront {
         }
         if let Some(packet) = build_test_packet(size) {
             if let Ok(socket) = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)) {
+                set_dont_fragment(&socket);
                 let _ = socket.send_to(
                     &packet,
                     SocketAddr::from((Ipv4Addr::from(scda), port)),
@@ -131,7 +132,16 @@ impl GigEFront {
 
 impl DeviceHandler for GigEFront {
     fn discovery_info(&self) -> DiscoveryInfo {
-        self.identity.clone()
+        let mut info = self.identity.clone();
+        // A successful FORCEIP updates the virtual address state; make the
+        // discovery answer agree with the CURRENT_IP register.
+        info.current_ip = self.space.current_ip();
+        info.current_subnet_mask = self.space.current_subnet_mask();
+        info
+    }
+
+    fn tick(&self) {
+        self.space.tick();
     }
 
     fn force_ip(&self, _peer: SocketAddr, request: ForceIpRequest) -> ForceIpOutcome {
@@ -158,8 +168,11 @@ impl DeviceHandler for GigEFront {
         let result = self.space.write_reg_from(peer, addr, value);
         if result.is_ok() {
             if addr == reg::SCPS0 && value & reg::SCPS_FIRE_TEST_PACKET != 0 {
+                // R-562st: the register holds the rounded size; the test
+                // packet must use that value, not the host's raw request.
+                let stored = self.space.read_reg(reg::SCPS0).unwrap_or(value);
                 if let Ok(mut pending) = self.pending_test_packet.lock() {
-                    *pending = Some(reg::scps_packet_size(value));
+                    *pending = Some(reg::scps_packet_size(stored));
                 }
             }
             if addr == reg::SCPS0 || addr == reg::SCP0 || addr == reg::SCDA0 {
@@ -198,6 +211,42 @@ impl DeviceHandler for GigEFront {
         self.space.write_mem_from_progress(peer, addr, data)
     }
 }
+
+/// §11.7: the test packet is sent with IPv4 Don't Fragment set.
+#[cfg(target_os = "linux")]
+fn set_dont_fragment(socket: &UdpSocket) {
+    use std::os::fd::AsRawFd;
+    let value: libc::c_int = libc::IP_PMTUDISC_DO;
+    unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MTU_DISCOVER,
+            &value as *const libc::c_int as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+    }
+}
+
+#[cfg(windows)]
+fn set_dont_fragment(socket: &UdpSocket) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Networking::WinSock::{setsockopt, SOCKET};
+    const IP_DONTFRAGMENT: i32 = 14;
+    let value: u32 = 1;
+    unsafe {
+        setsockopt(
+            socket.as_raw_socket() as SOCKET,
+            0, // IPPROTO_IP
+            IP_DONTFRAGMENT,
+            &value as *const u32 as *const u8,
+            std::mem::size_of::<u32>() as i32,
+        );
+    }
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn set_dont_fragment(_socket: &UdpSocket) {}
 
 fn build_test_packet(total: u32) -> Option<Vec<u8>> {
     let total = total as usize;

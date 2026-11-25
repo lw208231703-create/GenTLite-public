@@ -684,6 +684,13 @@ impl DeviceTransfers for FileTransfers {
     fn max_packet(&self) -> u16 {
         crate::device::desc::HS_BULK_MPS
     }
+    fn send_zlp(&self) -> Result<(), StreamError> {
+        // FunctionFS write of an empty buffer terminates the bulk-IN
+        // transfer with a ZLP (R-118cd).
+        (&self.file)
+            .write_all(&[])
+            .map_err(|e| StreamError::Other(e.to_string()))
+    }
     fn reset(&self) -> Result<(), StreamError> {
         #[cfg(target_os = "linux")]
         if let Some(aio) = &self.aio {

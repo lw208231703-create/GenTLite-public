@@ -268,6 +268,11 @@ impl RegisterFile {
         Ok(())
     }
 
+    /// Maximum acknowledge transfer length advertised in the SBRM.
+    pub fn max_ack_transfer_len(&self) -> usize {
+        crate::MAX_TRANSFER as usize
+    }
+
     fn region(&self, addr: u64) -> Option<&Region> {
         // Regions do not overlap and are stored in ascending base
         // order: the containing region is the last one with base ≤ addr.
@@ -291,6 +296,19 @@ impl RegisterFile {
         }
         // Custom window first (it overlaps no device region, but the
         // dispatch is clearest ordered: device → window → camera).
+        // The local demo acquisition block only owns Start/Stop (0x00/0x04)
+        // and PayloadSize (0x08). Other SFNC nodes in the same window
+        // (AcquisitionMode, TriggerMode, ...) belong to the real backend.
+        if addr >= ACQ_BASE
+            && end <= ACQ_BASE + 0x14
+            && addr != ACQ_BASE
+            && addr != ACQ_BASE + 4
+            && !(addr == ACQ_BASE + 0x08 && (len == 4 || len == 8))
+        {
+            let data = self.back_read(addr, len)?;
+            buf.copy_from_slice(&data);
+            return Ok(());
+        }
         if addr >= u64::from(CUSTOM_BASE)
             && end <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
         {
@@ -335,6 +353,16 @@ impl RegisterFile {
         if (addr == ACQ_BASE || addr == ACQ_BASE + 4) && len == 4 {
             self.back_write(addr, data)?;
         }
+        // Forward the rest of the demo window (AcquisitionMode, TriggerMode,
+        // ...) to the backend instead of swallowing the write locally.
+        if addr >= ACQ_BASE
+            && end <= ACQ_BASE + 0x14
+            && addr != ACQ_BASE
+            && addr != ACQ_BASE + 4
+            && addr != ACQ_BASE + 0x08
+        {
+            return self.back_write(addr, data);
+        }
         if addr >= u64::from(CUSTOM_BASE)
             && end <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4
         {
@@ -361,6 +389,17 @@ impl RegisterFile {
                 let start = addr - SIRM_BASE;
                 for byte in 0..len {
                     if !sirm_byte_writable(start + byte) {
+                        return Err(packets::GENCP_WRITE_PROTECT);
+                    }
+                }
+            }
+            if r.base == crate::EIRM_BASE {
+                // Table 4-5: EI Control (0x00) and Event Test Control (0x08)
+                // are writable; Maximum Event Transfer Length (0x04) and
+                // every reserved byte are read-only.
+                let start = (addr - crate::EIRM_BASE) as usize;
+                for byte in 0..len as usize {
+                    if !matches!(start + byte, 0..=3 | 8..=11) {
                         return Err(packets::GENCP_WRITE_PROTECT);
                     }
                 }
@@ -1208,6 +1247,37 @@ mod tests {
             rf.write(u64::from(CUSTOM_BASE) + 5 * 4, &[0u8; 4]),
             Ok(()),
             "the boundary itself stays writable"
+        );
+    }
+
+    #[test]
+    fn acquisition_mode_and_trigger_mode_are_forwarded() {
+        use vgige_core::BackIdentity;
+        let cfg = null_cfg();
+        let back: vgige_core::SharedBack = std::sync::Arc::new(
+            std::sync::Mutex::new(vgige_back_null::NullBack::new()),
+        );
+        let rf = RegisterFile::new(cfg, back.clone());
+        rf.write(0x0004_000C, &0u32.to_le_bytes()).unwrap();
+        assert_eq!(
+            back.lock().unwrap().read_reg(0x0004_000C).unwrap(),
+            2,
+            "AcquisitionMode reaches the backend"
+        );
+        let mut b = [0u8; 4];
+        rf.read(0x0004_000C, &mut b).unwrap();
+        assert_eq!(u32::from_le_bytes(b), 2);
+    }
+
+    #[test]
+    fn eirm_max_event_transfer_is_read_only() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(vgige_back_null::NullBack::new())),
+        );
+        assert_eq!(
+            rf.write(crate::EIRM_BASE + 0x04, &123u32.to_le_bytes()),
+            Err(packets::GENCP_WRITE_PROTECT)
         );
     }
 }
