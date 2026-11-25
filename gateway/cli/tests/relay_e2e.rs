@@ -1456,3 +1456,48 @@ fn pending_ack_precedes_downstream_stream_open() {
     // Close the relay stream again through the normal control channel.
     s.remote.write_reg(reg::SCP0, 0).unwrap();
 }
+
+/// A multi-register WRITEREG that carries SCP0 in a later pair must still
+/// announce the slow stream-open with PENDING_ACK.
+#[test]
+fn pending_ack_covers_scp0_in_a_multi_register_write() {
+    let s = start(false);
+    let up_port = s._up_server.local_port().unwrap();
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&reg::SCDA0.to_be_bytes());
+    payload.extend_from_slice(&u32::from(Ipv4Addr::LOCALHOST).to_be_bytes());
+    payload.extend_from_slice(&reg::SCP0.to_be_bytes());
+    payload.extend_from_slice(&reg::scp_make(rx.local_addr().unwrap().port()).to_be_bytes());
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: WRITEREG_CMD,
+        length: payload.len() as u16,
+        req_id: 16,
+    }
+    .encode(&mut header);
+    let mut datagram = header.to_vec();
+    datagram.extend_from_slice(&payload);
+    socket
+        .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
+        .unwrap();
+    let mut reply = [0u8; 256];
+    let (n, _) = socket.recv_from(&mut reply).unwrap();
+    assert!(n >= HEADER_LEN);
+    assert_eq!(
+        u16::from_be_bytes([reply[2], reply[3]]),
+        PENDING_ACK,
+        "PENDING_ACK must precede the two-pair WRITEREG"
+    );
+    let (_, _) = socket.recv_from(&mut reply).unwrap();
+    assert_eq!(
+        u16::from_be_bytes([reply[2], reply[3]]),
+        WRITEREG_ACK
+    );
+    s.remote.write_reg(reg::SCP0, 0).unwrap();
+}

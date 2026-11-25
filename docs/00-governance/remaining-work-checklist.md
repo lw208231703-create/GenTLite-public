@@ -196,3 +196,10 @@
 - U3V front：ACQ+0x08 PayloadSize 写入返回 WRITE_PROTECT，不再静默写本地缓存。
 - 验证：325 tests / 0 failed / 0 warnings。板端重新部署后：U3V 20/20 帧、GigE 56-byte leader；PendingTimeout 读 1000、写 0x8004；SCP0 打开时首包为 PENDING_ACK(0x0089, len4) 后接 WRITEREG_ACK(0x0083)；FORCEIP 不可达地址保持静默。
 
+## Z. 2026-11-25 PENDING_ACK 心跳/多寄存器/EventGetInfo 修复
+
+- R-212cd：GvcpServer 在 PENDING_ACK 与最终 ACK 之间调用 `pending_begin/pending_end`；gateway CcpState 增加 suspended，挂起期间不做过期清理，最终 ACK 后重置 last_contact；新增 Ccp 单测。
+- 多寄存器 WRITEREG：gateway 的 pending 判断扫描全部 8 字节地址/值对，SCP0 在第二对也会先发 PENDING_ACK；新增 raw e2e。
+- EVENT_NEW_BUFFER 的 EventGetInfo 补上 queue.is_dead 检查，注销后返回 INVALID_HANDLE；stream_sim 增加断言。
+- 验证：327 tests / 0 failed / 0 warnings；板端复验 PENDING_ACK 顺序与 U3V/GigE 流。
+

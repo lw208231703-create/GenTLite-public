@@ -680,6 +680,13 @@ fn data_stream_end_to_end() {
         GC_ERR_NOT_INITIALIZED,
         "not registered anymore (spec §6.3.7.7)"
     );
+    // A fresh EventGetInfo on the unregistered NEW_BUFFER handle is invalid.
+    let mut etype: InfoDataType = 0;
+    let mut enum_size = 0usize;
+    assert_eq!(
+        EventGetInfo(ev, 1 /* EVENT_NUM_IN_QUEUE */, &mut etype, ptr::null_mut(), &mut enum_size),
+        GC_ERR_INVALID_HANDLE
+    );
 
     // Revoke needs the buffers out of the pools first.
     assert_eq!(DSFlushQueue(ds, 4 /* ACQ_QUEUE_ALL_DISCARD */), GC_ERR_SUCCESS);

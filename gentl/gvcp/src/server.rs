@@ -83,6 +83,13 @@ pub trait DeviceHandler: Send + 'static {
             .map_err(|status| (status, 0))
     }
 
+    /// R-212cd: called after PENDING_ACK is sent and before the command
+    /// executes; heartbeat accounting must be suspended until pending_end.
+    fn pending_begin(&self) {}
+
+    /// R-212cd: called after the final ACK has been sent.
+    fn pending_end(&self) {}
+
     /// Pending Timeout in milliseconds (R-472cd, read-only). 0 disables the
     /// PENDING_ACK path for this device.
     fn pending_timeout_ms(&self) -> u16 {
@@ -164,6 +171,19 @@ impl Drop for GvcpServer {
     }
 }
 
+struct PendingGuard<'a, H: DeviceHandler> {
+    handler: &'a H,
+    active: bool,
+}
+
+impl<'a, H: DeviceHandler> Drop for PendingGuard<'a, H> {
+    fn drop(&mut self) {
+        if self.active {
+            self.handler.pending_end();
+        }
+    }
+}
+
 fn serve_loop<H: DeviceHandler>(
     socket: UdpSocket,
     stop: Arc<std::sync::atomic::AtomicBool>,
@@ -192,7 +212,8 @@ fn serve_loop<H: DeviceHandler>(
         // R-210cd/R-472cd: announce a long-running command before it can
         // exceed the advertised pending timeout. The handler owns the
         // decision (e.g. opening a downstream stream through the gateway).
-        if handler.pending_ack_before(cmd.command, payload_in) {
+        let pending_sent = handler.pending_ack_before(cmd.command, payload_in);
+        if pending_sent {
             let timeout = handler.pending_timeout_ms().max(1);
             let mut pending = [0u8; HEADER_LEN];
             AckHeader::new(GEV_STATUS_SUCCESS, PENDING_ACK, 4, cmd.req_id)
@@ -201,7 +222,14 @@ fn serve_loop<H: DeviceHandler>(
             datagram.extend_from_slice(&0u16.to_be_bytes());
             datagram.extend_from_slice(&timeout.to_be_bytes());
             let _ = socket.send_to(&datagram, peer);
+            handler.pending_begin();
         }
+        // End the suspension even on a `continue` path; the guard drops
+        // after the final ACK was sent (or the command was dropped).
+        let _pending_guard = PendingGuard {
+            handler: &handler,
+            active: pending_sent,
+        };
 
         let mut out: Vec<u8> = Vec::with_capacity(HEADER_LEN + 512);
         let mut ack = [0u8; HEADER_LEN];

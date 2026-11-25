@@ -44,6 +44,9 @@ struct CcpState {
     peer: Option<SocketAddr>,
     last_contact: Option<Instant>,
     heartbeat_ms: u32,
+    /// R-212cd: heartbeat counting is suspended between PENDING_ACK and the
+    /// final command ACK.
+    suspended: bool,
 }
 
 impl Default for CcpState {
@@ -53,12 +56,16 @@ impl Default for CcpState {
             peer: None,
             last_contact: None,
             heartbeat_ms: 3000,
+            suspended: false,
         }
     }
 }
 
 impl CcpState {
     fn expire_stale_grant(&mut self) -> bool {
+        if self.suspended {
+            return false;
+        }
         let stale = self.last_contact.is_some_and(|last| {
             last.elapsed().as_millis() > u128::from(self.heartbeat_ms)
         });
@@ -70,6 +77,23 @@ impl CcpState {
         stale
     }
 
+    fn begin_pending(&mut self) {
+        if self.flags != 0 {
+            self.suspended = true;
+        }
+    }
+
+    fn end_pending(&mut self) {
+        if self.suspended {
+            self.suspended = false;
+            if self.flags != 0 {
+                // The slow command itself is primary traffic; restart the
+                // heartbeat window from the final ACK (R-212cd).
+                self.last_contact = Some(Instant::now());
+            }
+        }
+    }
+
     fn update(&mut self, value: u32, peer: Option<SocketAddr>) -> (Result<(), u16>, bool) {
         if value == 0 {
             if peer.is_some() && self.peer.is_some() && peer != self.peer {
@@ -78,6 +102,7 @@ impl CcpState {
             self.flags = 0;
             self.peer = None;
             self.last_contact = None;
+            self.suspended = false;
             return (Ok(()), true);
         }
         let requested = value & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS);
@@ -93,6 +118,7 @@ impl CcpState {
             self.flags = granted;
             self.peer = peer;
             self.last_contact = Some(Instant::now());
+            self.suspended = false;
             return (Ok(()), false);
         }
         // R-070cd: the primary may switch between EA and CA without closing
@@ -265,6 +291,17 @@ impl RegisterSpace {
     /// Current virtual device IPv4 address (FORCEIP-visible).
     pub fn current_ip(&self) -> u32 {
         self.up_ip.load(Ordering::SeqCst)
+    }
+
+    /// R-212cd: suspend heartbeat accounting while a paced command is in
+    /// flight.
+    pub fn pending_begin(&self) {
+        self.ccp.lock().expect("vgige ccp poisoned").begin_pending();
+    }
+
+    /// R-212cd: resume heartbeat accounting after the final ACK.
+    pub fn pending_end(&self) {
+        self.ccp.lock().expect("vgige ccp poisoned").end_pending();
     }
 
     /// Pending Timeout value in milliseconds (read-only, R-472cd).
@@ -1189,6 +1226,23 @@ mod ccp_tests {
         assert!(close);
         assert_eq!(c.flags, 0);
         assert_eq!(c.peer, None);
+    }
+
+    /// R-212cd: while a PENDING_ACK command is in flight the heartbeat
+    /// timeout cannot expire; the final ACK restarts the window.
+    #[test]
+    fn pending_ack_suspends_heartbeat_expiry() {
+        let mut c = CcpState::default();
+        c.heartbeat_ms = 500;
+        let peer = SocketAddr::from(([127, 0, 0, 1], 40010));
+        let _ = c.update(reg::CCP_EXCLUSIVE_ACCESS, Some(peer));
+        c.last_contact = Some(Instant::now() - Duration::from_millis(600));
+        c.begin_pending();
+        assert!(!c.expire_stale_grant(), "PENDING_ACK suspends expiry");
+        c.end_pending();
+        assert!(!c.expire_stale_grant(), "final ACK restarts the window");
+        c.last_contact = Some(Instant::now() - Duration::from_millis(600));
+        assert!(c.expire_stale_grant(), "normal expiry resumes");
     }
 
     #[test]

@@ -2196,6 +2196,9 @@ pub extern "C" fn EventGetInfo(
         }
     }
     let ev = module!(h_event, EventModule);
+    if ev.queue.is_dead() {
+        return fail(GentlError::InvalidHandle);
+    }
     let data_size = std::mem::size_of::<EventNewBufferData>();
     unsafe {
         match i_info_cmd {
