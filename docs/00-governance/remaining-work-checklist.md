@@ -157,3 +157,8 @@
 - FORCEIP 非零地址仍是已记录的强制缺口（§26.1/Q40），不实现宿主 NIC 重绑定。
 - 验证：299 tests / 0 failed / 0 warnings；板端 GVCP ACK/权限/清理与 U3V 边界实测通过。
 
+## T. 2026-11-24 第七轮 review 复核（三个未闭合问题）
+
+- ACCESS_DENIED 的 WRITEREG/WRITEMEM ACK 改为 header-only（R-138cd）；WRITEMEM 部分失败通过 progress 接口返回真实字节索引（R-194cd，模拟器/网关）；GCCloseLib 使全部旧 GenTL 句柄失效（handle generation），重新初始化后旧 TL 不可用。
+- 验证：303 tests / 0 failed / 0 warnings；板端 GVCP 与 CTI 实测通过。FORCEIP 仍按 §26.1 记录为不支持。
+
