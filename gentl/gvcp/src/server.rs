@@ -12,7 +12,7 @@ use crate::wire::*;
 
 /// Device behavior behind the wire: register/memory access plus the static
 /// identity reported in DISCOVERY_ACK.
-pub trait DeviceHandler: Send + 'static {
+pub trait DeviceHandler: Send + Sync + 'static {
     /// Identity for DISCOVERY_ACK.
     fn discovery_info(&self) -> DiscoveryInfo;
 
@@ -171,6 +171,43 @@ impl Drop for GvcpServer {
     }
 }
 
+/// WRITEREG execution, shared by the synchronous path and the
+/// PENDING_ACK worker so the server can keep answering DISCOVERY while a
+/// slow downstream open is in flight (R-211cd).
+fn process_writereg<H: DeviceHandler>(
+    handler: &H,
+    peer: SocketAddr,
+    payload: &[u8],
+    req_id: u16,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_LEN + 4);
+    let mut ack = [0u8; HEADER_LEN];
+    let mut status = GEV_STATUS_SUCCESS;
+    let mut written = 0u32;
+    if payload.is_empty() || payload.len() % 8 != 0 {
+        status = GEV_STATUS_INVALID_PARAMETER;
+    } else {
+        for chunk in payload.chunks_exact(8) {
+            let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            let value = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+            if let Err(s) = handler.write_reg_from(peer, addr, value) {
+                status = s;
+                break;
+            }
+            written += 1;
+        }
+    }
+    if status == GEV_STATUS_ACCESS_DENIED {
+        AckHeader::new(status, WRITEREG_ACK, 0, req_id).encode(&mut ack);
+        out.extend_from_slice(&ack);
+    } else {
+        AckHeader::new(status, WRITEREG_ACK, 4, req_id).encode(&mut ack);
+        out.extend_from_slice(&ack);
+        out.extend_from_slice(&written.to_be_bytes());
+    }
+    out
+}
+
 struct PendingGuard<'a, H: DeviceHandler> {
     handler: &'a H,
     active: bool,
@@ -184,11 +221,26 @@ impl<'a, H: DeviceHandler> Drop for PendingGuard<'a, H> {
     }
 }
 
+struct AsyncPendingGuard<H: DeviceHandler> {
+    handler: std::sync::Arc<H>,
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl<H: DeviceHandler> Drop for AsyncPendingGuard<H> {
+    fn drop(&mut self) {
+        self.handler.pending_end();
+        self.active
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 fn serve_loop<H: DeviceHandler>(
     socket: UdpSocket,
     stop: Arc<std::sync::atomic::AtomicBool>,
     handler: H,
 ) {
+    let handler = std::sync::Arc::new(handler);
+    let pending_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut buf = [0u8; 65536];
     while !stop.load(std::sync::atomic::Ordering::Relaxed) {
         let (n, peer) = match socket.recv_from(&mut buf) {
@@ -209,6 +261,15 @@ fn serve_loop<H: DeviceHandler>(
         // Defensive: declared length vs actual datagram size.
         let payload_in = &payload_in[..payload_in.len().min(cmd.length as usize)];
 
+        // R-211cd: DISCOVERY must still be answered while a PENDING_ACK
+        // command is executing. The original command runs in a worker; the
+        // receive loop stays free (other commands are not interleaved).
+        if pending_active.load(std::sync::atomic::Ordering::SeqCst)
+            && cmd.command != DISCOVERY_CMD
+        {
+            continue;
+        }
+
         // R-210cd/R-472cd: announce a long-running command before it can
         // exceed the advertised pending timeout. The handler owns the
         // decision (e.g. opening a downstream stream through the gateway).
@@ -223,11 +284,50 @@ fn serve_loop<H: DeviceHandler>(
             datagram.extend_from_slice(&timeout.to_be_bytes());
             let _ = socket.send_to(&datagram, peer);
             handler.pending_begin();
+            if cmd.command == WRITEREG_CMD {
+                // Slow WRITEREG (downstream stream open) runs in a worker;
+                // DISCOVERY keeps being served by this loop (R-211cd).
+                let worker_handler = std::sync::Arc::clone(&handler);
+                let worker_socket = match socket.try_clone() {
+                    Ok(s) => s,
+                    Err(_) => {
+                        handler.pending_end();
+                        continue;
+                    }
+                };
+                let worker_payload = payload_in.to_vec();
+                let worker_req = cmd.req_id;
+                let active = std::sync::Arc::clone(&pending_active);
+                active.store(true, std::sync::atomic::Ordering::SeqCst);
+                let spawned = std::thread::Builder::new()
+                    .name("gvcp-pending".into())
+                    .spawn(move || {
+                        let _guard = AsyncPendingGuard {
+                            handler: worker_handler,
+                            active,
+                        };
+                        let ack = process_writereg(
+                            &*_guard.handler,
+                            peer,
+                            &worker_payload,
+                            worker_req,
+                        );
+                        let _ = worker_socket.send_to(&ack, peer);
+                    });
+                if spawned.is_err() {
+                    // The worker owns the suspension guard; on a spawn
+                    // failure the command stays synchronous and must resume
+                    // the heartbeat here.
+                    handler.pending_end();
+                    pending_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+                continue;
+            }
         }
         // End the suspension even on a `continue` path; the guard drops
         // after the final ACK was sent (or the command was dropped).
         let _pending_guard = PendingGuard {
-            handler: &handler,
+            handler: &*handler,
             active: pending_sent,
         };
 
@@ -278,32 +378,9 @@ fn serve_loop<H: DeviceHandler>(
                 out.extend_from_slice(&values);
             }
             WRITEREG_CMD => {
-                let mut status = GEV_STATUS_SUCCESS;
-                let mut written = 0u32;
-                if payload_in.is_empty() || payload_in.len() % 8 != 0 {
-                    status = GEV_STATUS_INVALID_PARAMETER;
-                } else {
-                    for chunk in payload_in.chunks_exact(8) {
-                        let addr = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                        let value = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
-                        if let Err(s) = handler.write_reg_from(peer, addr, value) {
-                            status = s;
-                            break;
-                        }
-                        written += 1;
-                    }
-                }
-                // R-138cd: an ACCESS_DENIED acknowledge carries the header
-                // only (length = 0), no SCD.
-                if status == GEV_STATUS_ACCESS_DENIED {
-                    AckHeader::new(status, WRITEREG_ACK, 0, cmd.req_id).encode(&mut ack);
-                    out.extend_from_slice(&ack);
-                } else {
-                    AckHeader::new(status, WRITEREG_ACK, 4, cmd.req_id).encode(&mut ack);
-                    out.extend_from_slice(&ack);
-                    out.extend_from_slice(&written.to_be_bytes());
-                }
+                out = process_writereg(&*handler, peer, payload_in, cmd.req_id);
             }
+
             READMEM_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
                 let mut data: Vec<u8> = Vec::new();
@@ -658,5 +735,102 @@ mod tests {
         let reply = exchange(&server, WRITEMEM_CMD, &payload);
         assert_eq!(ack_status(&reply), GEV_STATUS_INVALID_ADDRESS);
         assert_eq!(&reply[HEADER_LEN..], &[0, 0, 0, 4], "index = byte 4");
+    }
+
+    struct SlowRegHandler;
+
+    impl DeviceHandler for SlowRegHandler {
+        fn discovery_info(&self) -> DiscoveryInfo {
+            Fake.discovery_info()
+        }
+        fn pending_timeout_ms(&self) -> u16 {
+            1000
+        }
+        fn pending_ack_before(&self, command: u16, payload: &[u8]) -> bool {
+            command == WRITEREG_CMD && payload.len() >= 8
+        }
+        fn read_reg(&self, addr: u32) -> Result<u32, u16> {
+            Fake.read_reg(addr)
+        }
+        fn write_reg(&self, _addr: u32, _value: u32) -> Result<(), u16> {
+            Ok(())
+        }
+        fn write_reg_from(
+            &self,
+            _peer: SocketAddr,
+            _addr: u32,
+            _value: u32,
+        ) -> Result<(), u16> {
+            // Model a 300 ms downstream stream open.
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok(())
+        }
+        fn read_mem(&self, _addr: u32, _count: u16) -> Result<Vec<u8>, u16> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// R-211cd: DISCOVERY must be answered while PENDING_ACK execution is
+    /// still in flight.
+    #[test]
+    fn discovery_is_answered_during_pending_ack() {
+        let server = GvcpServer::start(0, SlowRegHandler).unwrap();
+        let port = server.local_port().unwrap();
+        let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x0A00u32.to_be_bytes());
+        payload[4..].copy_from_slice(&1u32.to_be_bytes());
+        let mut header = [0u8; HEADER_LEN];
+        CmdHeader {
+            flag: FLAG_ACK,
+            command: WRITEREG_CMD,
+            length: payload.len() as u16,
+            req_id: 71,
+        }
+        .encode(&mut header);
+        let mut datagram = header.to_vec();
+        datagram.extend_from_slice(&payload);
+        socket
+            .send_to(&datagram, (Ipv4Addr::LOCALHOST, port))
+            .unwrap();
+        let mut reply = [0u8; 512];
+        let (n, _) = socket.recv_from(&mut reply).unwrap();
+        assert!(n >= HEADER_LEN);
+        assert_eq!(
+            u16::from_be_bytes([reply[2], reply[3]]),
+            PENDING_ACK,
+            "slow command is pending"
+        );
+
+        let mut disco = [0u8; HEADER_LEN];
+        CmdHeader {
+            flag: FLAG_ACK,
+            command: DISCOVERY_CMD,
+            length: 0,
+            req_id: 72,
+        }
+        .encode(&mut disco);
+        let started = std::time::Instant::now();
+        socket
+            .send_to(&disco, (Ipv4Addr::LOCALHOST, port))
+            .unwrap();
+        let mut seen_discovery = false;
+        while started.elapsed() < std::time::Duration::from_millis(250) {
+            let (n, _) = socket.recv_from(&mut reply).unwrap();
+            if n >= HEADER_LEN
+                && u16::from_be_bytes([reply[2], reply[3]]) == DISCOVERY_ACK
+            {
+                seen_discovery = true;
+                break;
+            }
+        }
+        assert!(
+            seen_discovery,
+            "R-211cd: DISCOVERY must be answered during PENDING_ACK"
+        );
+        let _ = server;
     }
 }
