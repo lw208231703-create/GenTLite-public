@@ -188,6 +188,15 @@ impl DeviceHandler for GigEFront {
     fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.space.write_mem_from(peer, addr, data)
     }
+
+    fn write_mem_from_progress(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), (u16, u32)> {
+        self.space.write_mem_from_progress(peer, addr, data)
+    }
 }
 
 fn build_test_packet(total: u32) -> Option<Vec<u8>> {

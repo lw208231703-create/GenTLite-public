@@ -361,6 +361,24 @@ impl SimRegMap {
         self.close_message_channel();
     }
 
+    /// WRITEMEM core with byte progress (R-194cd): words before a failing
+    /// word stay committed; the returned index is the failing byte offset.
+    fn write_mem_inner(&self, addr: u32, data: &[u8]) -> Result<(), (u16, u32)> {
+        if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
+            return Err((GEV_STATUS_BAD_ALIGNMENT, 0));
+        }
+        if addr >= XML_BASE && addr + data.len() as u32 <= XML_BASE + self.xml.len() as u32 {
+            return Err((GEV_STATUS_WRITE_PROTECT, 0));
+        }
+        for (i, word) in data.chunks_exact(4).enumerate() {
+            let word_addr = addr + 4 * i as u32;
+            let value = u32::from_be_bytes(word.try_into().expect("4-byte chunk"));
+            self.write_reg(word_addr, value)
+                .map_err(|status| (status, (i * 4) as u32))?;
+        }
+        Ok(())
+    }
+
     /// Heartbeat bookkeeping for the peer-less API (unit tests, embedded
     /// users): such grants have `ccp.peer == None`. Channels granted through
     /// the GVCP server carry a peer and are refreshed by `authorize`.
@@ -866,24 +884,7 @@ impl DeviceHandler for SimRegMap {
 
     fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.direct_contact();
-        // R-185cd: WRITEMEM is mandatory for every device. R-188cd/R-189c:
-        // a length that is not a multiple of 4 or an unaligned address is
-        // BAD_ALIGNMENT.
-        if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
-            return Err(GEV_STATUS_BAD_ALIGNMENT);
-        }
-        // The GenICam XML blob is read-only device-description memory.
-        if addr >= XML_BASE && addr + data.len() as u32 <= XML_BASE + self.xml.len() as u32 {
-            return Err(GEV_STATUS_WRITE_PROTECT);
-        }
-        // Apply word by word through the register model so every access rule
-        // (write protect, stream gate, bootstrap/user split) is unchanged.
-        for (i, word) in data.chunks_exact(4).enumerate() {
-            let word_addr = addr + 4 * i as u32;
-            let value = u32::from_be_bytes(word.try_into().expect("4-byte chunk"));
-            self.write_reg(word_addr, value)?;
-        }
-        Ok(())
+        self.write_mem_inner(addr, data).map_err(|(status, _)| status)
     }
 
     fn write_reg_from(&self, peer: SocketAddr, addr: u32, value: u32) -> Result<(), u16> {
@@ -913,8 +914,18 @@ impl DeviceHandler for SimRegMap {
     }
 
     fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
-        self.authorize(peer, true)?;
-        self.write_mem(addr, data)
+        self.write_mem_from_progress(peer, addr, data)
+            .map_err(|(status, _)| status)
+    }
+
+    fn write_mem_from_progress(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), (u16, u32)> {
+        self.authorize(peer, true).map_err(|status| (status, 0))?;
+        self.write_mem_inner(addr, data)
     }
 
     fn force_ip(
@@ -1245,6 +1256,14 @@ impl DeviceHandler for SimDevice {
     }
     fn write_mem_from(&self, peer: SocketAddr, addr: u32, data: &[u8]) -> Result<(), u16> {
         self.map.write_mem_from(peer, addr, data)
+    }
+    fn write_mem_from_progress(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), (u16, u32)> {
+        self.map.write_mem_from_progress(peer, addr, data)
     }
     fn force_ip(
         &self,
@@ -1956,6 +1975,25 @@ mod tests {
             DeviceHandler::read_reg_from(&m, p2, reg::SCP0).unwrap(),
             0,
             "R-072cd: SCPx cleared on control-channel close"
+        );
+    }
+
+    /// R-194cd: when a later word fails, earlier words stay committed and the
+    /// progress API reports the failing byte offset.
+    #[test]
+    fn writemem_reports_the_failed_word_offset() {
+        let m = test_map();
+        // First word is the writable CCP register; 0x0A04 is reserved.
+        let data = [0u8, 0, 0, 1, 0, 0, 0, 0];
+        assert_eq!(
+            m.write_mem_inner(reg::CCP, &data),
+            Err((GEV_STATUS_INVALID_ADDRESS, 4)),
+            "the second word fails at byte offset 4"
+        );
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap() & reg::CCP_EXCLUSIVE_ACCESS,
+            reg::CCP_EXCLUSIVE_ACCESS,
+            "the first word stays committed"
         );
     }
 }

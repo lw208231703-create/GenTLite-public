@@ -515,8 +515,19 @@ impl RegisterSpace {
         addr: u32,
         data: &[u8],
     ) -> Result<(), u16> {
-        self.authorize(peer, true)?;
-        self.write_block(addr, data)
+        self.write_mem_from_progress(peer, addr, data)
+            .map_err(|(status, _)| status)
+    }
+
+    /// R-194cd: WRITEMEM with the byte index of a mid-block failure.
+    pub fn write_mem_from_progress(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), (u16, u32)> {
+        self.authorize(peer, true).map_err(|status| (status, 0))?;
+        self.write_block_progress(addr, data)
     }
 
     fn back_read_reg(&self, addr: u32) -> Result<u32, u16> {
@@ -970,12 +981,12 @@ impl RegisterSpace {
     }
 
     /// Block write (`data.len()` bytes, a multiple of 4); Err is a GEV status code.
-    pub fn write_block(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+    fn write_block_progress(&self, addr: u32, data: &[u8]) -> Result<(), (u16, u32)> {
         if data.is_empty() || data.len() % 4 != 0 {
-            return Err(GEV_STATUS_BAD_ALIGNMENT);
+            return Err((GEV_STATUS_BAD_ALIGNMENT, 0));
         }
         let len = data.len() as u32;
-        let end = addr.checked_add(len).ok_or(GEV_STATUS_INVALID_ADDRESS)?;
+        let end = addr.checked_add(len).ok_or((GEV_STATUS_INVALID_ADDRESS, 0))?;
         // Persistent IP registers are not implemented (see read_reg).
         if matches!(
             addr,
@@ -983,25 +994,26 @@ impl RegisterSpace {
                 | reg::PERSISTENT_SUBNET_MASK
                 | reg::PERSISTENT_DEFAULT_GATEWAY
         ) {
-            return Err(GEV_STATUS_INVALID_ADDRESS);
+            return Err((GEV_STATUS_INVALID_ADDRESS, 0));
         }
         // Locally served bootstrap identity strings: USER_DEFINED_NAME is
         // writable, the other identity strings answer WRITE_PROTECT.
         if let Some(result) = self.identity_write(addr, data) {
-            return result;
+            return result.map_err(|status| (status, 0));
         }
         if addr >= reg::FIRST_URL && end <= reg::SECOND_URL {
-            return Err(GEV_STATUS_WRITE_PROTECT);
+            return Err((GEV_STATUS_WRITE_PROTECT, 0));
         }
         if addr >= CUSTOM_BASE && end <= CUSTOM_BASE + (CUSTOM_SLOTS as u32) * 4 {
             for (index, chunk) in data.chunks_exact(4).enumerate() {
                 let slot = ((addr - CUSTOM_BASE) / 4) as usize + index;
-                self.slot_write(slot, u32::from_be_bytes(chunk.try_into().expect("u32")))?;
+                self.slot_write(slot, u32::from_be_bytes(chunk.try_into().expect("u32")))
+                    .map_err(|status| (status, (index * 4) as u32))?;
             }
             return Ok(());
         }
         if addr >= XML_BASE_V {
-            return Err(GEV_STATUS_WRITE_PROTECT);
+            return Err((GEV_STATUS_WRITE_PROTECT, 0));
         }
         let virtual_reg = reg::stream_channel_addr(addr).is_some()
             || matches!(
@@ -1030,7 +1042,9 @@ impl RegisterSpace {
                     | reg::GVCP_CAPABILITY
             );
         if data.len() == 4 && virtual_reg {
-            return self.write_reg(addr, u32::from_be_bytes(data[..4].try_into().expect("u32")));
+            return self
+                .write_reg(addr, u32::from_be_bytes(data[..4].try_into().expect("u32")))
+                .map_err(|status| (status, 0));
         }
         // Multi-word WRITEMEM spanning virtual registers: handle each word
         // through the local/forwarded register dispatch (see read_block).
@@ -1051,9 +1065,11 @@ impl RegisterSpace {
                     data[offset..offset + 4].try_into().expect("4-byte word"),
                 );
                 if self.is_virtual_reg(pos) {
-                    self.write_reg(pos, word)?;
+                    self.write_reg(pos, word)
+                        .map_err(|status| (status, offset as u32))?;
                 } else {
-                    self.back_write_reg(pos, word)?;
+                    self.back_write_reg(pos, word)
+                        .map_err(|status| (status, offset as u32))?;
                 }
                 pos += 4;
                 offset += 4;
@@ -1070,8 +1086,14 @@ impl RegisterSpace {
         };
         self.back
             .lock()
-            .map_err(|_| crate::GEV_STATUS_ERROR)?
+            .map_err(|_| (crate::GEV_STATUS_ERROR, 0))?
             .write_block(addr, payload)
+            .map_err(|status| (status, 0))
+    }
+
+    /// Block write (`data.len()` bytes, a multiple of 4); Err is a GEV status code.
+    pub fn write_block(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+        self.write_block_progress(addr, data).map_err(|(status, _)| status)
     }
 }
 

@@ -1219,3 +1219,47 @@ fn peer_permissions_and_ccp_release_cleanup() {
         "R-072cd: SCPx cleared on control-channel close"
     );
 }
+
+/// Raw GVCP WRITEMEM so the test can inspect the ACK SCD (status + index).
+fn raw_writemem(up_port: u16, addr: u32, data: &[u8]) -> (u16, Vec<u8>) {
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: WRITEMEM_CMD,
+        length: (4 + data.len()) as u16,
+        req_id: 42,
+    }
+    .encode(&mut header);
+    let mut datagram = header.to_vec();
+    datagram.extend_from_slice(&addr.to_be_bytes());
+    datagram.extend_from_slice(data);
+    socket
+        .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
+        .unwrap();
+    let mut reply = [0u8; 256];
+    let (n, _) = socket.recv_from(&mut reply).unwrap();
+    let status = u16::from_be_bytes([reply[0], reply[1]]);
+    (status, reply[HEADER_LEN..n].to_vec())
+}
+
+/// R-194cd: a multi-word WRITEMEM over the virtual device that commits the
+/// last custom-window slot and then fails past the window reports index 4.
+#[test]
+fn writemem_failure_reports_the_committed_byte_index() {
+    let s = start(false);
+    let up_port = s._up_server.local_port().unwrap();
+    let addr = CUSTOM_BASE + (vgige_core::CUSTOM_SLOTS as u32 - 1) * 4;
+    let data = [0u8; 8];
+    let (status, scd) = raw_writemem(up_port, addr, &data);
+    assert_eq!(status, GEV_STATUS_INVALID_ADDRESS);
+    assert_eq!(scd, [0, 0, 0, 4], "index points at the failing byte");
+    // The first slot was committed before the failure.
+    assert_eq!(
+        s.remote.read_reg(addr).unwrap(),
+        0
+    );
+}
