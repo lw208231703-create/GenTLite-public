@@ -160,7 +160,7 @@ const BOOT_REGS: &[BootReg] = &[
     br(reg::MESSAGE_CHANNEL_CAPABILITY, 4, Ro),
     br(reg::GVCP_CAPABILITY, 4, Ro),
     br(reg::HEARTBEAT_TIMEOUT, 4, Rw),
-    br(reg::PENDING_TIMEOUT, 4, Rw),
+    br(reg::PENDING_TIMEOUT, 4, Ro),
     br(reg::TIMESTAMP_TICK_FREQ_HIGH, 4, Ro),
     br(reg::TIMESTAMP_TICK_FREQ_LOW, 4, Ro),
     br(reg::TIMESTAMP_VALUE_HIGH, 4, Ro),
@@ -2063,10 +2063,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_timeout_register_is_writable() {
+    fn pending_timeout_register_is_read_only() {
         let m = test_map();
         assert_eq!(m.read_reg(reg::PENDING_TIMEOUT).unwrap(), 1000);
-        m.write_reg(reg::PENDING_TIMEOUT, 500).unwrap();
-        assert_eq!(m.read_reg(reg::PENDING_TIMEOUT).unwrap(), 500);
+        assert_eq!(
+            m.write_reg(reg::PENDING_TIMEOUT, 500),
+            Err(GEV_STATUS_WRITE_PROTECT)
+        );
+        assert_eq!(m.read_reg(reg::PENDING_TIMEOUT).unwrap(), 1000);
     }
 }

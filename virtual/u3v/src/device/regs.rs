@@ -355,13 +355,14 @@ impl RegisterFile {
         }
         // Forward the rest of the demo window (AcquisitionMode, TriggerMode,
         // ...) to the backend instead of swallowing the write locally.
-        if addr >= ACQ_BASE
-            && end <= ACQ_BASE + 0x14
-            && addr != ACQ_BASE
-            && addr != ACQ_BASE + 4
-            && addr != ACQ_BASE + 0x08
-        {
-            return self.back_write(addr, data);
+        if addr >= ACQ_BASE && end <= ACQ_BASE + 0x14 {
+            if addr == ACQ_BASE + 0x08 {
+                // SFNC PayloadSize is read-only.
+                return Err(packets::GENCP_WRITE_PROTECT);
+            }
+            if addr != ACQ_BASE && addr != ACQ_BASE + 4 {
+                return self.back_write(addr, data);
+            }
         }
         if addr >= u64::from(CUSTOM_BASE)
             && end <= u64::from(CUSTOM_BASE) + (CUSTOM_SLOTS as u64) * 4

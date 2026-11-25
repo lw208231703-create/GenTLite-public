@@ -144,6 +144,22 @@ impl DeviceHandler for GigEFront {
         self.space.tick();
     }
 
+    fn pending_timeout_ms(&self) -> u16 {
+        self.space.pending_timeout()
+    }
+
+    fn pending_ack_before(&self, command: u16, payload: &[u8]) -> bool {
+        // Opening the downstream stream (SCP0 non-zero) is the one gateway
+        // operation that can block on the camera long enough to need a
+        // PENDING_ACK; all local register accesses are immediate.
+        if command != WRITEREG_CMD || payload.len() < 8 {
+            return false;
+        }
+        let addr = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
+        let value = u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]);
+        addr == reg::SCP0 && value != 0
+    }
+
     fn force_ip(&self, _peer: SocketAddr, request: ForceIpRequest) -> ForceIpOutcome {
         self.space.force_ip(&request)
     }

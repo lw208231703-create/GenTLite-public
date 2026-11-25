@@ -685,19 +685,20 @@ fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
 /// (no ACK, no empty datagram) instead of pretending the address changed —
 /// design decision in docs/00-governance/OPEN-QUESTIONS.md Q40. Requests for
 /// other MACs are discarded by the same rule (R-149cd).
+/// R-152cd: the gateway must not ACK an address it cannot make effective.
 #[test]
-fn force_ip_applies_the_temporary_virtual_address() {
+fn force_ip_does_not_ack_an_unreachable_address() {
     let s = start(false);
     let up_port = s._up_server.local_port().unwrap();
     let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     socket
-        .set_read_timeout(Some(Duration::from_millis(300)))
+        .set_read_timeout(Some(Duration::from_millis(400)))
         .unwrap();
     let request = ForceIpRequest {
         mac: UP_MAC,
-        static_ip: u32::from(Ipv4Addr::new(192, 168, 1, 99)),
+        static_ip: u32::from(Ipv4Addr::new(192, 0, 2, 99)),
         subnet_mask: u32::from(Ipv4Addr::new(255, 255, 255, 0)),
-        default_gateway: u32::from(Ipv4Addr::new(192, 168, 1, 1)),
+        default_gateway: 0,
     };
     let payload = encode_force_ip_payload(&request);
     let mut datagram = vec![0u8; HEADER_LEN];
@@ -714,26 +715,51 @@ fn force_ip_applies_the_temporary_virtual_address() {
     socket
         .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
         .unwrap();
-    let mut reply = [0u8; 256];
-    let n = socket
-        .recv(&mut reply)
-        .expect("R-152cd: an applied FORCEIP is acknowledged");
-    assert!(n >= HEADER_LEN);
-    assert_eq!(
-        u16::from_be_bytes([reply[0], reply[1]]),
-        GEV_STATUS_SUCCESS,
-        "FORCEIP_ACK status"
+    assert!(
+        socket.recv(&mut [0u8; 256]).is_err(),
+        "no FORCEIP_ACK before the address is effective"
     );
-    // The virtual identity follows the temporary address.
     let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, up_port).unwrap();
     assert_eq!(
         client.read_reg(reg::CURRENT_IP).unwrap(),
-        u32::from(Ipv4Addr::new(192, 168, 1, 99))
+        u32::from(Ipv4Addr::LOCALHOST)
     );
-    assert_eq!(
-        client.read_reg(reg::CURRENT_SUBNET_MASK).unwrap(),
-        u32::from(Ipv4Addr::new(255, 255, 255, 0))
-    );
+}
+
+/// R-152cd: an already-effective local address can be ACKed.
+#[test]
+fn force_ip_acks_an_already_effective_address() {
+    let s = start(false);
+    let up_port = s._up_server.local_port().unwrap();
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let request = ForceIpRequest {
+        mac: UP_MAC,
+        static_ip: u32::from(Ipv4Addr::LOCALHOST),
+        subnet_mask: 0,
+        default_gateway: 0,
+    };
+    let payload = encode_force_ip_payload(&request);
+    let mut datagram = vec![0u8; HEADER_LEN + payload.len()];
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: FORCEIP_CMD,
+        length: payload.len() as u16,
+        req_id: 4,
+    }
+    .encode(&mut header);
+    datagram[..HEADER_LEN].copy_from_slice(&header);
+    datagram[HEADER_LEN..].copy_from_slice(&payload);
+    socket
+        .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
+        .unwrap();
+    let mut reply = [0u8; 256];
+    let n = socket.recv(&mut reply).expect("acknowledged local address");
+    assert_eq!(u16::from_be_bytes([reply[0], reply[1]]), GEV_STATUS_SUCCESS);
+    assert!(n >= HEADER_LEN);
 }
 
 /// Receive one complete GVSP block from the virtual wire, keeping the leader
@@ -767,6 +793,7 @@ fn recv_chunk_block(rx: &UdpSocket) -> (ImageLeader, Vec<u8>, Vec<u8>) {
 /// §25.1 chunk relay: a camera delivering an extended-chunk GVSP block must
 /// reach the remote host unchanged — extended payload type, extended trailer
 /// (chunk block length + layout id) and the verbatim chunk-formatted payload.
+
 #[test]
 fn stream_relay_reemits_extended_chunk_blocks() {
     let s = start_with(

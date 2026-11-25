@@ -24,7 +24,7 @@
 //! and does not (roadmap Step 3 — which is why this is a concrete type and
 //! not a trait).
 
-use std::net::{Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -267,6 +267,13 @@ impl RegisterSpace {
         self.up_ip.load(Ordering::SeqCst)
     }
 
+    /// Pending Timeout value in milliseconds (read-only, R-472cd).
+    pub fn pending_timeout(&self) -> u16 {
+        self.pending_timeout_ms
+            .load(Ordering::SeqCst)
+            .clamp(1, u32::from(u16::MAX)) as u16
+    }
+
     /// Current virtual device subnet mask.
     pub fn current_subnet_mask(&self) -> u32 {
         self.subnet_mask.load(Ordering::SeqCst)
@@ -344,10 +351,16 @@ impl RegisterSpace {
             self.close_message_channel();
             return ForceIpOutcome::Ignore;
         }
-        // R-152cd: install the temporary static address before the ACK.
-        // The gateway's virtual identity (CURRENT_IP/CURRENT_SUBNET_MASK and
-        // discovery) moves with it; the OS NIC address itself is a platform
-        // concern outside this process. Apply while no control grant exists.
+        // R-152cd: ACK only after the requested address is effective.
+        // A gateway process cannot rebind the host NIC, so the only
+        // honest "already effective" case is an address that is assigned
+        // to this host. If it is not assigned, stay silent instead of
+        // acknowledging an unreachable address (that is worse than the
+        // documented Q40 limitation: the host would lose the device).
+        let target = Ipv4Addr::from(request.static_ip);
+        if UdpSocket::bind((target, 0)).is_err() {
+            return ForceIpOutcome::Ignore;
+        }
         self.up_ip.store(request.static_ip, Ordering::SeqCst);
         self.subnet_mask
             .store(request.subnet_mask, Ordering::SeqCst);
@@ -828,8 +841,8 @@ impl RegisterSpace {
             return Ok(());
         }
         if addr == reg::PENDING_TIMEOUT {
-            self.pending_timeout_ms.store(value.max(1), Ordering::SeqCst);
-            return Ok(());
+            // R-472cd: Pending Timeout is a read-only register.
+            return Err(GEV_STATUS_WRITE_PROTECT);
         }
         self.back_write_reg(addr, value)
     }
