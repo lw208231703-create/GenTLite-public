@@ -85,6 +85,21 @@ impl DeviceEvents {
             .clone()
             .ok_or(GentlError::NotAvailable)?;
         let eirm = device.bootstrap.eirm_address.ok_or(GentlError::NotAvailable)?;
+        // R-119ch: submit every DEI IN transfer with the length advertised
+        // in EIRM Maximum Event Transfer Length, rounded up to the endpoint
+        // MPS.
+        let max_event = {
+            let client = device
+                .client
+                .lock()
+                .map_err(|_| GentlError::Io("control client lock poisoned".into()))?;
+            u32::from(
+                client
+                    .read_reg(eirm + packets::eirm::MAX_EVENT_TRANSFER_LENGTH)
+                    .unwrap_or(4096),
+            )
+        };
+        let event_len = crate::usbio::align_request(max_event, pipe.max_packet()) as usize;
         device
             .client
             .lock()
@@ -97,7 +112,7 @@ impl DeviceEvents {
         let thread = match std::thread::Builder::new()
             .name(format!("u3v-dei-{}", device.id))
             .spawn(move || {
-                let mut buf = vec![0u8; 4096];
+                let mut buf = vec![0u8; event_len];
                 while !thread_stop.load(Ordering::Relaxed) {
                     match pipe.read_bulk(&mut buf, Duration::from_millis(100)) {
                         Ok(n) => {

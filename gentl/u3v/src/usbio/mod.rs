@@ -176,16 +176,19 @@ pub(crate) fn poll_read(
 }
 
 /// Plan-exact accumulation for payload pieces (sizes known from the SIRM
-/// geometry): read until exactly `expected` bytes are in, skipping ZLPs.
-/// `buf` capacity must be `align_up(expected, mps)`; a piece longer than
-/// planned is a protocol violation (Desync).
+/// geometry). Full-MPS transactions keep accumulating (field devices may
+/// split one planned transfer into several full transactions); a ZLP or a
+/// non-MPS short transaction terminates the payload sequence (R-127sr), so
+/// the returned `bool` tells the caller to discard every subsequent
+/// transfer of this buffer. `buf` capacity must be `align_up(expected,
+/// mps)`; a piece longer than planned is a protocol violation (Desync).
 pub(crate) fn read_piece_exact(
     pipe: &dyn UsbPipe,
     buf: &mut [u8],
     expected: usize,
     mps: usize,
     stop: &AtomicBool,
-) -> Result<u32, ReadAbort> {
+) -> Result<(u32, bool), ReadAbort> {
     let mut done = 0usize;
     while done < expected {
         let Some(win) = aligned_window(buf, done, mps) else {
@@ -193,14 +196,17 @@ pub(crate) fn read_piece_exact(
         };
         let n = poll_read(pipe, &mut buf[done..done + win], stop, true)? as usize;
         if n == 0 {
-            continue; // ZLP between transactions
+            return Ok((done as u32, true)); // ZLP terminates the sequence
         }
         if done + n > expected {
             return Err(ReadAbort::Io("piece exceeded planned size".into()));
         }
         done += n;
+        if n % mps != 0 && done < expected {
+            return Ok((done as u32, true)); // short packet terminates
+        }
     }
-    Ok(done as u32)
+    Ok((done as u32, false))
 }
 
 /// Size-capped accumulation for leader/trailer (only their maximum is
@@ -319,8 +325,10 @@ mod tests {
         let stop = AtomicBool::new(false);
         let pipe = mock::pipe(&[1024, 1024, 500], 1024);
         let mut buf = vec![0u8; align_request(2548, 1024) as usize];
-        let n = read_piece_exact(&*pipe, &mut buf, 2548, 1024, &stop).expect("accumulate");
+        let (n, terminated) =
+            read_piece_exact(&*pipe, &mut buf, 2548, 1024, &stop).expect("accumulate");
         assert_eq!(n, 2548);
+        assert!(!terminated, "the short packet completed the planned piece");
     }
 
     #[test]
@@ -328,8 +336,21 @@ mod tests {
         let stop = AtomicBool::new(false);
         let pipe = mock::pipe(&[0, 0, 300], 1024);
         let mut buf = vec![0u8; align_request(300, 1024) as usize];
-        let n = read_piece_exact(&*pipe, &mut buf, 300, 1024, &stop).expect("zlp skip");
-        assert_eq!(n, 300);
+        let (n, terminated) =
+            read_piece_exact(&*pipe, &mut buf, 300, 1024, &stop).expect("zlp");
+        assert_eq!(n, 0, "ZLPs are not skipped (R-127sr)");
+        assert!(terminated, "ZLPs terminate the payload sequence");
+    }
+
+    #[test]
+    fn piece_exact_short_packet_terminates() {
+        let stop = AtomicBool::new(false);
+        let pipe = mock::pipe(&[1024, 200, 1024], 1024);
+        let mut buf = vec![0u8; align_request(4096, 1024) as usize];
+        let (n, terminated) =
+            read_piece_exact(&*pipe, &mut buf, 4096, 1024, &stop).expect("short");
+        assert_eq!(n, 1224);
+        assert!(terminated, "a short packet terminates the sequence");
     }
 
     #[test]
@@ -339,8 +360,8 @@ mod tests {
         let mut buf = vec![0u8; 1024];
         let r = read_piece_exact(&*pipe, &mut buf, 1000, 1024, &stop);
         assert!(
-            matches!(r, Err(ReadAbort::Io(_))),
-            "piece exceeded planned size"
+            matches!(r, Ok((_, true)) | Err(ReadAbort::Io(_))),
+            "piece exceeded planned size or terminated"
         );
     }
 

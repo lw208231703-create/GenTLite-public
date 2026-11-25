@@ -539,6 +539,7 @@ fn read_block_alloc(
         pixel_format: leader.pixel_format,
         width: leader.size_x,
         height: leader.size_y,
+        delivered_height: None,
         offset_x: leader.offset_x,
         offset_y: leader.offset_y,
         padding_x: u32::from(leader.padding_x),
@@ -564,8 +565,9 @@ fn read_block_alloc(
         if request > scratch.len() {
             scratch.resize(request, 0);
         }
-        let n = match read_piece_exact(pipe, &mut scratch[..request], size as usize, mps, stop) {
-            Ok(n) => n as usize,
+        let (n, terminated) =
+            match read_piece_exact(pipe, &mut scratch[..request], size as usize, mps, stop) {
+            Ok((n, terminated)) => (n as usize, terminated),
             Err(ReadAbort::Stop) => {
                 return Err(U3vError::Transport("stream timed out during payload".into()).into())
             }
@@ -580,7 +582,7 @@ fn read_block_alloc(
         }
         // Bytes after the first short piece are irrelevant (R-127sr): they
         // were read above (pipe discipline) and are not copied.
-        if n < size as usize {
+        if terminated || n < size as usize {
             short_seen = true;
         }
     }

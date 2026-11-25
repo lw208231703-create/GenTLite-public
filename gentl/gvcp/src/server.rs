@@ -83,6 +83,12 @@ pub trait DeviceHandler: Send + 'static {
             .map_err(|status| (status, 0))
     }
 
+    /// Periodic maintenance hook, called by the server loop at least every
+    /// socket timeout (100 ms) even when no command arrives. Devices with
+    /// time-based state (heartbeat expiry, pending timeouts) do their
+    /// independent cleanup here (R-076cd).
+    fn tick(&self) {}
+
     /// PACKETRESEND_CMD (§16.7): retransmit the given packet-id range of
     /// the cached block. Fire-and-forget — no ack exists (CR-201cd), so
     /// the default ignores the request (devices without resend support
@@ -159,6 +165,7 @@ fn serve_loop<H: DeviceHandler>(
                 if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock =>
             {
+                handler.tick();
                 continue
             }
             Err(_) => continue,

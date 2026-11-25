@@ -233,8 +233,8 @@ fn gige_device_events_flow_over_the_message_channel() {
     // silently discards pending events.
     assert_eq!(
         EventGetData(ev, raw.as_mut_ptr().cast(), &mut n, 100),
-        GC_ERR_ABORT,
-        "the event module's queue is dead after unregister"
+        GC_ERR_INVALID_HANDLE,
+        "a fresh call on an unregistered event handle is INVALID_HANDLE"
     );
 
     // -- Concurrent registration: exactly one caller wins ------------------

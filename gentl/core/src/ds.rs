@@ -45,7 +45,11 @@ pub struct FrameMeta {
     pub timestamp: u64,
     pub pixel_format: u32,
     pub width: u32,
+    /// Configured/maximum image height (leader size_y).
     pub height: u32,
+    /// Actual delivered rows for variable-frame-size sources; None means
+    /// `height`.
+    pub delivered_height: Option<u32>,
     pub offset_x: u32,
     pub offset_y: u32,
     pub padding_x: u32,

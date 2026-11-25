@@ -1477,8 +1477,7 @@ pub extern "C" fn DSGetInfo(
                 }
                 STREAM_INFO_TLTYPE => info_string(pi_type, p_buffer, pi_size, TL_TYPE_U3V),
                 STREAM_INFO_NUM_CHUNKS_MAX => {
-                    let v: usize = 0;
-                    info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &v)
+                                        fail(GentlError::NotAvailable)
                 }
                 STREAM_INFO_BUF_ANNOUNCE_MIN => {
                     let v: usize = 1;
@@ -1888,8 +1887,9 @@ pub extern "C" fn DSGetBufferInfo(
                 }
                 BUFFER_INFO_DELIVERED_IMAGEHEIGHT => match need_meta(&snap) {
                     Ok(m) => {
-                        // The trailer's actual size_y was folded into meta.height.
-                        let v = m.height as usize;
+                        // BUFFER_INFO_HEIGHT stays configured/leader height;
+                        // this reports the trailer's actual rows.
+                        let v = m.delivered_height.unwrap_or(m.height) as usize;
                         info_value(pi_type, INFO_DATATYPE_SIZET, p_buffer, pi_size, &v)
                     }
                     Err(e) => fail(e),
@@ -2123,6 +2123,9 @@ pub extern "C" fn EventGetData(
             if ev.event_type != EVENT_REMOTE_DEVICE {
                 return not_implemented("EventGetData: event type");
             }
+            if ev.queue.is_dead() {
+                return fail(GentlError::InvalidHandle);
+            }
             let timeout = if i_timeout == GENTL_INFINITE {
                 Duration::from_millis(u64::MAX)
             } else {
@@ -2226,6 +2229,9 @@ pub extern "C" fn EventGetInfo(
             return e;
         }
         if let Ok(ev) = unsafe { from_handle::<DeviceEventModule>(h_event) } {
+            if ev.queue.is_dead() {
+                return fail(GentlError::InvalidHandle);
+            }
             let data_size = 64 * 1024usize;
             return unsafe {
                 match i_info_cmd {
@@ -2283,6 +2289,9 @@ pub extern "C" fn EventGetInfo(
 pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
     guard(|| {
         if let Ok(ev) = unsafe { from_handle::<DeviceEventModule>(h_event) } {
+            if ev.queue.is_dead() {
+                return fail(GentlError::InvalidHandle);
+            }
             ev.queue.flush();
             return GC_ERR_SUCCESS;
         }
@@ -2303,6 +2312,9 @@ pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
 pub extern "C" fn EventKill(h_event: EventHandle) -> GCError {
     guard(|| {
         if let Ok(ev) = unsafe { from_handle::<DeviceEventModule>(h_event) } {
+            if ev.queue.is_dead() {
+                return fail(GentlError::InvalidHandle);
+            }
             ev.queue.kill_one();
             return GC_ERR_SUCCESS;
         }
@@ -2608,8 +2620,12 @@ pub extern "C" fn EventGetDataInfo(
         if e != GC_ERR_SUCCESS {
             return e;
         }
-        if unsafe { from_handle::<DeviceEventModule>(h_event) }.is_err() {
-            return not_implemented("EventGetDataInfo: event type");
+        let event_module = match unsafe { from_handle::<DeviceEventModule>(h_event) } {
+            Ok(ev) => ev,
+            Err(_) => return not_implemented("EventGetDataInfo: event type"),
+        };
+        if event_module.queue.is_dead() {
+            return fail(GentlError::InvalidHandle);
         }
         if p_in_buffer.is_null() {
             return fail(GentlError::InvalidParameter("pInBuffer"));

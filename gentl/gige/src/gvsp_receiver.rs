@@ -201,6 +201,7 @@ fn frame_meta(l: &ImageLeader) -> FrameMeta {
         pixel_format: l.pixel_format,
         width: l.size_x,
         height: l.size_y,
+        delivered_height: None,
         offset_x: l.offset_x,
         offset_y: l.offset_y,
         padding_x: l.padding_x,
@@ -696,20 +697,42 @@ impl GvspReassembler {
             (
                 Some(
                     decode_image_trailer_body(trailer_body)
-                        .map(|size_y| size_y == block.leader.size_y)
+                        .map(|size_y| size_y > 0 && size_y <= block.leader.size_y)
                         .unwrap_or(false),
                 ),
                 frame_meta(&block.leader).payload_bytes().unwrap_or(block.bytes_written),
             )
         };
         let (rows_ok, valid_bytes) = valid;
-        let size_ok = if block.leader.is_extended_chunk() {
-            block.bytes_written >= valid_bytes
+        let leader_payload = frame_meta(&block.leader).payload_bytes();
+        let (size_ok, delivered_height) = if block.leader.is_extended_chunk() {
+            (block.bytes_written >= valid_bytes, rows_ok.map(|_| block.leader.size_y))
         } else {
-            frame_meta(&block.leader)
-                .payload_bytes()
-                .map(|expected| expected == block.bytes_written)
-                .unwrap_or(true)
+            match decode_image_trailer_body(trailer_body) {
+                Some(size_y) if size_y <= block.leader.size_y && size_y > 0 => {
+                    if size_y == block.leader.size_y {
+                        (
+                            leader_payload
+                                .map(|expected| expected == block.bytes_written)
+                                .unwrap_or(true),
+                            None,
+                        )
+                    } else {
+                        // Variable frame size: the trailer carries the
+                        // actual rows; the payload may be shorter than the
+                        // leader's configured maximum. Accept any
+                        // packet-consistent prefix.
+                        (
+                            block.bytes_written > 0
+                                && leader_payload
+                                    .map(|max| block.bytes_written <= max)
+                                    .unwrap_or(true),
+                            Some(size_y),
+                        )
+                    }
+                }
+                _ => (false, None),
+            }
         };
         if rows_ok != Some(true) || !size_ok {
             // Gapped/broken blocks are dropped instead of delivering
@@ -721,6 +744,7 @@ impl GvspReassembler {
         }
         let mut meta = frame_meta(&block.leader);
         meta.payload_bytes = Some(valid_bytes.min(block.bytes_written));
+        meta.delivered_height = delivered_height;
         meta.chunk = chunk;
         if sink.on_frame(block.block_id, meta, &[]).is_some() {
             self.stats.frames_delivered += 1;
@@ -935,6 +959,22 @@ mod tests {
         hdr.encode(&mut h);
         let mut v = h.to_vec();
         v.extend_from_slice(&encode_image_trailer_body(H));
+        v
+    }
+
+    fn trailer_dgram_height(block_id: u64, size_y: u32) -> Vec<u8> {
+        let hdr = GvspHeader {
+            status: 0,
+            flag: 0,
+            extended_id: true,
+            packet_format: PACKET_FORMAT_DATA_TRAILER,
+            block_id,
+            packet_id: 4,
+        };
+        let mut h = [0u8; GVSP_HEADER_LEN];
+        hdr.encode(&mut h);
+        let mut v = h.to_vec();
+        v.extend_from_slice(&encode_image_trailer_body(size_y));
         v
     }
 
@@ -1471,5 +1511,22 @@ mod tests {
         );
         assert_eq!(r.stats().resend_unavailable, 1);
         assert_eq!(r.stats().frames_delivered, 0);
+    }
+
+    /// GigE 3.0 variable frame size: trailer size_y may be smaller than the
+    /// leader's configured height; the frame is delivered with the actual
+    /// row count, not dropped as incomplete.
+    #[test]
+    fn variable_frame_height_is_delivered() {
+        let (core, _) = started_sink();
+        let mut r = GvspReassembler::new();
+        let payload: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
+        r.on_datagram(&core, &leader_dgram(1, 1));
+        for (i, chunk) in payload.chunks(CHUNK).enumerate() {
+            r.on_datagram(&core, &payload_dgram(1, (i + 1) as u32, chunk));
+        }
+        r.on_datagram(&core, &trailer_dgram_height(1, 2));
+        assert_eq!(r.stats().frames_delivered, 1);
+        assert_eq!(r.stats().frames_dropped_incomplete, 0);
     }
 }

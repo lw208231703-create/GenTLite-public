@@ -647,6 +647,7 @@ fn read_block(
         pixel_format: leader.pixel_format,
         width: leader.size_x,
         height: leader.size_y,
+        delivered_height: None,
         offset_x: leader.offset_x,
         offset_y: leader.offset_y,
         padding_x: u32::from(leader.padding_x),
@@ -715,7 +716,7 @@ fn read_block(
                 mps as usize,
                 stop,
             ) {
-                Ok(n) => n as u64,
+                Ok((n, _terminated)) => n as u64,
                 Err(ReadAbort::Stop) => return BlockOutcome::Stopped,
                 Err(ReadAbort::Io(_)) => {
                     state.stats.io_errors += 1;
@@ -731,14 +732,14 @@ fn read_block(
         if request > scratch.len() {
             scratch.resize(request, 0);
         }
-        let n = match usbio::read_piece_exact(
+        let (n, terminated) = match usbio::read_piece_exact(
             pipe,
             &mut scratch[..request],
             size as usize,
             mps as usize,
             stop,
         ) {
-            Ok(n) => n as u64,
+            Ok((n, terminated)) => (n as u64, terminated),
             Err(ReadAbort::Stop) => return BlockOutcome::Stopped,
             Err(ReadAbort::Io(_)) => {
                 state.stats.io_errors += 1;
@@ -763,7 +764,7 @@ fn read_block(
             }
         }
         written += n;
-        if n < u64::from(size as u32) {
+        if terminated || n < u64::from(size as u32) {
             short_seen = true;
         }
     }
@@ -828,7 +829,7 @@ fn read_block(
     // byte count actually written as well: U3V has no GVSP trailer byte
     // count, and an unknown PixelFormat must still report SIZE_FILLED.
     let image_meta = FrameMeta {
-        height: trailer.size_y.min(meta.height),
+        delivered_height: Some(trailer.size_y.min(meta.height)),
         ..meta
     };
     // Extended chunk (§5.5.5.2): the payload is the image as the first
