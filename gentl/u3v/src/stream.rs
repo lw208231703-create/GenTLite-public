@@ -846,7 +846,9 @@ fn read_block(
         None
     };
     let meta = FrameMeta {
-        payload_bytes: Some(written as usize),
+        // R-70st: valid_payload_size excludes transfer padding; report it
+        // as SIZE_FILLED instead of every received byte.
+        payload_bytes: Some((written.min(trailer.valid_payload_size)) as usize),
         chunk,
         ..image_meta
     };

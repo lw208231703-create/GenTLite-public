@@ -120,7 +120,7 @@ pub fn device_info_descriptor(cfg: &[u8]) -> Option<DeviceInfoDescriptor> {
             continue;
         }
         for cs in &iface.class_specific {
-            if cs.len() == U3V_DEVICEINFO_LEN
+            if cs.len() >= U3V_DEVICEINFO_LEN
                 && cs[1] == DESC_CS_INTERFACE
                 && cs[2] == U3V_DEVICEINFO_SUBTYPE
             {

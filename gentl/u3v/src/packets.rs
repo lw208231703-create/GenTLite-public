@@ -17,7 +17,7 @@ pub const PREFIX_CONTROL: u32 = 0x4356_3355;
 // delivery consumes it yet (docs/00-governance/OPEN-QUESTIONS.md UQ7).
 #[allow(dead_code)]
 pub const PREFIX_EVENT: u32 = 0x4556_3355;
-/// U3V uses no postfix (R-31cd, §4.1.3.1).
+/// U3V uses no postfix (R-31c, §4.1.3.1).
 
 // Command IDs (GenCP 1.3.1 §4.3.3 Table 7).
 pub const READMEM_CMD: u16 = 0x0800;

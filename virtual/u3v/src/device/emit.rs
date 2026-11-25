@@ -21,7 +21,8 @@ use super::{DeviceInner, StreamError, POLL};
 /// no buffer model in v1 — same simplification class as the simulator,
 /// Q15).
 pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<DeviceInner>) {
-    let mut block_id = 1u64; // R-77st-class per-channel sequence from 1
+    // R-77st: block_id resets to 0 when the stream channel opens.
+    let mut block_id = 0u64; // R-77st-class per-channel sequence from 1
     let mut generation = 0u64;
     let mut pending: Option<super::SessionFrame> = None;
     let mut was_enabled = false;
@@ -73,7 +74,7 @@ pub(crate) fn emitter_loop(rx: Receiver<super::SessionFrame>, inner: &Arc<Device
         if frame.generation > generation {
             generation = frame.generation;
             pending = None;
-            block_id = 1;
+            block_id = 0;
             // Every relay open is a new generation. Reset before its first
             // frame even when the disable branch above was raced past.
             if !aio_clean {

@@ -142,9 +142,9 @@ fn stream_relay_cascade_on_stream_enable() {
     stream.start().expect("SIRM program + enable");
 
     // The host's Stream Enable cascaded downstream: the stub camera's
-    // frames relay to the U3V host, byte-exact, ids from 1.
+    // frames relay to the U3V host, byte-exact, block ids from 0 (R-77st).
     let mut ids = Vec::new();
-    for want in 1..=3u64 {
+    for (want, frame_no) in [(0u64, 1u64), (1, 2), (2, 3)] {
         let block = stream
             .next_block(Duration::from_secs(5))
             .expect("block")
@@ -159,7 +159,7 @@ fn stream_relay_cascade_on_stream_enable() {
                     payload
                         .iter()
                         .enumerate()
-                        .all(|(k, &b)| b == (k as u64 + want) as u8),
+                        .all(|(k, &b)| b == (k as u64 + frame_no) as u8),
                     "block {want} payload byte-exact"
                 );
                 ids.push(leader.block_id);
@@ -167,7 +167,7 @@ fn stream_relay_cascade_on_stream_enable() {
             other => panic!("expected an image block, got {other:?}"),
         }
     }
-    assert_eq!(ids, vec![1, 2, 3]);
+    assert_eq!(ids, vec![0, 1, 2], "R-77st block ids");
 
     // Relayed counter visible in the custom window.
     assert!(c.client.read_reg(u64::from(CUSTOM_BASE) + 12).unwrap() >= 3);

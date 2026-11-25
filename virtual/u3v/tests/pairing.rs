@@ -137,7 +137,7 @@ fn stream_blocks_roundtrip_byte_exact() {
         } => (leader, payload, trailer),
         other => panic!("expected an image block, got {other:?}"),
     };
-    assert_eq!(leader.block_id, 1);
+    assert_eq!(leader.block_id, 0, "R-77st: first block id is 0");
     assert_eq!(leader.timestamp, 111);
     assert_eq!(leader.pixel_format, support::MONO8);
     assert_eq!(leader.size_x, W);
@@ -207,7 +207,7 @@ fn variable_frame_sizes_do_not_desync_following_blocks() {
                 payload,
                 trailer,
             } => {
-                assert_eq!(leader.block_id, block_id - 2);
+                assert_eq!(leader.block_id, block_id - 3);
                 assert_eq!((leader.size_x, leader.size_y), (width, height));
                 assert_eq!(payload.len(), payload_len);
                 assert_eq!(trailer.status, 0);

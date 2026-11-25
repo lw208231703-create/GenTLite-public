@@ -191,9 +191,11 @@ impl CameraBack for U3vBack {
         let thread = std::thread::Builder::new()
             .name("vgige-u3v-events".into())
             .spawn(move || {
+                let mut req_id = 1u16;
                 while !thread_stop.load(Ordering::Relaxed) {
                     if let Some(event) = receiver.next(Duration::from_millis(100)) {
-                        relay.forward(&event_to_gvcp(&event));
+                        relay.forward(&event_to_gvcp(&event, req_id));
+                        req_id = if req_id == u16::MAX { 1 } else { req_id + 1 };
                     }
                 }
             })
@@ -332,7 +334,7 @@ impl Drop for U3vBack {
 /// (17.1.1 Figure 17-1 / 17.2.1 Figure 17-3) after a GVCP header. The event
 /// id is the one from the camera's own GenICam XML, which the host was given
 /// unchanged.
-pub(crate) fn event_to_gvcp(event: &gentl_u3v::packets::EventPacket) -> Vec<u8> {
+pub(crate) fn event_to_gvcp(event: &gentl_u3v::packets::EventPacket, req_id: u16) -> Vec<u8> {
     use gentl_gvcp::wire::{GvcpEvent, EVENT_CMD, EVENTDATA_CMD, HEADER_LEN};
     let gvcp = GvcpEvent {
         event_id: event.event_id,
@@ -348,10 +350,10 @@ pub(crate) fn event_to_gvcp(event: &gentl_u3v::packets::EventPacket) -> Vec<u8> 
         EVENTDATA_CMD
     };
     let mut datagram = Vec::with_capacity(HEADER_LEN + record.len());
-    datagram.extend_from_slice(&[0x42, 0x08]); // GVCP key; flag bit 3 = extended id
+    datagram.extend_from_slice(&[0x42, 0x10]); // GVCP key; bit 3 (msb-first) = EI
     datagram.extend_from_slice(&command.to_be_bytes());
     datagram.extend_from_slice(&(record.len() as u16).to_be_bytes());
-    datagram.extend_from_slice(&0u16.to_be_bytes()); // unsolicited: req_id unused
+    datagram.extend_from_slice(&req_id.max(1).to_be_bytes());
     datagram.extend_from_slice(&record);
     datagram
 }
@@ -373,7 +375,9 @@ mod tests {
             timestamp: 1_234,
             data: Vec::new(),
         };
-        let datagram = event_to_gvcp(&plain);
+        let datagram = event_to_gvcp(&plain, 1);
+        assert_eq!(datagram[1], 0x10, "EI flag is msb-first bit 3");
+        assert_eq!(u16::from_be_bytes([datagram[6], datagram[7]]), 1, "req_id");
         assert_eq!(
             u16::from_be_bytes([datagram[2], datagram[3]]),
             EVENT_CMD,
@@ -391,7 +395,7 @@ mod tests {
             timestamp: 9,
             data: vec![1, 2, 3, 4],
         };
-        let datagram = event_to_gvcp(&with_data);
+        let datagram = event_to_gvcp(&with_data, 2);
         assert_eq!(
             u16::from_be_bytes([datagram[2], datagram[3]]),
             EVENTDATA_CMD,

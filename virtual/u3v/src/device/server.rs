@@ -66,6 +66,16 @@ fn dispatch(cmd: &[u8], regs: &RegisterFile) -> Option<Vec<u8>> {
     // R-134cd: a command with a valid prefix/command_id but the
     // CommandResend flag set MUST answer U3V_STATUS_RESEND_NOT_SUPPORTED
     // instead of being executed (U3V 1.2 has no resend semantics).
+    // GenCP 1.3.1 §3.1.1: request_id 0 is only valid for read commands; a
+    // write with id 0 must answer GENCP_INVALID_PARAMETER without executing.
+    if ccd.request_id == 0 && ccd.command_id == packets::WRITEMEM_CMD {
+        return Some(packets::encode_ack(
+            packets::GENCP_INVALID_PARAMETER,
+            packets::WRITEMEM_ACK,
+            0,
+            &[],
+        ));
+    }
     if ccd.flags & packets::FLAG_COMMAND_RESEND != 0 {
         return Some(packets::encode_ack(
             packets::U3V_STATUS_RESEND_NOT_SUPPORTED,
