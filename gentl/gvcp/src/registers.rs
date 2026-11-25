@@ -52,17 +52,19 @@ pub const MESSAGE_CHANNEL_SOURCE_PORT: u32 = 0x0B1C;
 /// Message Channel Configuration (§36.56).
 pub const MESSAGE_CHANNEL_CONFIGURATION: u32 = 0x0B20;
 
-/// Bits 16-31 of the MCP register (§36.51).
-const MCP_HOST_PORT_MASK: u32 = 0xFFFF_0000;
+/// host_port is printed as bits 16-31; under the spec's msb-first
+/// convention that is the low 16 bits of the 32-bit register (same layout as
+/// SCPx, §36.51/§36.57, Q31).
+const MCP_HOST_PORT_MASK: u32 = 0x0000_FFFF;
 
-/// Build an MCP value from the host port (bits 16-31, §36.51).
+/// Build an MCP value from the host port (§36.51).
 pub fn mcp_make(host_port: u16) -> u32 {
-    u32::from(host_port) << 16
+    u32::from(host_port) & MCP_HOST_PORT_MASK
 }
 
 /// Extract the host_port field of an MCP register value.
 pub fn mcp_host_port(value: u32) -> u16 {
-    ((value & MCP_HOST_PORT_MASK) >> 16) as u16
+    (value & MCP_HOST_PORT_MASK) as u16
 }
 
 // MESSAGE_CHANNEL_CAPABILITY bits (§36.28, print/MSB-first numbering).
@@ -379,5 +381,14 @@ mod tests {
         // (0x0010_0000 is the sim's GenICam XML blob base).
         assert_eq!(stream_channel_addr(scp(512)), None);
         assert_eq!(stream_channel_addr(0x0010_0000), None);
+    }
+
+    /// §36.51 host_port is printed as bits 16-31; msb-first numbering makes
+    /// it the low 16 bits (same convention as SCPx, Q31).
+    #[test]
+    fn mcp_host_port_is_the_low_half() {
+        assert_eq!(mcp_make(3956), 3956);
+        assert_eq!(mcp_host_port(0x0000_0F74), 3956);
+        assert_eq!(mcp_host_port(0x0F74_0000), 0);
     }
 }

@@ -1160,10 +1160,10 @@ mod tests {
         let (core, _) = started_sink();
         let mut r = GvspReassembler::new();
         let mut lead = leader_dgram(1, 1);
-        lead[2] = 0x40; // PREV_BLOCK_DROPPED
+        lead[2..4].copy_from_slice(&GEV_FLAG_PREVIOUS_BLOCK_DROPPED.to_be_bytes());
         r.on_datagram(&core, &lead);
         let mut resend = payload_dgram(1, 1, &[0u8; CHUNK]);
-        resend[2] = 0x80; // PACKET_RESEND
+        resend[2..4].copy_from_slice(&GEV_FLAG_PACKET_RESEND.to_be_bytes());
         r.on_datagram(&core, &resend);
         assert_eq!(r.stats().prev_block_dropped_marks, 1);
         assert_eq!(r.stats().resend_packets, 1);

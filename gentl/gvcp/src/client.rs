@@ -183,9 +183,10 @@ impl GvcpClient {
     }
 
     /// WRITEMEM (spec §16.6): write `data` at `addr`. `data.len()` must be a
-    /// multiple of 4 and `addr` 32-bit aligned (R-187c/R-189c); the device
-    /// must echo the address in the ack (R-190cd). Larger writes must be
-    /// split by the caller to stay under the control-channel max packet.
+    /// multiple of 4 and `addr` 32-bit aligned (R-187c/R-189c); the ack SCD
+    /// reports reserved + index, with index = bytes written on success and
+    /// the failing byte offset on error (R-193c/R-194cd). Larger writes must
+    /// be split by the caller to stay under the control-channel max packet.
     pub fn write_mem(&self, addr: u32, data: &[u8]) -> GentlResult<()> {
         if data.is_empty() || data.len() % 4 != 0 || addr % 4 != 0 {
             return Err(GentlError::InvalidParameter("write_mem alignment"));

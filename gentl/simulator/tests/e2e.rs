@@ -316,8 +316,8 @@ fn force_ip_command_end_to_end() {
 }
 
 /// §16.6 WRITEMEM over the wire: a multi-word write lands in the register
-/// model (R-185cd), the device echoes the address (R-190cd), and the XML
-/// description answers WRITE_PROTECT.
+/// model (R-185cd) and the ack carries reserved + written-byte index
+/// (R-193c/R-194cd); the XML description answers WRITE_PROTECT.
 #[test]
 fn write_mem_command_end_to_end() {
     let cam = test_camera();

@@ -403,9 +403,10 @@ impl SimRegMap {
     /// Test hook: send one EVENT_CMD (payload length 0) or EVENTDATA_CMD with
     /// a deterministic payload on the open message channel.
     fn emit_test_event(&self) {
-        let (dest, event_id, data_len, timestamp) = {
+        let (dest, event_id, data_len, timestamp, seq) = {
             let mut i = self.inner.lock().expect("sim regmap poisoned");
             i.event_seq = i.event_seq.wrapping_add(1);
+            let seq = i.event_seq;
             let word = |reg_addr: u32| {
                 u32::from_be_bytes(
                     i.user[(reg_addr - USER_BASE) as usize..][..4]
@@ -419,6 +420,7 @@ impl SimRegMap {
                 word(REG_TEST_EVENT_ID) as u16,
                 (word(REG_TEST_EVENT_DATA_LEN) as usize).min(8),
                 timestamp,
+                seq,
             )
         };
         let Some(dest) = dest else { return };
@@ -430,10 +432,12 @@ impl SimRegMap {
         };
         let record_size = EVENT_RECORD_LEN + data.len();
         let mut datagram = Vec::with_capacity(HEADER_LEN + record_size);
-        datagram.extend_from_slice(&[0x42, 0x08]); // GVCP key; flag bit 3 extended id
+        datagram.extend_from_slice(&[0x42, 0x10]); // GVCP key; bit 3 (msb-first) = EI
         datagram.extend_from_slice(&command.to_be_bytes());
         datagram.extend_from_slice(&(record_size as u16).to_be_bytes());
-        datagram.extend_from_slice(&0u16.to_be_bytes()); // req_id: unsolicited
+        // CR-097cd: req_id increments per message and 0 is invalid.
+        let req_id = (seq % 0xFFFF) as u16;
+        datagram.extend_from_slice(&req_id.max(1).to_be_bytes());
         datagram.extend_from_slice(&(record_size as u16).to_be_bytes());
         datagram.extend_from_slice(&event_id.to_be_bytes());
         datagram.extend_from_slice(&0xFFFFu16.to_be_bytes()); // no stream channel

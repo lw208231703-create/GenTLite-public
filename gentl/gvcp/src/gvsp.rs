@@ -30,9 +30,11 @@ pub const PACKET_FORMAT_DATA_TRAILER: u8 = 2;
 pub const PACKET_FORMAT_DATA_PAYLOAD: u8 = 3;
 
 // flag bits (Table 24-1)
-pub const GEV_FLAG_PACKET_RESEND: u16 = 1 << 15;
-pub const GEV_FLAG_PREVIOUS_BLOCK_DROPPED: u16 = 1 << 14;
-pub const GEV_FLAG_RESEND_RANGE_ERROR: u16 = 1 << 13;
+// GVSP flags use the spec's msb-first numbering (bit 15 = LSB):
+// print bit 15 -> 0x0001, bit 14 -> 0x0002, bit 13 -> 0x0004.
+pub const GEV_FLAG_PACKET_RESEND: u16 = 1 << 0;
+pub const GEV_FLAG_PREVIOUS_BLOCK_DROPPED: u16 = 1 << 1;
+pub const GEV_FLAG_RESEND_RANGE_ERROR: u16 = 1 << 2;
 
 // payload_type values (Table 25-1)
 pub const PAYLOAD_TYPE_IMAGE: u16 = 0x0001;
@@ -186,8 +188,8 @@ impl ImageLeader {
             size_y: u32be(20)?,
             offset_x: u32be(24)?,
             offset_y: u32be(28)?,
-            padding_x: u32be(32)?,
-            padding_y: u32be(36)?,
+            padding_x: u32::from(u16::from_be_bytes([body[32], body[33]])),
+            padding_y: u32::from(u16::from_be_bytes([body[34], body[35]])),
         })
     }
 
@@ -218,16 +220,14 @@ impl ImageLeader {
     }
 }
 
-/// Exact image leader body: 2 (pts) + 2 (pt) + 8 (ts) + 4*8 (pf,x,y,ox,oy,px,py) = 40 bytes.
-pub const IMAGE_LEADER_BODY_LEN: usize = 40;
+/// Exact 3.0 image leader body (Figure 25-2): 2 (field_id/field_count/
+/// reserved/payload_type) + 8 (timestamp) + pixel_format/size_x/size_y/
+/// offset_x/offset_y (5 x u32) + padding_x/padding_y (2 x u16) = 36 bytes.
+pub const IMAGE_LEADER_BODY_LEN: usize = 36;
 
-/// 1.2 §24 Fig 24-3 Image Data Leader body: 2 (reserved) + 2 (payload
-/// type) + 8 (timestamp) + pixel_format/size_x/size_y/offset_x/offset_y
-/// (5 x u32) + padding_x/padding_y (2 x u16) = 36 bytes. The 3.0 body
-/// (§25.2.1) instead opens with the 2-byte payload_type_specific
-/// (field_id/field_count) and uses u32 paddings; the trailing padding
-/// width difference is why the two bodies differ in length (36 vs 40)
-/// despite carrying the same fields.
+/// 1.2 §24 Fig 24-3 image leader body: also 36 bytes. The first u16 is a
+/// reserved field in 1.2 and carries the field_id/field_count bits in 3.0;
+/// both versions end with the two u16 paddings.
 pub const IMAGE_LEADER_LEGACY_BODY_LEN: usize = 36;
 
 pub fn encode_image_leader_body(l: &ImageLeader) -> [u8; IMAGE_LEADER_BODY_LEN] {
@@ -240,8 +240,8 @@ pub fn encode_image_leader_body(l: &ImageLeader) -> [u8; IMAGE_LEADER_BODY_LEN] 
     out[20..24].copy_from_slice(&l.size_y.to_be_bytes());
     out[24..28].copy_from_slice(&l.offset_x.to_be_bytes());
     out[28..32].copy_from_slice(&l.offset_y.to_be_bytes());
-    out[32..36].copy_from_slice(&l.padding_x.to_be_bytes());
-    out[36..40].copy_from_slice(&l.padding_y.to_be_bytes());
+    out[32..34].copy_from_slice(&(l.padding_x as u16).to_be_bytes());
+    out[34..36].copy_from_slice(&(l.padding_y as u16).to_be_bytes());
     out
 }
 
@@ -333,6 +333,28 @@ mod tests {
         let mut buf = [0u8; 20];
         h.encode(&mut buf);
         assert_eq!(GvspHeader::decode(&buf).unwrap(), h);
+    }
+
+    /// Figure 25-2: the leader body is 36 bytes and the last four bytes are
+    /// two 16-bit paddings (not two 32-bit fields).
+    #[test]
+    fn image_leader_body_is_36_bytes_with_u16_paddings() {
+        let mut body = [0u8; IMAGE_LEADER_BODY_LEN];
+        body[0] = 0x12; // field_id 1, field_count 2
+        body[2..4].copy_from_slice(&PAYLOAD_TYPE_IMAGE.to_be_bytes());
+        body[4..12].copy_from_slice(&7u64.to_be_bytes());
+        body[12..16].copy_from_slice(&0x0108_0001u32.to_be_bytes());
+        body[16..20].copy_from_slice(&640u32.to_be_bytes());
+        body[20..24].copy_from_slice(&480u32.to_be_bytes());
+        body[32..34].copy_from_slice(&3u16.to_be_bytes());
+        body[34..36].copy_from_slice(&4u16.to_be_bytes());
+        let leader = ImageLeader::decode(&body).expect("36-byte 3.0 body");
+        assert_eq!((leader.field_id, leader.field_count), (1, 2));
+        assert_eq!(leader.size_x, 640);
+        assert_eq!(leader.size_y, 480);
+        assert_eq!(leader.padding_x, 3);
+        assert_eq!(leader.padding_y, 4);
+        assert!(ImageLeader::decode(&body[..35]).is_none());
     }
 
     #[test]
@@ -430,8 +452,8 @@ mod tests {
     }
 
     /// 1.2 §24 Fig 24-3 legacy leader body: reserved u16 + payload_type +
-    /// timestamp + 5 x u32 + 2 x u16 padding = 36 bytes; the u16 paddings
-    /// are the length difference vs the 40-byte 3.0 body.
+    /// timestamp + 5 x u32 + 2 x u16 padding = 36 bytes; the 3.0 body has
+    /// the same length (its first u16 carries field_id/field_count).
     #[test]
     fn legacy_leader_body_roundtrip() {
         let l = ImageLeader {

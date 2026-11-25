@@ -206,8 +206,11 @@ fn serve_loop<H: DeviceHandler>(
                         }
                     }
                 }
-                // R-165cd: the acknowledge length reflects the registers
-                // that were successfully read, even on a later failure.
+                // R-165cd keeps words read before a later failure, but
+                // R-138cd/R-162cd require a header-only ACK on ACCESS_DENIED.
+                if status == GEV_STATUS_ACCESS_DENIED {
+                    values.clear();
+                }
                 let len = values.len();
                 AckHeader::new(status, READREG_ACK, len as u16, cmd.req_id).encode(&mut ack);
                 out.extend_from_slice(&ack);

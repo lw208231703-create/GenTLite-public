@@ -449,7 +449,7 @@ pub const FORCEIP_PAYLOAD_LEN: usize = 56;
 /// GVCP flag byte: broadcast the FORCEIP_ACK (§16.2.1 bit 3). The forced
 /// address may move the device to another subnet, so the requester may not
 /// hear a unicast reply.
-pub const FLAG_FORCEIP_ACK_BROADCAST: u8 = 0x08;
+pub const FLAG_FORCEIP_ACK_BROADCAST: u8 = 0x10;
 
 /// Decoded FORCEIP_CMD payload (§16.2.1 Figure 16-3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
