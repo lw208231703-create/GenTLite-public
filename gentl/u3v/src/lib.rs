@@ -480,6 +480,7 @@ pub extern "C" fn GCCloseLib() -> GCError {
     guard(|| {
         LIB_INITIALIZED.store(false, Ordering::SeqCst);
         TL_OPENED.store(false, Ordering::SeqCst);
+        gentl_core::invalidate_handles();
         GC_ERR_SUCCESS
     })
 }
@@ -3230,5 +3231,56 @@ mod tests {
             TLGetNumInterfaces(ptr::null_mut(), &mut n_after),
             GC_ERR_NOT_INITIALIZED
         );
+
+        // GCCloseLib frees the library resources: handles created before the
+        // close stay invalid even after GCInitLib runs again, and closing an
+        // old TL must not clear the new System's open state.
+        assert_eq!(GCInitLib(), GC_ERR_SUCCESS);
+        let mut old_tl: TLHandle = ptr::null_mut();
+        assert_eq!(TLOpen(&mut old_tl), GC_ERR_SUCCESS);
+        assert_eq!(GCCloseLib(), GC_ERR_SUCCESS);
+        assert_eq!(GCInitLib(), GC_ERR_SUCCESS);
+        let mut dtype: InfoDataType = 0;
+        let mut buf = [0u8; 64];
+        let mut size = buf.len();
+        assert_eq!(
+            TLGetInfo(
+                old_tl,
+                TL_INFO_VENDOR,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
+            GC_ERR_INVALID_HANDLE,
+            "a pre-close TL handle must not become valid again"
+        );
+        let mut new_tl: TLHandle = ptr::null_mut();
+        assert_eq!(TLOpen(&mut new_tl), GC_ERR_SUCCESS);
+        let mut size = buf.len();
+        assert_eq!(
+            TLGetInfo(
+                new_tl,
+                TL_INFO_VENDOR,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
+            GC_ERR_SUCCESS
+        );
+        assert_eq!(TLClose(old_tl), GC_ERR_INVALID_HANDLE);
+        let mut size = buf.len();
+        assert_eq!(
+            TLGetInfo(
+                new_tl,
+                TL_INFO_VENDOR,
+                &mut dtype,
+                buf.as_mut_ptr().cast(),
+                &mut size
+            ),
+            GC_ERR_SUCCESS,
+            "stale TLClose must not clear the new TL_OPENED state"
+        );
+        assert_eq!(TLClose(new_tl), GC_ERR_SUCCESS);
+        assert_eq!(GCCloseLib(), GC_ERR_SUCCESS);
     }
 }
