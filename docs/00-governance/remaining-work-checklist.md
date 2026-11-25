@@ -162,3 +162,8 @@
 - ACCESS_DENIED 的 WRITEREG/WRITEMEM ACK 改为 header-only（R-138cd）；WRITEMEM 部分失败通过 progress 接口返回真实字节索引（R-194cd，模拟器/网关）；GCCloseLib 使全部旧 GenTL 句柄失效（handle generation），重新初始化后旧 TL 不可用。
 - 验证：303 tests / 0 failed / 0 warnings；板端 GVCP 与 CTI 实测通过。FORCEIP 仍按 §26.1 记录为不支持。
 
+## U. 2026-11-24 第八轮 review 复核（GCCloseLib 资源释放）
+
+- 真 bug：GCCloseLib 只使句柄失效，未释放 HandleBox/模块/线程。已改为 token 句柄 + registry，GCCloseLib drain 全部句柄并调用各模块 shutdown（停止接收线程/心跳/事件泵，关闭相机 SCP/CCP），再释放 Arc/条目。
+- 验证：305 tests / 0 failed / 0 warnings；GigE 集成测试验证线程归零与相机侧 SCP0/CCP0=0；CTI 验证旧句柄 -1006、新句柄正常。
+
