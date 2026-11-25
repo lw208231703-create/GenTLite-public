@@ -25,8 +25,8 @@ use std::time::Duration;
 
 use gentl_core::types::*;
 use gentl_core::{
-    channel::ControlChannel, ds as ds_core, event_queue::WaitResult, free_handle, from_handle,
-    last_error, set_error, set_last_error, to_handle, GentlError, GentlResult,
+    channel::ControlChannel, close_handle_tree, ds as ds_core, event_queue::WaitResult, free_handle, from_handle,
+    last_error, set_error, set_last_error, to_handle, to_handle_child, GentlError, GentlResult,
 };
 
 // Module wiring after the Phase B USB-backend split (docs/00-governance/PENDING.md
@@ -532,7 +532,7 @@ pub extern "C" fn TLClose(h_tl: TLHandle) -> GCError {
         let system = module!(h_tl, TlSystem);
         TL_OPENED.store(false, Ordering::SeqCst);
         drop(system);
-        unsafe { free_handle(h_tl) };
+        close_handle_tree(h_tl);
         GC_ERR_SUCCESS
     })
 }
@@ -780,7 +780,7 @@ pub extern "C" fn TLOpenInterface(
             opened.insert(id.to_owned());
         }
         let instance = template.instantiate();
-        unsafe { *ph_iface = to_handle(instance) };
+        unsafe { *ph_iface = to_handle_child(instance, h_tl) };
         GC_ERR_SUCCESS
     })
 }
@@ -843,7 +843,7 @@ pub extern "C" fn IFClose(h_iface: IFHandle) -> GCError {
             }
         }
         drop(iface);
-        unsafe { free_handle(h_iface) };
+        close_handle_tree(h_iface);
         GC_ERR_SUCCESS
     })
 }
@@ -1122,7 +1122,7 @@ pub extern "C" fn IFOpenDevice(
             }
             Err(e) => return e,
         };
-        unsafe { *ph_device = to_handle(device) };
+        unsafe { *ph_device = to_handle_child(device, h_iface) };
         GC_ERR_SUCCESS
     })
 }
@@ -1184,7 +1184,7 @@ pub extern "C" fn DevGetPort(h_device: DevHandle, ph_remote_device: *mut PortHan
         let port = DevicePort {
             device: Arc::downgrade(&device),
         };
-        unsafe { *ph_remote_device = to_handle(Arc::new(port)) };
+        unsafe { *ph_remote_device = to_handle_child(Arc::new(port), h_device) };
         GC_ERR_SUCCESS
     })
 }
@@ -1268,14 +1268,13 @@ pub extern "C" fn DevGetInfo(
 pub extern "C" fn DevClose(h_device: DevHandle) -> GCError {
     guard(|| {
         let device = module!(h_device, U3vDevice);
-        device.close();
         if let Some(iface) = device.parent.upgrade() {
             if let Ok(mut opened) = iface.opened_devices.lock() {
                 opened.remove(&device.id);
             }
         }
         drop(device);
-        unsafe { free_handle(h_device) };
+        close_handle_tree(h_device);
         GC_ERR_SUCCESS
     })
 }
@@ -1342,6 +1341,9 @@ pub extern "C" fn DevGetDataStreamID(
             Ok(d) => d,
             Err(e) => return e,
         };
+        if device.bootstrap.number_of_stream_channels == 0 {
+            return not_implemented("no data stream on this device");
+        }
         if i_index >= device.bootstrap.number_of_stream_channels {
             return invalid_index();
         }
@@ -1368,6 +1370,9 @@ pub extern "C" fn DevOpenDataStream(
             Ok(d) => d,
             Err(e) => return e,
         };
+        if device.bootstrap.number_of_stream_channels == 0 {
+            return not_implemented("no data stream on this device");
+        }
         let Some(channel) =
             (0..device.bootstrap.number_of_stream_channels).find(|i| stream_id(*i) == id)
         else {
@@ -1389,7 +1394,7 @@ pub extern "C" fn DevOpenDataStream(
         if let Ok(mut opened) = device.opened_streams.lock() {
             opened.insert(id.to_owned());
         }
-        unsafe { *ph_data_stream = to_handle(stream) };
+        unsafe { *ph_data_stream = to_handle_child(stream, h_device) };
         GC_ERR_SUCCESS
     })
 }
@@ -1398,14 +1403,13 @@ pub extern "C" fn DevOpenDataStream(
 pub extern "C" fn DSClose(h_ds: DSHandle) -> GCError {
     guard(|| {
         let ds = module!(h_ds, U3vDataStream);
-        ds.close();
         if let Some(device) = ds.parent.upgrade() {
             if let Ok(mut opened) = device.opened_streams.lock() {
                 opened.remove(&stream_id(ds.channel_index));
             }
         }
         drop(ds);
-        unsafe { free_handle(h_ds) };
+        close_handle_tree(h_ds);
         GC_ERR_SUCCESS
     })
 }
@@ -1521,7 +1525,7 @@ pub extern "C" fn DSAnnounceBuffer(
             stream: Arc::downgrade(&ds),
             id,
         });
-        let handle = to_handle(module);
+        let handle = to_handle_child(module, h_ds);
         ds.set_buffer_handle(id, handle);
         unsafe { *ph_buffer = handle };
         GC_ERR_SUCCESS
@@ -1552,7 +1556,7 @@ pub extern "C" fn DSAllocAndAnnounceBuffer(
             stream: Arc::downgrade(&ds),
             id,
         });
-        let handle = to_handle(module);
+        let handle = to_handle_child(module, h_ds);
         ds.set_buffer_handle(id, handle);
         unsafe { *ph_buffer = handle };
         GC_ERR_SUCCESS
@@ -2052,7 +2056,7 @@ pub extern "C" fn GCRegisterEvent(
                 Ok(m) => m,
                 Err(e) => return fail(e),
             };
-            unsafe { *ph_event = to_handle(module) };
+            unsafe { *ph_event = to_handle_child(module, h_event_src) };
             return GC_ERR_SUCCESS;
         }
         let ds = match unsafe { from_handle::<U3vDataStream>(h_event_src) } {
@@ -2072,7 +2076,7 @@ pub extern "C" fn GCRegisterEvent(
             Ok(m) => m,
             Err(e) => return fail(e),
         };
-        unsafe { *ph_event = to_handle(module) };
+        unsafe { *ph_event = to_handle_child(module, h_event_src) };
         GC_ERR_SUCCESS
     })
 }

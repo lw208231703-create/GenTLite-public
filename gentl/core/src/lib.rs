@@ -17,6 +17,8 @@ pub mod pixfmt_table;
 pub mod types;
 
 pub use error::{last_error, set_error, set_last_error, GentlError, GentlResult};
-pub use handles::{free_handle, from_handle, invalidate_handles, to_handle};
+pub use handles::{
+    close_handle_tree, free_handle, from_handle, invalidate_handles, to_handle, to_handle_child,
+};
 pub use module::{Module, ModuleType};
 pub use types::*;

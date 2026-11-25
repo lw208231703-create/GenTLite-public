@@ -86,6 +86,7 @@ impl DeviceHandler for FakeDevice {
             reg::TIMESTAMP_TICK_FREQ_HIGH => Ok(0),
             reg::TIMESTAMP_TICK_FREQ_LOW => Ok(125_000_000),
             reg::SCP0 => Ok(0),
+            reg::NUM_STREAM_CHANNELS => Ok(1),
             PAYLOAD_ADDR => Ok(PAYLOAD),
             _ => Err(GEV_STATUS_INVALID_ADDRESS),
         }
@@ -109,6 +110,9 @@ impl DeviceHandler for FakeDevice {
         }
         if addr == PAYLOAD_ADDR && count == 4 {
             return Ok(PAYLOAD.to_be_bytes().to_vec());
+        }
+        if addr == reg::NUM_STREAM_CHANNELS && count == 4 {
+            return Ok(1u32.to_be_bytes().to_vec());
         }
         Err(GEV_STATUS_INVALID_ADDRESS)
     }

@@ -361,6 +361,19 @@ impl SimRegMap {
         self.close_message_channel();
     }
 
+    /// Expire an idle primary grant without refreshing it (FORCEIP must not
+    /// count as heartbeat traffic, R-075cd) and run the R-072cd cleanup.
+    fn expire_stale_grant(&self) -> bool {
+        let expired = {
+            let mut i = self.inner.lock().expect("sim regmap poisoned");
+            i.ccp.flags != 0 && i.expire_heartbeat()
+        };
+        if expired {
+            self.close_control_channel();
+        }
+        expired
+    }
+
     /// WRITEMEM core with byte progress (R-194cd): words before a failing
     /// word stay committed; the returned index is the failing byte offset.
     fn write_mem_inner(&self, addr: u32, data: &[u8]) -> Result<(), (u16, u32)> {
@@ -505,12 +518,12 @@ impl SimRegMap {
             StreamingProtocol::GvspOnly => (
                 0,
                 reg::SCONF_PROTOCOL_GVSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT,
-                self.stream.channels.max(1),
+                self.stream.channels,
             ),
             StreamingProtocol::Both => (
                 reg::SCAP_GVRSP_MODE_SUPPORTED | reg::SCAP_SCEBA_SUPPORTED,
                 reg::SCONF_PROTOCOL_GVSP << reg::SCONF_STREAMING_PROTOCOL_SHIFT,
-                self.stream.channels.max(1),
+                self.stream.channels,
             ),
             StreamingProtocol::GvrspOnly => (
                 reg::SCAP_GVSP_MODE_NOT_SUPPORTED
@@ -943,6 +956,9 @@ impl DeviceHandler for SimRegMap {
         if request.mac != self.config.mac {
             return ForceIpOutcome::Ignore;
         }
+        // R-076cd/R-150cd: expire an idle grant before checking the
+        // privilege; FORCEIP itself must not refresh the heartbeat.
+        self.expire_stale_grant();
         {
             let i = self.inner.lock().expect("sim regmap poisoned");
             // R-150cd: only process the command when no application holds
@@ -1999,5 +2015,37 @@ mod tests {
             reg::CCP_EXCLUSIVE_ACCESS,
             "the first word stays committed"
         );
+    }
+
+    /// R-076cd/R-150cd: FORCEIP must observe an expired heartbeat, not a
+    /// stale cached grant, and the expiry cleanup closes streams/channels.
+    #[test]
+    fn force_ip_sees_an_expired_heartbeat() {
+        let m = test_map();
+        m.write_reg(reg::HEARTBEAT_TIMEOUT, 500).unwrap();
+        m.write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS).unwrap();
+        m.write_reg(reg::MESSAGE_CHANNEL_DEST_ADDRESS, u32::from(Ipv4Addr::LOCALHOST))
+            .unwrap();
+        m.write_reg(reg::MESSAGE_CHANNEL_PORT, reg::mcp_make(40000))
+            .unwrap();
+        m.write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST)).unwrap();
+        m.write_reg(reg::SCP0, reg::scp_make(40001)).unwrap();
+        std::thread::sleep(Duration::from_millis(600));
+        let request = ForceIpRequest {
+            mac: m.config.mac,
+            static_ip: 0,
+            subnet_mask: 0,
+            default_gateway: 0,
+        };
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 3956));
+        assert_eq!(m.force_ip(peer, request), ForceIpOutcome::Ignore);
+        assert_eq!(
+            m.read_reg(reg::CCP).unwrap()
+                & (reg::CCP_EXCLUSIVE_ACCESS | reg::CCP_CONTROL_ACCESS),
+            0,
+            "stale grant expired before the FORCEIP privilege check"
+        );
+        assert_eq!(m.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(), 0);
+        assert_eq!(m.read_reg(reg::SCP0).unwrap(), 0);
     }
 }

@@ -32,6 +32,9 @@ static HANDLE_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 struct HandleBox {
     generation: u64,
+    /// Handle of the parent module, for the Close cascade (GenTL 6.1.3:
+    /// closing a module frees its dependent child modules).
+    parent: Option<usize>,
     module: Arc<dyn Module>,
 }
 
@@ -57,16 +60,78 @@ fn generation() -> u64 {
 
 /// Box an `Arc<T>` into an opaque GenTL handle. Free with `free_handle`.
 pub fn to_handle<T: Module>(obj: Arc<T>) -> *mut c_void {
+    to_handle_inner(obj, None)
+}
+
+/// Register `obj` as a child of the parent handle. When `parent` is null or
+/// points at a freed handle the module becomes a root handle.
+pub fn to_handle_child<T: Module>(obj: Arc<T>, parent: *mut c_void) -> *mut c_void {
+    let parent = if parent.is_null() {
+        None
+    } else {
+        Some(parent as usize)
+    };
+    to_handle_inner(obj, parent)
+}
+
+fn module_key(module: &Arc<dyn Module>) -> usize {
+    Arc::as_ptr(module) as *const () as usize
+}
+
+fn to_handle_inner<T: Module>(obj: Arc<T>, parent: Option<usize>) -> *mut c_void {
+    let module: Arc<dyn Module> = obj;
+    let ptr = module_key(&module);
+    let mut registry = lock_registry();
+    // Parent-query helpers hand out the same module again; reuse the
+    // canonical handle so both tokens die with the module.
+    if let Some((&key, _)) = registry.iter().find(|(_, h)| module_key(&h.module) == ptr) {
+        return key as *mut c_void;
+    }
     let key = NEXT_HANDLE.fetch_add(1, Ordering::SeqCst) as usize;
     debug_assert!(key != 0 && key != usize::MAX);
-    lock_registry().insert(
+    registry.insert(
         key,
         HandleBox {
             generation: generation(),
-            module: obj,
+            parent,
+            module,
         },
     );
     key as *mut c_void
+}
+
+fn child_keys(parent: usize) -> Vec<usize> {
+    let registry = lock_registry();
+    registry
+        .iter()
+        .filter(|(_, h)| h.parent == Some(parent))
+        .map(|(&key, _)| key)
+        .collect()
+}
+
+fn collect_tree(key: usize, out: &mut Vec<usize>) {
+    for child in child_keys(key) {
+        collect_tree(child, out);
+    }
+    out.push(key);
+}
+
+/// Close a module and every live descendant handle (GenTL 1.6 §6.1.3,
+/// §6.3.2.1, §6.3.3.1, §6.3.4.1). Children are shut down and removed before
+/// the parent; unknown/stale handles are a no-op.
+pub fn close_handle_tree(h: *mut c_void) {
+    if h.is_null() {
+        return;
+    }
+    let mut order = Vec::new();
+    collect_tree(h as usize, &mut order);
+    for key in order {
+        let removed = lock_registry().remove(&key);
+        if let Some(handle) = removed {
+            let _ = catch_unwind(AssertUnwindSafe(|| handle.module.shutdown()));
+            drop(handle);
+        }
+    }
 }
 
 /// Recover a typed `Arc<T>` from a handle, validating the generation and
@@ -154,8 +219,18 @@ mod tests {
         }
     }
 
+    /// Handle tests share the process-wide registry; invalidate_handles in one
+    /// test must not invalidate another test's handles.
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .expect("handle test lock")
+    }
+
     #[test]
     fn handles_are_released_by_invalidate_and_free() {
+        let _guard = test_lock();
         let shutdowns = Arc::new(AtomicUsize::new(0));
         let marker = Arc::new(());
         let module = Arc::new(TestModule {
@@ -194,5 +269,51 @@ mod tests {
         assert_eq!(Arc::strong_count(&marker), 2);
         unsafe { free_handle(h2) };
         assert_eq!(Arc::strong_count(&marker), 1);
+    }
+
+    #[test]
+    fn close_handle_tree_removes_children_first_and_runs_shutdown() {
+        let _guard = test_lock();
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let marker = Arc::new(());
+        let make = || {
+            Arc::new(TestModule {
+                shutdowns: Arc::clone(&shutdowns),
+                marker: Arc::clone(&marker),
+            })
+        };
+        let parent = to_handle(make());
+        let child = to_handle_child(make(), parent);
+        let grandchild = to_handle_child(make(), child);
+        assert_eq!(Arc::strong_count(&marker), 4);
+        unsafe {
+            assert!(from_handle::<TestModule>(parent).is_ok());
+            assert!(from_handle::<TestModule>(child).is_ok());
+            assert!(from_handle::<TestModule>(grandchild).is_ok());
+        }
+        close_handle_tree(parent);
+        assert_eq!(
+            shutdowns.load(Ordering::SeqCst),
+            3,
+            "parent and every descendant are shut down"
+        );
+        assert_eq!(Arc::strong_count(&marker), 1, "all handles released");
+        unsafe {
+            assert!(from_handle::<TestModule>(child).is_err());
+            assert!(from_handle::<TestModule>(grandchild).is_err());
+        }
+    }
+
+    /// Parent-query helpers must get the canonical token, not a second one.
+    #[test]
+    fn same_module_reuses_its_handle() {
+        let _guard = test_lock();
+        let module = Arc::new(TestModule {
+            shutdowns: Arc::new(AtomicUsize::new(0)),
+            marker: Arc::new(()),
+        });
+        let a = to_handle(Arc::clone(&module));
+        let b = to_handle_child(Arc::clone(&module), a);
+        assert_eq!(a, b);
     }
 }
