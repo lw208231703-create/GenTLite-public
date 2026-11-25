@@ -83,6 +83,18 @@ pub trait DeviceHandler: Send + 'static {
             .map_err(|status| (status, 0))
     }
 
+    /// Pending Timeout in milliseconds (R-472cd, read-only). 0 disables the
+    /// PENDING_ACK path for this device.
+    fn pending_timeout_ms(&self) -> u16 {
+        0
+    }
+
+    /// True when this command may take longer than the pending timeout and
+    /// should be preceded by a PENDING_ACK (R-210cd). Default: never.
+    fn pending_ack_before(&self, _command: u16, _payload: &[u8]) -> bool {
+        false
+    }
+
     /// Periodic maintenance hook, called by the server loop at least every
     /// socket timeout (100 ms) even when no command arrives. Devices with
     /// time-based state (heartbeat expiry, pending timeouts) do their
@@ -176,6 +188,20 @@ fn serve_loop<H: DeviceHandler>(
         let payload_in = &datagram[HEADER_LEN..];
         // Defensive: declared length vs actual datagram size.
         let payload_in = &payload_in[..payload_in.len().min(cmd.length as usize)];
+
+        // R-210cd/R-472cd: announce a long-running command before it can
+        // exceed the advertised pending timeout. The handler owns the
+        // decision (e.g. opening a downstream stream through the gateway).
+        if handler.pending_ack_before(cmd.command, payload_in) {
+            let timeout = handler.pending_timeout_ms().max(1);
+            let mut pending = [0u8; HEADER_LEN];
+            AckHeader::new(GEV_STATUS_SUCCESS, PENDING_ACK, 4, cmd.req_id)
+                .encode(&mut pending);
+            let mut datagram = pending.to_vec();
+            datagram.extend_from_slice(&0u16.to_be_bytes());
+            datagram.extend_from_slice(&timeout.to_be_bytes());
+            let _ = socket.send_to(&datagram, peer);
+        }
 
         let mut out: Vec<u8> = Vec::with_capacity(HEADER_LEN + 512);
         let mut ack = [0u8; HEADER_LEN];

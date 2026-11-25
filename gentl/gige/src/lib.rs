@@ -2094,6 +2094,9 @@ pub extern "C" fn EventGetData(
         return GC_ERR_SUCCESS;
     }
     let ev = module!(h_event, EventModule);
+    if ev.queue.is_dead() {
+        return fail(GentlError::InvalidHandle);
+    }
     let ds = match ev.source.upgrade() {
         Some(d) => d,
         None => return fail(GentlError::InvalidHandle),
@@ -2235,6 +2238,9 @@ pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
         return GC_ERR_SUCCESS;
     }
     let ev = module!(h_event, EventModule);
+    if ev.queue.is_dead() {
+        return fail(GentlError::InvalidHandle);
+    }
     // Flushing the New Buffer event discards the output buffer queue, too.
     if let Some(ds) = ev.source.upgrade() {
         if ev.event_type == EVENT_NEW_BUFFER {
@@ -2258,6 +2264,9 @@ pub extern "C" fn EventKill(h_event: EventHandle) -> GCError {
         return GC_ERR_SUCCESS;
     }
     let ev = module!(h_event, EventModule);
+    if ev.queue.is_dead() {
+        return fail(GentlError::InvalidHandle);
+    }
     ev.queue.kill_one();
     GC_ERR_SUCCESS
     })

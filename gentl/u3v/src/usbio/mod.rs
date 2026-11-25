@@ -202,8 +202,10 @@ pub(crate) fn read_piece_exact(
             return Err(ReadAbort::Io("piece exceeded planned size".into()));
         }
         done += n;
-        if n % mps != 0 && done < expected {
-            return Ok((done as u32, true)); // short packet terminates
+        if n % mps != 0 {
+            // R-127sr: a short transaction terminates the sequence even if
+            // it happens to reach the planned byte count exactly.
+            return Ok((done as u32, true));
         }
     }
     Ok((done as u32, false))
@@ -328,7 +330,10 @@ mod tests {
         let (n, terminated) =
             read_piece_exact(&*pipe, &mut buf, 2548, 1024, &stop).expect("accumulate");
         assert_eq!(n, 2548);
-        assert!(!terminated, "the short packet completed the planned piece");
+        assert!(
+            terminated,
+            "the final short transaction terminates the payload sequence (R-127sr)"
+        );
     }
 
     #[test]

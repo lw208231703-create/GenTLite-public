@@ -679,7 +679,15 @@ impl GvspReassembler {
         let valid = if block.leader.is_extended_chunk() {
             match decode_image_extended_trailer_body(trailer_body) {
                 Some((size_y, chunk_len, layout_id)) => {
-                    let image_bytes = frame_meta(&block.leader).payload_bytes().unwrap_or(0);
+                    // Variable frame size also applies to extended-chunk
+                    // blocks: size_y may be below the leader height.
+                    let rows = size_y.min(block.leader.size_y);
+                    let image_bytes = gentl_core::pixfmt::payload_size(
+                        block.leader.pixel_format,
+                        block.leader.size_x,
+                        rows,
+                    )
+                    .unwrap_or_else(|| frame_meta(&block.leader).payload_bytes().unwrap_or(0));
                     let chunk_start = align4(image_bytes) + 8;
                     let total_valid = chunk_start + usize::try_from(chunk_len).unwrap_or(0);
                     if chunk_len > 0 && block.bytes_written >= total_valid {
@@ -689,7 +697,7 @@ impl GvspReassembler {
                             layout_id: u64::from(layout_id),
                         });
                     }
-                    (Some(size_y == block.leader.size_y), total_valid)
+                    (Some(size_y > 0 && size_y <= block.leader.size_y), total_valid)
                 }
                 None => (Some(false), block.bytes_written),
             }
@@ -706,7 +714,12 @@ impl GvspReassembler {
         let (rows_ok, valid_bytes) = valid;
         let leader_payload = frame_meta(&block.leader).payload_bytes();
         let (size_ok, delivered_height) = if block.leader.is_extended_chunk() {
-            (block.bytes_written >= valid_bytes, rows_ok.map(|_| block.leader.size_y))
+            (
+                block.bytes_written >= valid_bytes,
+                if let Some((size_y, _, _)) = decode_image_extended_trailer_body(trailer_body) {
+                    if size_y > 0 && size_y < block.leader.size_y { Some(size_y) } else { None }
+                } else { None },
+            )
         } else {
             match decode_image_trailer_body(trailer_body) {
                 Some(size_y) if size_y <= block.leader.size_y && size_y > 0 => {
@@ -718,17 +731,32 @@ impl GvspReassembler {
                             None,
                         )
                     } else {
-                        // Variable frame size: the trailer carries the
-                        // actual rows; the payload may be shorter than the
-                        // leader's configured maximum. Accept any
-                        // packet-consistent prefix.
-                        (
-                            block.bytes_written > 0
-                                && leader_payload
-                                    .map(|max| block.bytes_written <= max)
-                                    .unwrap_or(true),
-                            Some(size_y),
+                        // Variable frame size: trailer size_y is the actual
+                        // row count; the payload must match that row count
+                        // exactly (a 1-byte "frame" must not pass as two
+                        // complete rows).
+                        let actual = gentl_core::pixfmt::payload_size(
+                            block.leader.pixel_format,
+                            block.leader.size_x,
+                            size_y,
                         )
+                        .map(|bytes| {
+                            bytes
+                                + usize::try_from(block.leader.padding_x)
+                                    .unwrap_or(0)
+                                    * size_y as usize
+                                + usize::try_from(block.leader.padding_y).unwrap_or(0)
+                        });
+                        let size_ok = match actual {
+                            Some(expected) => block.bytes_written == expected,
+                            None => {
+                                block.bytes_written > 0
+                                    && leader_payload
+                                        .map(|max| block.bytes_written <= max)
+                                        .unwrap_or(true)
+                            }
+                        };
+                        (size_ok, Some(size_y))
                     }
                 }
                 _ => (false, None),
@@ -1520,7 +1548,8 @@ mod tests {
     fn variable_frame_height_is_delivered() {
         let (core, _) = started_sink();
         let mut r = GvspReassembler::new();
-        let payload: Vec<u8> = (0..PAYLOAD).map(|i| i as u8).collect();
+        // Two rows of 6 Mono8 bytes = 12 bytes.
+        let payload = vec![0x5Au8; 12];
         r.on_datagram(&core, &leader_dgram(1, 1));
         for (i, chunk) in payload.chunks(CHUNK).enumerate() {
             r.on_datagram(&core, &payload_dgram(1, (i + 1) as u32, chunk));
@@ -1528,5 +1557,18 @@ mod tests {
         r.on_datagram(&core, &trailer_dgram_height(1, 2));
         assert_eq!(r.stats().frames_delivered, 1);
         assert_eq!(r.stats().frames_dropped_incomplete, 0);
+    }
+
+    /// A variable-height trailer does not license a truncated payload: two
+    /// declared rows with one byte must be dropped, not delivered.
+    #[test]
+    fn variable_frame_truncated_payload_is_rejected() {
+        let (core, _) = started_sink();
+        let mut r = GvspReassembler::new();
+        r.on_datagram(&core, &leader_dgram(1, 1));
+        r.on_datagram(&core, &payload_dgram(1, 1, &[0xAA]));
+        r.on_datagram(&core, &trailer_dgram_height(1, 2));
+        assert_eq!(r.stats().frames_delivered, 0);
+        assert_eq!(r.stats().frames_dropped_incomplete, 1);
     }
 }
