@@ -179,4 +179,5 @@
 - 已修：TLClose/IFClose/DevClose/DSClose 级联关闭子树（parent-aware handle registry + close_handle_tree）；零流通道诚实上报（GigE/U3V）；FORCEIP 先过期心跳再判权限（gateway + simulator）；RESEND_RANGE_ERROR 按实际缺口裁剪并限幅；`gvcp-wirefacts.md` GVSP flag 数值同步为 0x0004/0x0002/0x0001。
 - 未变：relay 非零地址 FORCEIP 仍为 Q40/§26.1 记录的强制缺口。
 - 验证：313 tests / 0 failed / 0 warnings（parent_close 集成测试覆盖两代 Close 级联与零通道）。
+- 板端复验：重新部署后 U3V GenTL 取流 20/20 帧（2,621,440 B/帧），GigE 原始取流首包 56 字节（20+36 leader、payload_type=1、1280×1024、padding 0），`vgige`/`vgige-gige` 均 active。
 
