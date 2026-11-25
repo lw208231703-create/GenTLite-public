@@ -146,6 +146,22 @@ impl StreamParams {
         params
     }
 
+    /// Attach the SFNC image geometry captured from the user registers at
+    /// channel open (Width/Height/PixelFormat).
+    pub fn with_geometry(mut self, width: u32, height: u32, pixel_format: u32) -> Self {
+        if width > 0 && height > 0 {
+            self.width = width;
+            self.height = height;
+        }
+        if matches!(
+            pixel_format,
+            0x0108_0001 | 0x0110_0003 | 0x0110_0005 | 0x0110_0007
+        ) {
+            self.pixel_format = pixel_format;
+        }
+        self
+    }
+
     /// Attach the SFNC image-generator snapshot read at channel open.
     pub fn with_pattern(mut self, pattern: PatternConfig) -> Self {
         self.pattern = pattern;
@@ -175,7 +191,10 @@ impl StreamParams {
     }
 
     fn bytes_per_pixel(&self) -> usize {
-        if self.pixel_format == PFNC_MONO16 { 2 } else { 1 }
+        match self.pixel_format {
+            0x0110_0003 | 0x0110_0005 | 0x0110_0007 => 2,
+            _ => 1,
+        }
     }
 
     fn image_len(&self) -> usize {
@@ -1495,5 +1514,23 @@ mod tests {
 
         m.write_reg(reg::scp(1), 0).unwrap();
         assert_silent(&rx1, Duration::from_millis(200));
+    }
+
+    #[test]
+    fn geometry_override_follows_the_register_model() {
+        let stream = crate::StreamConfig {
+            width: 64,
+            height: 48,
+            pixel_format: 0x0108_0001, // Mono8
+            channels: 1,
+            legacy_headers: false,
+            chunk: None,
+        };
+        let p = StreamParams::new(&stream, 0, 0)
+            .with_geometry(32, 24, 0x0110_0003); // Mono10
+        assert_eq!((p.width, p.height), (32, 24));
+        assert_eq!(p.pixel_format, 0x0110_0003);
+        assert_eq!(p.bytes_per_pixel(), 2);
+        assert_eq!(p.image_len(), 32 * 24 * 2);
     }
 }

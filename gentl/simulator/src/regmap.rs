@@ -160,6 +160,7 @@ const BOOT_REGS: &[BootReg] = &[
     br(reg::MESSAGE_CHANNEL_CAPABILITY, 4, Ro),
     br(reg::GVCP_CAPABILITY, 4, Ro),
     br(reg::HEARTBEAT_TIMEOUT, 4, Rw),
+    br(reg::PENDING_TIMEOUT, 4, Rw),
     br(reg::TIMESTAMP_TICK_FREQ_HIGH, 4, Ro),
     br(reg::TIMESTAMP_TICK_FREQ_LOW, 4, Ro),
     br(reg::TIMESTAMP_VALUE_HIGH, 4, Ro),
@@ -541,6 +542,7 @@ impl SimRegMap {
             reg::SCONF_DEPRECATED_BIT | mode_default,
         );
         Self::w32(boot, reg::GVCP_CAPABILITY, GVCP_CAPABILITY_VALUE);
+        Self::w32(boot, reg::PENDING_TIMEOUT, 1000);
         Self::w32(boot, reg::TIMESTAMP_TICK_FREQ_HIGH, (TIMESTAMP_TICK_FREQ >> 32) as u32);
         Self::w32(boot, reg::TIMESTAMP_TICK_FREQ_LOW, TIMESTAMP_TICK_FREQ as u32);
 
@@ -945,6 +947,12 @@ impl DeviceHandler for SimRegMap {
         self.write_mem_inner(addr, data)
     }
 
+    fn tick(&self) {
+        // R-076cd: close an idle control channel even if no further command
+        // ever arrives.
+        let _ = self.expire_stale_grant();
+    }
+
     fn force_ip(
         &self,
         _peer: SocketAddr,
@@ -1192,6 +1200,11 @@ impl SimRegMap {
                 (
                     SocketAddr::from((Ipv4Addr::from(words[W_SCDA]), port)),
                     StreamParams::new(&self.stream, words[W_SCPS], words[W_SCPD])
+                        .with_geometry(
+                            user_word(REG_WIDTH),
+                            user_word(REG_HEIGHT),
+                            user_word(REG_PIXEL_FORMAT),
+                        )
                         .with_pattern(pattern),
                 )
             };
@@ -2047,5 +2060,13 @@ mod tests {
         );
         assert_eq!(m.read_reg(reg::MESSAGE_CHANNEL_PORT).unwrap(), 0);
         assert_eq!(m.read_reg(reg::SCP0).unwrap(), 0);
+    }
+
+    #[test]
+    fn pending_timeout_register_is_writable() {
+        let m = test_map();
+        assert_eq!(m.read_reg(reg::PENDING_TIMEOUT).unwrap(), 1000);
+        m.write_reg(reg::PENDING_TIMEOUT, 500).unwrap();
+        assert_eq!(m.read_reg(reg::PENDING_TIMEOUT).unwrap(), 500);
     }
 }

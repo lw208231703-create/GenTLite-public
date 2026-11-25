@@ -815,6 +815,12 @@ impl CameraBack for NullBack {
     fn write_reg(&mut self, addr: u32, value: u32) -> Result<(), u16> {
         let mut regs = self.regs.lock().expect("null regs lock");
         match addr {
+            // SFNC 2.7/GigE 3.0 R-423cd: writes to read-only features must
+            // answer WRITE_PROTECT instead of silently succeeding.
+            REG_WIDTH_MAX | REG_HEIGHT_MAX | REG_SENSOR_WIDTH | REG_SENSOR_HEIGHT
+            | REG_PAYLOAD | REG_DEVICE_UPTIME | REG_DEVICE_TEMPERATURE => {
+                return Err(0x8004);
+            }
             REG_ACQUISITION_START => {
                 regs.insert(addr, u32::from(value != 0));
             }
@@ -1749,5 +1755,16 @@ mod tests {
         ] {
             assert!(xml.contains(needle), "missing {needle}");
         }
+    }
+
+    #[test]
+    fn read_only_features_reject_writes() {
+        let mut b = NullBack::new();
+        assert_eq!(
+            b.write_reg(REG_WIDTH_MAX, 42),
+            Err(0x8004),
+            "WidthMax is read-only"
+        );
+        assert_eq!(b.read_reg(REG_WIDTH_MAX).unwrap(), SENSOR_MAX);
     }
 }
