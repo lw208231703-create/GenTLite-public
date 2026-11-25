@@ -25,6 +25,10 @@ use gentl_gvcp::GvcpClient;
 
 /// Receive buffer size; covers the largest possible UDP datagram.
 const RECV_BUF_LEN: usize = 65536;
+/// Upper bound on packet ids touched by one RESEND_RANGE_ERROR datagram.
+/// The wire fields are u32, but a range error only needs to drain the
+/// block's actual missing intervals; anything larger is malformed.
+const MAX_RESEND_RANGE_FILL: u64 = 1 << 20;
 /// Socket read timeout: the poll cadence for stop/kill flags.
 const SOCKET_TIMEOUT: Duration = Duration::from_millis(100);
 /// §16.7.3 resend-window poll cadence: while a block has missing packets
@@ -481,18 +485,49 @@ impl GvspReassembler {
         // range is unrecoverable; the body carries last_packet_id32 and no
         // data.
         if hdr.flag & GEV_FLAG_RESEND_RANGE_ERROR != 0 {
-            let last = u32::from_be_bytes(body[0..4].try_into().unwrap_or([0, 0, 0, 0]));
+            if body.len() < 4 {
+                self.stats.malformed += 1;
+                return;
+            }
+            let last = u32::from_be_bytes([body[0], body[1], body[2], body[3]])
+                .max(hdr.packet_id);
             self.stats.resend_unavailable += 1;
+            // Only the block's actual missing intervals matter: an error
+            // datagram naming a huge range (u32 fields!) must not make the
+            // receive thread iterate billions of ids synchronously.
+            let mut drop_block = false;
             let completed = match &mut self.block {
                 Some(block) => {
-                    let mut done = false;
-                    for id in hdr.packet_id..=last.max(hdr.packet_id) {
-                        done = fill_packet(block, id);
+                    let mut plan: Vec<(u32, u32)> = Vec::new();
+                    let mut total = 0u64;
+                    for (&start, gap) in block.gaps.range(..=last) {
+                        let a = start.max(hdr.packet_id);
+                        let b = gap.end.min(last);
+                        if a <= b {
+                            total += u64::from(b - a) + 1;
+                            plan.push((a, b));
+                        }
                     }
-                    done
+                    if total > MAX_RESEND_RANGE_FILL {
+                        block.overflow = true;
+                        drop_block = true;
+                        false
+                    } else {
+                        let mut done = false;
+                        for (a, b) in plan {
+                            for id in a..=b {
+                                done = fill_packet(block, id);
+                            }
+                        }
+                        done
+                    }
                 }
                 None => false,
             };
+            if drop_block {
+                self.abandon_block(sink, true);
+                return;
+            }
             if completed {
                 self.complete(sink);
             }
@@ -1411,5 +1446,30 @@ mod tests {
         assert_eq!(s.malformed, 1);
         assert_eq!(s.frames_dropped_incomplete, 1);
         assert_eq!(core.queued_count(), 1, "buffer back in the input pool");
+    }
+
+    /// A RESEND_RANGE_ERROR datagram can name u32::MAX..u32::MAX; the
+    /// receive thread must only touch the block's real gaps (here: none).
+    #[test]
+    fn resend_range_error_does_not_iterate_the_named_range() {
+        let (core, _) = started_sink();
+        let mut r = GvspReassembler::with_resend(ResendConfig {
+            enabled: true,
+            frame_retention: FRAME_RETENTION,
+        });
+        r.on_datagram(&core, &leader_dgram(1, 1));
+        r.on_datagram(&core, &payload_dgram(1, 1, &[0u8; CHUNK]));
+        let mut body = Vec::new();
+        body.extend_from_slice(&u32::MAX.to_be_bytes());
+        let mut range = payload_dgram(1, 1, &body);
+        range[2..4].copy_from_slice(&GEV_FLAG_RESEND_RANGE_ERROR.to_be_bytes());
+        let started = Instant::now();
+        r.on_datagram(&core, &range);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "range fill must be bounded by actual gaps"
+        );
+        assert_eq!(r.stats().resend_unavailable, 1);
+        assert_eq!(r.stats().frames_delivered, 0);
     }
 }
