@@ -27,4 +27,10 @@ pub trait Module: Send + Sync + 'static {
 
     /// Arc-preserving downcast, needed to recover `Arc<T>` from a handle.
     fn as_any_arc(self: std::sync::Arc<Self>) -> std::sync::Arc<dyn Any + Send + Sync>;
+
+    /// Release transport resources held by this module when GCCloseLib
+    /// invalidates the handle table (GenTL 1.6 §6.3.1.1). Must be
+    /// idempotent and must not require a valid handle. The default is a
+    /// no-op for stateless modules.
+    fn shutdown(&self) {}
 }
