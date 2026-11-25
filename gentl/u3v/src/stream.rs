@@ -6,7 +6,7 @@
 //! announced buffer; the core finalizes at the trailer.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 
@@ -22,6 +22,22 @@ use crate::packets::{
     IMAGE_LEADER_LEN, IMAGE_TRAILER_LEN,
 };
 use crate::usbio::{self, poll_read, ReadAbort, UsbPipe};
+
+/// Live U3V bulk-IN receiver threads (test/diagnostic hook).
+static ACTIVE_RX_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+struct ActiveRxGuard;
+
+impl Drop for ActiveRxGuard {
+    fn drop(&mut self) {
+        ACTIVE_RX_THREADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Number of live U3V receiver threads.
+pub fn active_receiver_threads() -> usize {
+    ACTIVE_RX_THREADS.load(Ordering::SeqCst)
+}
 
 /// GenTL stream ID for stream channel `i` (format not mandated by the
 /// spec; mirrors the GigE producer's "Stream0" style).
@@ -374,12 +390,16 @@ impl U3vDataStream {
         // stream for fatal-exit engine cleanup (audit C16).
         let device = device.clone();
         let me = self.clone();
+        ACTIVE_RX_THREADS.fetch_add(1, Ordering::SeqCst);
         let handle = match std::thread::Builder::new()
             .name(name)
-            .spawn(move || receiver_loop(pipe, sink, stop, kill, stats, geometry, me, device))
-        {
+            .spawn(move || {
+                let _active = ActiveRxGuard;
+                receiver_loop(pipe, sink, stop, kill, stats, geometry, me, device)
+            }) {
             Ok(handle) => handle,
             Err(e) => {
+                ACTIVE_RX_THREADS.fetch_sub(1, Ordering::SeqCst);
                 *self.geometry.lock().expect("geometry lock") = None;
                 self.pipe.cancel_pending_read();
                 if let Some(device) = self.parent.upgrade() {

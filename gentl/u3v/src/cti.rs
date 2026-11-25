@@ -113,6 +113,9 @@ pub struct DevicePort {
 
 macro_rules! impl_module {
     ($ty:ty, $kind:expr) => {
+        impl_module!($ty, $kind, |_| {});
+    };
+    ($ty:ty, $kind:expr, $shutdown:expr) => {
         impl Module for $ty {
             fn module_type(&self) -> ModuleType {
                 $kind
@@ -123,14 +126,27 @@ macro_rules! impl_module {
             fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
                 self
             }
+            fn shutdown(&self) {
+                let f: fn(&$ty) = $shutdown;
+                f(self);
+            }
         }
     };
 }
 
 impl_module!(TlSystem, ModuleType::System);
 impl_module!(U3vInterface, ModuleType::Interface);
-impl_module!(U3vDevice, ModuleType::Device);
+impl_module!(U3vDevice, ModuleType::Device, |d: &U3vDevice| {
+    d.close();
+    if let Ok(mut opened) = d.opened_streams.lock() {
+        opened.clear();
+    }
+});
 impl_module!(DevicePort, ModuleType::Port);
-impl_module!(U3vDataStream, ModuleType::DataStream);
+impl_module!(U3vDataStream, ModuleType::DataStream, |s: &U3vDataStream| {
+    s.close();
+});
 impl_module!(U3vBuffer, ModuleType::Buffer);
-impl_module!(EventModule, ModuleType::Event);
+impl_module!(EventModule, ModuleType::Event, |e: &EventModule| {
+    e.queue.mark_dead();
+});

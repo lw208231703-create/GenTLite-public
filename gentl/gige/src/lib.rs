@@ -36,6 +36,11 @@ mod payload;
 mod stream;
 mod sys;
 
+/// Live GVSP receiver threads (GCCloseLib cleanup diagnostics).
+pub fn active_receiver_threads() -> usize {
+    stream::active_receiver_threads()
+}
+
 use cti::{DeviceAccess, DeviceEntry, DevicePort, GevDevice, GevInterface, TlSystem};
 use events::DeviceEventModule;
 use stream::{EventModule, GevBuffer, GevDataStream, STREAM_ID};

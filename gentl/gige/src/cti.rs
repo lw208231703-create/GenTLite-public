@@ -153,6 +153,9 @@ pub struct DevicePort {
 
 macro_rules! impl_module {
     ($ty:ty, $kind:expr) => {
+        impl_module!($ty, $kind, |_| {});
+    };
+    ($ty:ty, $kind:expr, $shutdown:expr) => {
         impl Module for $ty {
             fn module_type(&self) -> ModuleType {
                 $kind
@@ -160,10 +163,14 @@ macro_rules! impl_module {
             fn as_any(&self) -> &dyn std::any::Any {
                 self
             }
-            fn as_any_arc(
-                self: Arc<Self>,
-            ) -> Arc<dyn std::any::Any + Send + Sync> {
+            fn as_any_arc(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
                 self
+            }
+            fn shutdown(&self) {
+                // GCCloseLib path: release transport resources without a
+                // consumer Close call (GenTL 6.3.1.1).
+                let f: fn(&$ty) = $shutdown;
+                f(self);
             }
         }
     };
@@ -171,11 +178,20 @@ macro_rules! impl_module {
 
 impl_module!(TlSystem, ModuleType::System);
 impl_module!(GevInterface, ModuleType::Interface);
-impl_module!(GevDevice, ModuleType::Device);
+impl_module!(GevDevice, ModuleType::Device, |d: &GevDevice| {
+    d.close();
+    if let Ok(mut opened) = d.opened_streams.lock() {
+        opened.clear();
+    }
+});
 impl_module!(DevicePort, ModuleType::Port);
-impl_module!(GevDataStream, ModuleType::DataStream);
+impl_module!(GevDataStream, ModuleType::DataStream, |s: &GevDataStream| {
+    s.close();
+});
 impl_module!(GevBuffer, ModuleType::Buffer);
-impl_module!(EventModule, ModuleType::Event);
+impl_module!(EventModule, ModuleType::Event, |e: &EventModule| {
+    e.queue.mark_dead();
+});
 
 #[cfg(test)]
 mod tests {

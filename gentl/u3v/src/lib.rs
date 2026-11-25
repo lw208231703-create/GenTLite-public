@@ -41,6 +41,11 @@ mod device_events;
 pub mod descriptors;
 pub mod packets;
 mod stream;
+
+/// Live U3V receiver threads (GCCloseLib cleanup diagnostics).
+pub fn active_receiver_threads() -> usize {
+    stream::active_receiver_threads()
+}
 mod types;
 mod usbio;
 

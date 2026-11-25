@@ -54,7 +54,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::net::{Ipv4Addr, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -67,6 +67,22 @@ use gentl_gvcp::gvsp;
 use gentl_gvcp::registers;
 use gentl_gvcp::wire::GEV_STATUS_INVALID_ADDRESS;
 use gentl_gvcp::GvcpClient;
+
+/// Live GVSP receiver threads (test/diagnostic hook for GCCloseLib cleanup).
+static ACTIVE_RX_THREADS: AtomicUsize = AtomicUsize::new(0);
+
+struct ActiveRxGuard;
+
+impl Drop for ActiveRxGuard {
+    fn drop(&mut self) {
+        ACTIVE_RX_THREADS.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Number of live GVSP receiver threads.
+pub fn active_receiver_threads() -> usize {
+    ACTIVE_RX_THREADS.load(Ordering::SeqCst)
+}
 
 use crate::cti::{DeviceAccess, GevDevice};
 use crate::discovery::desired_stream_channels;
@@ -778,15 +794,24 @@ impl GevDataStream {
                         });
                         let name = format!("gvsp-recv-{}-ch{x}", device.id);
                         let me = self.clone();
-                        let handle = std::thread::Builder::new()
+                        ACTIVE_RX_THREADS.fetch_add(1, Ordering::SeqCst);
+                        let handle = match std::thread::Builder::new()
                             .name(name)
                             .spawn(move || {
+                                let _active = ActiveRxGuard;
                                 if let Some(mask) = rx_affinity {
                                     set_rx_affinity(mask);
                                 }
                                 receiver_loop(sock, sink, stop, kill, stats, me, resend)
-                            })
-                            .map_err(|e| GentlError::Io(format!("spawn receiver: {e}")))?;
+                            }) {
+                            Ok(handle) => handle,
+                            Err(e) => {
+                                ACTIVE_RX_THREADS.fetch_sub(1, Ordering::SeqCst);
+                                return Err(GentlError::Io(format!(
+                                    "spawn receiver: {e}"
+                                )));
+                            }
+                        };
                         *channels[idx].receiver.lock().unwrap() = Some(handle);
                         opened += 1;
                     }
