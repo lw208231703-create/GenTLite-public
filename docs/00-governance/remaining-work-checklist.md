@@ -194,5 +194,5 @@
 - Pending Timeout：改为只读（write → WRITE_PROTECT）；新增设备侧 PENDING_ACK 生成路径（gateway 在下游流打开前发送）。
 - U3V：任何非 MPS 短包（即使恰好补足 planned size）都标记 terminated，后续 transfer 丢弃。
 - U3V front：ACQ+0x08 PayloadSize 写入返回 WRITE_PROTECT，不再静默写本地缓存。
-- 验证：324 tests / 0 failed / 0 warnings；板端待复验（FORCEIP/PendingAck 需重新部署）。
+- 验证：325 tests / 0 failed / 0 warnings。板端重新部署后：U3V 20/20 帧、GigE 56-byte leader；PendingTimeout 读 1000、写 0x8004；SCP0 打开时首包为 PENDING_ACK(0x0089, len4) 后接 WRITEREG_ACK(0x0083)；FORCEIP 不可达地址保持静默。
 

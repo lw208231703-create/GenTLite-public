@@ -1405,3 +1405,54 @@ fn heartbeat_watchdog_closes_stream_without_another_command() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// R-210cd/R-472cd: opening the downstream stream is announced with a
+/// PENDING_ACK before the (potentially blocking) WRITEREG completes.
+#[test]
+fn pending_ack_precedes_downstream_stream_open() {
+    let s = start(false);
+    let up_port = s._up_server.local_port().unwrap();
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&reg::SCP0.to_be_bytes());
+    payload.extend_from_slice(&reg::scp_make(rx.local_addr().unwrap().port()).to_be_bytes());
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: WRITEREG_CMD,
+        length: payload.len() as u16,
+        req_id: 15,
+    }
+    .encode(&mut header);
+    let mut datagram = header.to_vec();
+    datagram.extend_from_slice(&payload);
+    socket
+        .send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port))
+        .unwrap();
+
+    let mut reply = [0u8; 256];
+    let (n, _) = socket.recv_from(&mut reply).unwrap();
+    assert!(n >= HEADER_LEN);
+    assert_eq!(
+        u16::from_be_bytes([reply[2], reply[3]]),
+        PENDING_ACK,
+        "PENDING_ACK must arrive before the stream-open acknowledge"
+    );
+    assert_eq!(u16::from_be_bytes([reply[4], reply[5]]), 4);
+    assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 15);
+    let (n, _) = socket.recv_from(&mut reply).unwrap();
+    assert!(n >= HEADER_LEN);
+    assert_eq!(
+        u16::from_be_bytes([reply[2], reply[3]]),
+        WRITEREG_ACK,
+        "final WRITEREG_ACK follows"
+    );
+    assert_eq!(u16::from_be_bytes([reply[0], reply[1]]), GEV_STATUS_SUCCESS);
+    assert_eq!(u16::from_be_bytes([reply[6], reply[7]]), 15);
+    // Close the relay stream again through the normal control channel.
+    s.remote.write_reg(reg::SCP0, 0).unwrap();
+}

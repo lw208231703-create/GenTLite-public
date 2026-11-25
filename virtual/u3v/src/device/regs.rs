@@ -1253,7 +1253,6 @@ mod tests {
 
     #[test]
     fn acquisition_mode_and_trigger_mode_are_forwarded() {
-        use vgige_core::BackIdentity;
         let cfg = null_cfg();
         let back: vgige_core::SharedBack = std::sync::Arc::new(
             std::sync::Mutex::new(vgige_back_null::NullBack::new()),
