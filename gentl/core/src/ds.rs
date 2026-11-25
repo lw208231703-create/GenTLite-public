@@ -84,9 +84,14 @@ pub enum BufferState {
 }
 
 impl BufferState {
-    /// `BUFFER_INFO_IS_QUEUED`: input pool or output queue.
+    /// `BUFFER_INFO_IS_QUEUED`: input pool, currently filling, or output
+    /// queue (§6.4.4.4: the producer owns the buffer and it cannot be
+    /// revoked).
     pub fn is_queued_info(self) -> bool {
-        matches!(self, BufferState::Queued | BufferState::Filled)
+        matches!(
+            self,
+            BufferState::Queued | BufferState::Filling | BufferState::Filled
+        )
     }
 }
 

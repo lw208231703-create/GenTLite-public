@@ -147,6 +147,7 @@ const BUFFER_INFO_DATA_SIZE: BufferInfoCmd = 27;
 const BUFFER_INFO_TIMESTAMP_NS: BufferInfoCmd = 28;
 const BUFFER_INFO_DATA_LARGER_THAN_BUFFER: BufferInfoCmd = 29;
 const BUFFER_INFO_CONTAINS_CHUNKDATA: BufferInfoCmd = 30;
+const BUFFER_INFO_IS_COMPOSITE: BufferInfoCmd = 31;
 
 // EVENT_DATA_INFO_CMD_LIST (GenTL.h): per-event data handed to the consumer
 // in the wire record layout (§17.1.1).
@@ -1853,7 +1854,12 @@ pub extern "C" fn DSGetBufferInfo(
                 let v: u8 = u8::from(snap.meta.and_then(|m| m.chunk).is_some());
                 info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
             }
-            _ => not_implemented("DSGetBufferInfo cmd"),
+                        BUFFER_INFO_IS_COMPOSITE => {
+                // Classic contiguous buffers: never a composite buffer.
+                let v: u8 = 0;
+                info_value(pi_type, INFO_DATATYPE_BOOL8, p_buffer, pi_size, &v)
+            }
+_ => not_implemented("DSGetBufferInfo cmd"),
         }
     }
     })
