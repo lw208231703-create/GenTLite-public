@@ -1111,14 +1111,15 @@ NIC. Honouring a forced non-zero address would mean rebinding the host
 interface (root-only, breaks other host networking, and the gateway would
 become unreachable on the old address while nothing else reconfigures it).
 
-**Decision (v1):** the command is parsed and ordered per the spec
-(`DeviceHandler::force_ip`, simulator implements the full device behaviour),
-but the relay's virtual device **silently discards** a request for its own MAC
-— with a warning on stderr — instead of reconfiguring the host NIC.
-`static_IP = 0` still performs the required stream close (R-151cd). Hosts that
-want to recover a gateway with a lost address must reconfigure the NIC by
-other means. R-147cd is therefore deliberately not honoured on the relay
-front (protocol handling is present; the re-addressing side effect is out of
+**Decision (v2, 2026-11-25):** the virtual device now **applies and ACKs**
+a non-zero FORCEIP: `CURRENT_IP`/`CURRENT_SUBNET_MASK`, DISCOVERY and the
+register-space identity follow the forced address (R-152cd), and the ACK is
+sent (broadcast when the request sets bit 3). `static_IP = 0` still performs
+the required stream close (R-151cd). The host NIC itself is not rebound by
+this process: the OS-level address change is still an administrative action
+outside the gateway's transport seam, so the socket remains reachable on the
+old address until the NIC is reconfigured. R-147cd is now honoured at the
+protocol/register level; full link-level re-addressing remains a platform
 scope for a proxy device).
 
 **Verification:** `gentl/simulator/tests/e2e.rs`

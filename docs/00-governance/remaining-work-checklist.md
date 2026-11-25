@@ -181,3 +181,8 @@
 - 验证：313 tests / 0 failed / 0 warnings（parent_close 集成测试覆盖两代 Close 级联与零通道）。
 - 板端复验：重新部署后 U3V GenTL 取流 20/20 帧（2,621,440 B/帧），GigE 原始取流首包 56 字节（20+36 leader、payload_type=1、1280×1024、padding 0），`vgige`/`vgige-gige` 均 active。
 
+## X. 2026-11-25 终审 12 项 + FORCEIP 修复
+
+- 已修：U3V 短包/ZLP 终止（read_piece_exact 返回 terminated，后续 transfer 丢弃）；GigE 可变帧高（trailer size_y <= leader 可交付，FrameMeta.delivered_height，BUFFER_INFO_DELIVERED_IMAGEHEIGHT 独立于 HEIGHT）；U3V front 本地 ACQ 窗口只保留 Start/Stop/PayloadSize，AcquisitionMode/TriggerMode 转发后端；simulator 开流时从用户寄存器取 Width/Height/PixelFormat；GCUnregisterEvent 后 Event* 返回 INVALID_HANDLE；独立心跳 watchdog（GvcpServer tick，simulator/gateway）；Pending Timeout 0x0958 寄存器（simulator/gateway）；U3V READMEM ack 按 Maximum Acknowledge Transfer Length 截断；网关测试包使用 SCPSx 取整值与 DF；U3V EIRM+0x04 只读、null WidthMax 等 RO 写入 WRITE_PROTECT；GenTL EVENT_NUM_IN_QUEUE / NUM_CHUNKS_MAX 语义；U3V Event IN 按 EIRM Maximum Event Transfer Length 取缓冲、控制 IN ack MPS 整数倍补 ZLP；FORCEIP 非零地址在虚拟设备上生效并 ACK（Q40 更新为协议层生效、宿主 NIC 重绑定仍属平台操作）。
+- 验证：见最终测试/板端记录。
+
