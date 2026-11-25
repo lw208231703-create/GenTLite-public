@@ -186,3 +186,13 @@
 - 已修：U3V 短包/ZLP 终止（read_piece_exact 返回 terminated，后续 transfer 丢弃）；GigE 可变帧高（trailer size_y <= leader 可交付，FrameMeta.delivered_height，BUFFER_INFO_DELIVERED_IMAGEHEIGHT 独立于 HEIGHT）；U3V front 本地 ACQ 窗口只保留 Start/Stop/PayloadSize，AcquisitionMode/TriggerMode 转发后端；simulator 开流时从用户寄存器取 Width/Height/PixelFormat；GCUnregisterEvent 后 Event* 返回 INVALID_HANDLE；独立心跳 watchdog（GvcpServer tick，simulator/gateway）；Pending Timeout 0x0958 寄存器（simulator/gateway）；U3V READMEM ack 按 Maximum Acknowledge Transfer Length 截断；网关测试包使用 SCPSx 取整值与 DF；U3V EIRM+0x04 只读、null WidthMax 等 RO 写入 WRITE_PROTECT；GenTL EVENT_NUM_IN_QUEUE / NUM_CHUNKS_MAX 语义；U3V Event IN 按 EIRM Maximum Event Transfer Length 取缓冲、控制 IN ack MPS 整数倍补 ZLP；FORCEIP 非零地址在虚拟设备上生效并 ACK（Q40 更新为协议层生效、宿主 NIC 重绑定仍属平台操作）。
 - 验证：322 tests / 0 failed / 0 warnings。板端重新部署后：U3V GenTL 取流 20/20 帧（2,621,440 B/帧）；GigE 首包 56 字节（20+36 leader）；Pending Timeout(0x0958)=1000；心跳 500 ms 空闲 800 ms 后无命令，流在积压数据排空后停止（0.8 s 静默），随后 SCP0/CCP 均为 0。
 
+## Y. 2026-11-25 后续 6 项 review 修复
+
+- FORCEIP：只对“本机已生效地址”ACK；不可达地址保持静默，避免假 ACK（Q40 v3）。
+- 可变帧：trailer 行数对应的载荷字节数严格校验（1 字节不能冒充 2 行）；扩展 chunk 路径也接受 size_y < leader 并单独上报 delivered_height。
+- EVENT_NEW_BUFFER：EventGetData/GetInfo/Flush/Kill 在注销后返回 INVALID_HANDLE（pending waiter 仍 ABORT）。
+- Pending Timeout：改为只读（write → WRITE_PROTECT）；新增设备侧 PENDING_ACK 生成路径（gateway 在下游流打开前发送）。
+- U3V：任何非 MPS 短包（即使恰好补足 planned size）都标记 terminated，后续 transfer 丢弃。
+- U3V front：ACQ+0x08 PayloadSize 写入返回 WRITE_PROTECT，不再静默写本地缓存。
+- 验证：324 tests / 0 failed / 0 warnings；板端待复验（FORCEIP/PendingAck 需重新部署）。
+

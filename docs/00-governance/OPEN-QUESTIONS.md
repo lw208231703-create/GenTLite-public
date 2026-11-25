@@ -1111,15 +1111,17 @@ NIC. Honouring a forced non-zero address would mean rebinding the host
 interface (root-only, breaks other host networking, and the gateway would
 become unreachable on the old address while nothing else reconfigures it).
 
-**Decision (v2, 2026-11-25):** the virtual device now **applies and ACKs**
-a non-zero FORCEIP: `CURRENT_IP`/`CURRENT_SUBNET_MASK`, DISCOVERY and the
-register-space identity follow the forced address (R-152cd), and the ACK is
-sent (broadcast when the request sets bit 3). `static_IP = 0` still performs
-the required stream close (R-151cd). The host NIC itself is not rebound by
-this process: the OS-level address change is still an administrative action
-outside the gateway's transport seam, so the socket remains reachable on the
-old address until the NIC is reconfigured. R-147cd is now honoured at the
-protocol/register level; full link-level re-addressing remains a platform
+**Decision (v3, 2026-11-25):** a non-zero FORCEIP is ACKed **only when the
+requested address is already effective on this host** (it can be bound
+locally): in that case `CURRENT_IP`/`CURRENT_SUBNET_MASK`, DISCOVERY and the
+register-space identity follow it (R-152cd), and the ACK is sent (broadcast
+when bit 3 is set). If the address is not assigned, the device stays silent
+instead of acknowledging an unreachable address — a false ACK would be worse
+than the documented limitation. `static_IP = 0` still performs the required
+stream close (R-151cd). Rebinding the host NIC remains an administrative
+action outside the gateway's transport seam; R-147cd is therefore only
+honoured for already-effective addresses, not for link-level
+re-addressing, and `relay front` must not be claimed fully compliant with
 scope for a proxy device).
 
 **Verification:** `gentl/simulator/tests/e2e.rs`
