@@ -70,6 +70,19 @@ pub trait DeviceHandler: Send + 'static {
         self.write_mem(addr, data)
     }
 
+    /// Peer-aware WRITEMEM with byte-progress information. Devices that
+    /// commit words before a later word fails return the 0-based byte index
+    /// of the failure (R-194cd); the default treats the write as atomic.
+    fn write_mem_from_progress(
+        &self,
+        peer: SocketAddr,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), (u16, u32)> {
+        self.write_mem_from(peer, addr, data)
+            .map_err(|status| (status, 0))
+    }
+
     /// PACKETRESEND_CMD (§16.7): retransmit the given packet-id range of
     /// the cached block. Fire-and-forget — no ack exists (CR-201cd), so
     /// the default ignores the request (devices without resend support
@@ -216,9 +229,16 @@ fn serve_loop<H: DeviceHandler>(
                         written += 1;
                     }
                 }
-                AckHeader::new(status, WRITEREG_ACK, 4, cmd.req_id).encode(&mut ack);
-                out.extend_from_slice(&ack);
-                out.extend_from_slice(&written.to_be_bytes());
+                // R-138cd: an ACCESS_DENIED acknowledge carries the header
+                // only (length = 0), no SCD.
+                if status == GEV_STATUS_ACCESS_DENIED {
+                    AckHeader::new(status, WRITEREG_ACK, 0, cmd.req_id).encode(&mut ack);
+                    out.extend_from_slice(&ack);
+                } else {
+                    AckHeader::new(status, WRITEREG_ACK, 4, cmd.req_id).encode(&mut ack);
+                    out.extend_from_slice(&ack);
+                    out.extend_from_slice(&written.to_be_bytes());
+                }
             }
             READMEM_CMD => {
                 let mut status = GEV_STATUS_SUCCESS;
@@ -257,6 +277,7 @@ fn serve_loop<H: DeviceHandler>(
                     0
                 };
                 let mut written = 0u32;
+                let mut error_index = 0u32;
                 if payload_in.len() < 8 {
                     status = GEV_STATUS_INVALID_PARAMETER;
                 } else if (payload_in.len() - 4) % 4 != 0 {
@@ -267,21 +288,34 @@ fn serve_loop<H: DeviceHandler>(
                     // R-189c: an unaligned start address MUST answer
                     // BAD_ALIGNMENT.
                     status = GEV_STATUS_BAD_ALIGNMENT;
-                } else if let Err(s) = handler.write_mem_from(peer, addr, &payload_in[4..]) {
-                    status = s;
                 } else {
-                    written = payload_in.len() as u32 - 4;
+                    match handler.write_mem_from_progress(peer, addr, &payload_in[4..]) {
+                        Ok(()) => written = payload_in.len() as u32 - 4,
+                        Err((s, index)) => {
+                            status = s;
+                            error_index = index.min(payload_in.len() as u32 - 4 - 1);
+                        }
+                    }
                 }
-                // R-193c/R-194cd: the WRITEMEM_ACK SCD is reserved u16 +
-                // index u16. On success index = bytes written; on failure it
-                // is the 0-based byte index where the error occurred (our
-                // device handlers fail atomically, i.e. index 0).
-                let index = if status == GEV_STATUS_SUCCESS { written as u16 } else { 0 };
-                let mut scd = [0u8; 4];
-                scd[2..4].copy_from_slice(&index.to_be_bytes());
-                AckHeader::new(status, WRITEMEM_ACK, 4, cmd.req_id).encode(&mut ack);
-                out.extend_from_slice(&ack);
-                out.extend_from_slice(&scd);
+                // R-138cd: ACCESS_DENIED is answered with the header only.
+                if status == GEV_STATUS_ACCESS_DENIED {
+                    AckHeader::new(status, WRITEMEM_ACK, 0, cmd.req_id).encode(&mut ack);
+                    out.extend_from_slice(&ack);
+                } else {
+                    // R-193c/R-194cd: reserved u16 + index u16. On success
+                    // index = bytes written; on failure it is the 0-based
+                    // byte index where the error occurred.
+                    let index = if status == GEV_STATUS_SUCCESS {
+                        written as u16
+                    } else {
+                        error_index as u16
+                    };
+                    let mut scd = [0u8; 4];
+                    scd[2..4].copy_from_slice(&index.to_be_bytes());
+                    AckHeader::new(status, WRITEMEM_ACK, 4, cmd.req_id).encode(&mut ack);
+                    out.extend_from_slice(&ack);
+                    out.extend_from_slice(&scd);
+                }
             }
             // PACKETRESEND (§16.7): fire-and-forget — CR-198ca forbids the
             // ACKNOWLEDGE flag and CR-201cd defines no PACKETRESEND_ACK,
@@ -393,6 +427,47 @@ mod tests {
             }
             Ok(())
         }
+
+        fn read_reg_from(&self, _peer: SocketAddr, addr: u32) -> Result<u32, u16> {
+            if addr == 0x0099 {
+                return Err(GEV_STATUS_ACCESS_DENIED);
+            }
+            self.read_reg(addr)
+        }
+
+        fn write_reg_from(&self, _peer: SocketAddr, addr: u32, value: u32) -> Result<(), u16> {
+            if addr == 0x0099 {
+                return Err(GEV_STATUS_ACCESS_DENIED);
+            }
+            self.write_reg(addr, value)
+        }
+
+        fn write_mem_from(
+            &self,
+            _peer: SocketAddr,
+            addr: u32,
+            data: &[u8],
+        ) -> Result<(), u16> {
+            if addr == 0x0098 {
+                return Err(GEV_STATUS_ACCESS_DENIED);
+            }
+            self.write_mem(addr, data)
+        }
+
+        fn write_mem_from_progress(
+            &self,
+            _peer: SocketAddr,
+            addr: u32,
+            data: &[u8],
+        ) -> Result<(), (u16, u32)> {
+            if addr == 0x0094 {
+                // Simulates a device that committed the first word and then
+                // failed on the second (R-194cd byte index).
+                return Err((GEV_STATUS_INVALID_ADDRESS, 4));
+            }
+            self.write_mem_from(_peer, addr, data)
+                .map_err(|status| (status, 0))
+        }
     }
 
     fn exchange(server: &GvcpServer, command: u16, payload: &[u8]) -> Vec<u8> {
@@ -486,5 +561,38 @@ mod tests {
             &0x1122_3344u32.to_be_bytes(),
             "the first register is still reported"
         );
+    }
+
+    /// R-138cd: an ACCESS_DENIED acknowledge is header-only for WRITEREG and
+    /// WRITEMEM (length = 0, no SCD).
+    #[test]
+    fn access_denied_acks_are_header_only() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x99u32.to_be_bytes());
+        let reply = exchange(&server, WRITEREG_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_ACCESS_DENIED);
+        assert_eq!(reply.len(), HEADER_LEN, "WRITEREG_ACK header only");
+
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&0x98u32.to_be_bytes());
+        payload[4..].copy_from_slice(&0xDEAD_BEEFu32.to_be_bytes());
+        let reply = exchange(&server, WRITEMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_ACCESS_DENIED);
+        assert_eq!(reply.len(), HEADER_LEN, "WRITEMEM_ACK header only");
+    }
+
+    /// R-194cd: a WRITEMEM that fails after committing bytes reports the
+    /// failing byte index, not a constant 0.
+    #[test]
+    fn writemem_failure_reports_progress_index() {
+        let server = GvcpServer::start(0, Fake).unwrap();
+        let mut payload = [0u8; 12];
+        payload[..4].copy_from_slice(&0x0094u32.to_be_bytes());
+        payload[4..8].copy_from_slice(&0x1111_1111u32.to_be_bytes());
+        payload[8..12].copy_from_slice(&0x2222_2222u32.to_be_bytes());
+        let reply = exchange(&server, WRITEMEM_CMD, &payload);
+        assert_eq!(ack_status(&reply), GEV_STATUS_INVALID_ADDRESS);
+        assert_eq!(&reply[HEADER_LEN..], &[0, 0, 0, 4], "index = byte 4");
     }
 }
