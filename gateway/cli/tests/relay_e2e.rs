@@ -1263,3 +1263,66 @@ fn writemem_failure_reports_the_committed_byte_index() {
         0
     );
 }
+
+/// R-076cd/R-150cd: a FORCEIP arriving after the heartbeat expired must see
+/// the cleared grant and close the relay's stream/message channel, without
+/// relying on a later ordinary command to trigger expiry.
+#[test]
+fn force_ip_sees_an_expired_heartbeat() {
+    let s = start(false);
+    s.remote.write_reg(reg::HEARTBEAT_TIMEOUT, 500).unwrap();
+    s.remote
+        .write_reg(reg::CCP, reg::CCP_EXCLUSIVE_ACCESS)
+        .unwrap();
+    let rx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    s.remote
+        .write_reg(reg::SCDA0, u32::from(Ipv4Addr::LOCALHOST))
+        .unwrap();
+    s.remote
+        .write_reg(reg::SCP0, reg::scp_make(rx.local_addr().unwrap().port()))
+        .unwrap();
+    {
+        let mut down = s.down.lock().expect("down lock");
+        assert_ne!(down.read_reg(reg::SCP0).unwrap(), 0, "relay opened");
+    }
+
+    std::thread::sleep(Duration::from_millis(700));
+    let up_port = s._up_server.local_port().unwrap();
+    let request = ForceIpRequest {
+        mac: UP_MAC,
+        static_ip: 0,
+        subnet_mask: 0,
+        default_gateway: 0,
+    };
+    let payload = encode_force_ip_payload(&request);
+    let mut header = [0u8; HEADER_LEN];
+    CmdHeader {
+        flag: FLAG_ACK,
+        command: FORCEIP_CMD,
+        length: payload.len() as u16,
+        req_id: 77,
+    }
+    .encode(&mut header);
+    let tx = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let mut datagram = header.to_vec();
+    datagram.extend_from_slice(&payload);
+    tx.send_to(&datagram, (Ipv4Addr::LOCALHOST, up_port)).unwrap();
+
+    // No up-facing command is issued here: the downstream state is the
+    // observable proof that FORCEIP performed the expiry cleanup itself.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let scp = {
+            let mut down = s.down.lock().expect("down lock");
+            down.read_reg(reg::SCP0).unwrap()
+        };
+        if scp == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "expired grant + FORCEIP restart closed the downstream stream (SCP0={scp:#x})"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

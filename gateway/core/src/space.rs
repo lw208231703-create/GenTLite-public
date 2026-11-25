@@ -310,6 +310,15 @@ impl RegisterSpace {
         if request.mac != self.up_mac {
             return ForceIpOutcome::Ignore;
         }
+        // R-076cd/R-150cd: a heartbeat-expired grant must be cleared before
+        // deciding whether another application still holds the channel.
+        let expired = {
+            let mut ccp = self.ccp.lock().expect("vgige ccp poisoned");
+            ccp.expire_stale_grant()
+        };
+        if expired {
+            self.cleanup_control_channel();
+        }
         let granted = {
             let ccp = self.ccp.lock().expect("vgige ccp poisoned");
             ccp.flags != 0
