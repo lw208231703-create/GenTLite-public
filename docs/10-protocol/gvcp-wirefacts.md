@@ -157,10 +157,11 @@
 - **能力门控**：R-197ca——GVCP Capability（0x0934）PACKETRESEND 位（印刷 bit29 = mask 0x00000004，1.2 §27.28/3.0 §36.29，Aravis 1<<2）未声明时**禁止**发重传请求
 - **PACKETRESEND_CMD = 0x0040**（CR-200c/Fig 16-13）：flag 字节 EI 位置 1（0x10，印刷 bit3）；载荷 20B = stream_channel_id u16 + reserved u16 + first_packet_id32 + last_packet_id32 + block_id64（EI 时）；last=0xFFFFFFFF 表示"到块尾（含 trailer）"。EI=0 的 legacy 形式载荷 14B（block_id16）
 - **fire-and-forget**：CR-198ca 必须清 ACKNOWLEDGE 位；**PACKETRESEND_ACK 不存在**（CR-201cd）——不得等待应答；可异步发送（即使正等前条命令的应答）；CR-199cd primary/secondary 均可发
-- **重传包标记**（§16.7.2）：CR-204st——重发包必须置 flag bit15（GEV_FLAG_PACKET_RESEND=0x8000）；status 首选 **GEV_STATUS_PACKET_RESEND=0x0100**（Table 19-1），接收端 SUCCESS 与 0x0100 都按正常包处理
+- **GVSP flag 位序**（§15.3/Table 24-1，msb-first）：RESEND_RANGE_ERROR=0x0004、PREVIOUS_BLOCK_DROPPED=0x0002、PACKET_RESEND=0x0001（旧文档曾把三者写成 0x2000/0x4000/0x8000，已纠正）。
+- **重传包标记**（§16.7.2）：CR-204st——重发包必须置 flag bit15，MSB-first 即 **GEV_FLAG_PACKET_RESEND=0x0001**；status 首选 **GEV_STATUS_PACKET_RESEND=0x0100**（Table 19-1），接收端 SUCCESS 与 0x0100 都按正常包处理
 - **错误应答**（CR-205st，Table 16-2）：设备无法重传时回**仅头无数据**包，status ∈ {0x800C PACKET_UNAVAILABLE, 0x8014 TEMPORARILY_UNAVAILABLE（可带 hold-off 扩展 CR-208st——v1 不解析，QoI）, 0x8010 NOT_YET_AVAILABLE, 0x8011 AND_PREV_REMOVED_FROM_MEMORY, 0x8012 REMOVED_FROM_MEMORY} → 该包按不可恢复处理
-- **RESEND_RANGE_ERROR**（CO-206st/CR-207sr）：flag 0x2000，body 首 4 字节 = last_packet_id32、无数据——整个请求范围不可恢复
+- **RESEND_RANGE_ERROR**（CO-206st/CR-207sr）：flag 0x0004，body 首 4 字节 = last_packet_id32、无数据——整个请求范围不可恢复
 - **时序**（§16.7.3，全部 QoI，出处 Aravis arvgvstreamprivate.h）：尽早请求（设备内存有限）；保序拓扑可立即请求、乱序拓扑用超时机制——producer 采用乱序窗口：初始窗口 1ms（INITIAL_PACKET_TIMEOUT，参照 1000µs）、重发间隔 20ms（PACKET_TIMEOUT，参照 20000µs）、帧保留 100ms（FRAME_RETENTION，参照 100000µs，`GENTLITE_GEV_FRAME_RETENTION_MS` 可调 10-60000ms）；`GENTLITE_GEV_RESEND=0` 禁用
 - **trailer 的 packet_id = 末 payload id+1**（R-264st 序）：接收端据此登记"尾部缺口"（尾部整段丢失时否则无法发现）
 - **尾部缺口之外的知识来源**：payload id > highest+1 到达时登记 (highest+1..=id-1)
-- sim：GVCP Capability 声明 0xC0000004（UN|SN|PACKETRESEND）；每通道缓存**最近一块**全部数据报（真机内存有限，sim 只留一块，§16.7.3 语义），重发时置 0x8000+0x0100（legacy 1.2 头无 flag 字段，仅 status）；未知块/越界回 0x800C 仅头包；`set_packet_drop` 测试钩子只丢 payload（leader/trailer 不掉）
+- sim：GVCP Capability 声明 0xC0000004（UN|SN|PACKETRESEND）；每通道缓存**最近一块**全部数据报（真机内存有限，sim 只留一块，§16.7.3 语义），重发时置 0x0001+0x0100（legacy 1.2 头无 flag 字段，仅 status）；未知块/越界回 0x800C 仅头包；`set_packet_drop` 测试钩子只丢 payload（leader/trailer 不掉）
