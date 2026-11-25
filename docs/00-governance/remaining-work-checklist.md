@@ -206,7 +206,7 @@
 ## AA. 2026-11-25 R-211cd：PENDING_ACK 期间响应 DISCOVERY
 
 - `GvcpServer` 将触发 PENDING_ACK 的 WRITEREG 放入 worker 线程执行；主接收循环在 pending 期间继续服务 DISCOVERY（其他命令暂不并发处理），最终 ACK 由 worker 发送并调用 pending_end。
-- 服务器共享 `Arc<H>`（DeviceHandler 增加 Sync），WRITEREG 处理逻辑抽成 `process_writereg` 供同步/异步路径复用；worker spawn 失败时恢复心跳并结束 pending。
+- 服务器共享 `Arc<H>`（DeviceHandler 增加 Sync），WRITEREG 处理逻辑抽成 `process_writereg` 供同步/异步路径复用；socket clone/spawn 失败时回退到同步执行并照常发送最终 WRITEREG_ACK（PendingGuard 在 ACK 后恢复心跳），不再静默丢弃命令。
 - 新增单元测试：写寄存器 handler 睡 300 ms，PENDING_ACK 后 250 ms 内必须收到 DISCOVERY_ACK。
 - 验证：328 tests / 0 failed / 0 warnings；板端重新部署后 U3V 20/20 帧、GigE 56-byte leader、SCP0 打开仍为 PENDING_ACK(0x0089)→WRITEREG_ACK(0x0083)。板端 null 后端开流过快，R-211 的 250 ms DISCOVERY 响应由 300 ms 慢 handler 单测覆盖。
 

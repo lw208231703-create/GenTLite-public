@@ -284,43 +284,50 @@ fn serve_loop<H: DeviceHandler>(
             datagram.extend_from_slice(&timeout.to_be_bytes());
             let _ = socket.send_to(&datagram, peer);
             handler.pending_begin();
+            let mut worker_started = false;
             if cmd.command == WRITEREG_CMD {
                 // Slow WRITEREG (downstream stream open) runs in a worker;
                 // DISCOVERY keeps being served by this loop (R-211cd).
-                let worker_handler = std::sync::Arc::clone(&handler);
-                let worker_socket = match socket.try_clone() {
-                    Ok(s) => s,
-                    Err(_) => {
-                        handler.pending_end();
-                        continue;
+                match socket.try_clone() {
+                    Ok(worker_socket) => {
+                        let worker_handler = std::sync::Arc::clone(&handler);
+                        let worker_payload = payload_in.to_vec();
+                        let worker_req = cmd.req_id;
+                        let active = std::sync::Arc::clone(&pending_active);
+                        active.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let spawned = std::thread::Builder::new()
+                            .name("gvcp-pending".into())
+                            .spawn(move || {
+                                let _guard = AsyncPendingGuard {
+                                    handler: worker_handler,
+                                    active,
+                                };
+                                let ack = process_writereg(
+                                    &*_guard.handler,
+                                    peer,
+                                    &worker_payload,
+                                    worker_req,
+                                );
+                                let _ = worker_socket.send_to(&ack, peer);
+                            });
+                        if spawned.is_ok() {
+                            worker_started = true;
+                        } else {
+                            // Fall through to the synchronous path below; the
+                            // PendingGuard will resume the heartbeat after the
+                            // final ACK, so the command is never silently
+                            // dropped.
+                            pending_active
+                                .store(false, std::sync::atomic::Ordering::SeqCst);
+                        }
                     }
-                };
-                let worker_payload = payload_in.to_vec();
-                let worker_req = cmd.req_id;
-                let active = std::sync::Arc::clone(&pending_active);
-                active.store(true, std::sync::atomic::Ordering::SeqCst);
-                let spawned = std::thread::Builder::new()
-                    .name("gvcp-pending".into())
-                    .spawn(move || {
-                        let _guard = AsyncPendingGuard {
-                            handler: worker_handler,
-                            active,
-                        };
-                        let ack = process_writereg(
-                            &*_guard.handler,
-                            peer,
-                            &worker_payload,
-                            worker_req,
-                        );
-                        let _ = worker_socket.send_to(&ack, peer);
-                    });
-                if spawned.is_err() {
-                    // The worker owns the suspension guard; on a spawn
-                    // failure the command stays synchronous and must resume
-                    // the heartbeat here.
-                    handler.pending_end();
-                    pending_active.store(false, std::sync::atomic::Ordering::SeqCst);
+                    Err(_) => {
+                        // Socket clone failed: fall back to the synchronous
+                        // path rather than dropping the acknowledged command.
+                    }
                 }
+            }
+            if worker_started {
                 continue;
             }
         }
