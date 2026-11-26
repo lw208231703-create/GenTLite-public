@@ -21,19 +21,12 @@
 //! secondary channel that fails to open degrades the stream to the
 //! channels already opened; only total failure (channel 0) fails
 //! DSStartAcquisition, matching the historical single-channel behavior.
-//! Cross-channel frame delivery order is completion order — the spec is
-//! silent on multi-channel ordering; every delivered frame keeps the
-//! timestamp of its own leader.
-//!
-//! Shared-engine limitation (kept deliberately, M3-4a): the DsCore admits
-//! exactly one in-flight frame. A frame-striped camera (whole frames
-//! round-robined across channels, so cross-channel blocks never overlap —
-//! the model the sim implements and the target of this fan-out) cannot
-//! collide with itself. Only multi-tap parallel cameras (concurrent
-//! cross-channel block streams) hit `FrameError::Busy`, dropping the
-//! overlapped whole block (counted as `malformed` by the reassembler);
-//! per-channel in-flight slots are the M3 DsCore work (gentl-core is
-//! frozen this milestone).
+//! Multi-channel aggregation: the engine admits one in-flight frame per
+//! channel (each reservation carries its own token), so frame-striped
+//! cameras (whole frames round-robined across channels) and multi-tap
+//! parallel cameras (concurrent cross-channel block streams) both deliver
+//! correctly. Delivery order is completion order; each delivery still keeps
+//! the timestamp of its own leader.
 //!
 //! M3-2 packet-size negotiation (spec §11.7, R-567s): each channel's SCPSx
 //! is negotiated with test packets after the channel open (SCPx readback)

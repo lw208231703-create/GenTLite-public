@@ -43,6 +43,18 @@ use vgige_core::{BackIdentity, CameraBack, CanonicalFrame, FramePayload, FrameSo
 // I/O) — the same policy as the GigE back.
 const GEV_STATUS_ERROR: u16 = 0x8FFF;
 
+/// Give up (until the relay reopens the channel) after this many
+/// consecutive stream-reopen failures. Bounded retries keep a broken USB
+/// session from spinning at relay cadence and spamming the log forever.
+const MAX_REOPEN_FAILURES: u32 = 5;
+
+/// Account one failed reopen attempt; true when the source should enter its
+/// terminal `dead` state.
+fn note_reopen_failure(failures: &mut u32) -> bool {
+    *failures = failures.saturating_add(1);
+    *failures >= MAX_REOPEN_FAILURES
+}
+
 /// Downstream DEI event relay state: the forwarder thread and its stop flag.
 /// Dropping the backend stops the forwarder, then lowers EI_CONTROL via
 /// [`U3vCamera::stop_events`].
@@ -56,6 +68,9 @@ pub struct U3vBack {
     cam: Arc<U3vCamera>,
     /// DEI event pump, when `start_event_relay` succeeded.
     event_relay: Option<EventRelay>,
+    /// Same DEI channel, but forwarding structured `DeviceEvent`s (U3V
+    /// front). At most one of the two relays may run (one event channel).
+    device_event_relay: Option<EventRelay>,
 }
 
 impl U3vBack {
@@ -65,6 +80,7 @@ impl U3vBack {
         U3vCamera::open(instance_id).map(|cam| Self {
             cam: Arc::new(cam),
             event_relay: None,
+            device_event_relay: None,
         })
     }
 
@@ -78,6 +94,7 @@ impl U3vBack {
         U3vCamera::from_pipes(control_out, control_in, stream_in).map(|cam| Self {
             cam: Arc::new(cam),
             event_relay: None,
+            device_event_relay: None,
         })
     }
 
@@ -169,6 +186,7 @@ impl CameraBack for U3vBack {
             cam: Arc::clone(&self.cam),
             stream: None,
             dead: false,
+            reopen_failures: 0,
         };
         source.reopen().map_err(to_gev)?;
         Ok(Box::new(source))
@@ -180,6 +198,10 @@ impl CameraBack for U3vBack {
     ) -> Result<(), u16> {
         if self.event_relay.is_some() {
             return Ok(());
+        }
+        if self.device_event_relay.is_some() {
+            // One DEI channel per camera: the structured relay owns it.
+            return Err(0x8007);
         }
         // U3V 4.1.3.3 / 5.4.2: the DEI pump raises the EIRM Event Enable bit
         // and streams EVENTS; a camera without an event endpoint answers an
@@ -207,6 +229,37 @@ impl CameraBack for U3vBack {
         Ok(())
     }
 
+    fn start_device_event_relay(
+        &mut self,
+        sink: Arc<dyn vgige_core::DeviceEventSink>,
+    ) -> Result<(), u16> {
+        if self.device_event_relay.is_some() {
+            return Ok(());
+        }
+        if self.event_relay.is_some() {
+            // One DEI channel per camera: the GVCP relay owns it.
+            return Err(0x8007);
+        }
+        let receiver = self.cam.start_events().map_err(to_gev)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("vgige-u3v-events".into())
+            .spawn(move || {
+                while !thread_stop.load(Ordering::Relaxed) {
+                    if let Some(event) = receiver.next(Duration::from_millis(100)) {
+                        sink.forward(event_to_device(&event));
+                    }
+                }
+            })
+            .map_err(|_| 0x8FFFu16)?;
+        self.device_event_relay = Some(EventRelay {
+            stop,
+            thread: Some(thread),
+        });
+        Ok(())
+    }
+
     fn close_stream(&mut self) -> Result<(), u16> {
         // U3V stream teardown rides the FrameSource's drop: its
         // `U3vStream::stop` drops Stream Enable (§5.4.1.2: 0 while active
@@ -225,6 +278,8 @@ pub struct U3vFrameSource {
     stream: Option<U3vStream>,
     /// Set only after repeated reopen failures: keeps the relay cadence.
     dead: bool,
+    /// Consecutive reopen failures (reset by a successful reopen).
+    reopen_failures: u32,
 }
 
 impl U3vFrameSource {
@@ -236,6 +291,7 @@ impl U3vFrameSource {
         stream.start()?;
         self.stream = Some(stream);
         self.dead = false;
+        self.reopen_failures = 0;
         Ok(())
     }
 }
@@ -252,7 +308,16 @@ impl FrameSource for U3vFrameSource {
             match self.reopen() {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("vgige: u3v stream reopen failed: {e:?}");
+                    let terminal = note_reopen_failure(&mut self.reopen_failures);
+                    if terminal {
+                        self.dead = true;
+                        eprintln!(
+                            "vgige: u3v stream reopen failed {MAX_REOPEN_FAILURES} times ({e:?}); \
+                             giving up until the relay reopens the channel"
+                        );
+                    } else {
+                        eprintln!("vgige: u3v stream reopen failed ({e:?}); retrying");
+                    }
                     std::thread::sleep(timeout);
                     return None;
                 }
@@ -317,14 +382,34 @@ impl Drop for U3vFrameSource {
 
 impl Drop for U3vBack {
     fn drop(&mut self) {
-        if let Some(relay) = self.event_relay.take() {
+        let mut had_relay = false;
+        for relay in [self.event_relay.take(), self.device_event_relay.take()]
+            .into_iter()
+            .flatten()
+        {
+            had_relay = true;
             relay.stop.store(true, Ordering::Relaxed);
             if let Some(thread) = relay.thread {
                 let _ = thread.join();
             }
+        }
+        if had_relay {
             // Lower EI_CONTROL and join the facade's DEI pump.
             let _ = self.cam.stop_events();
         }
+    }
+}
+
+/// Convert one U3V DEI event into the transport-neutral device event the
+/// U3V front re-emits on its EIRM endpoint. Id and payload pass through; the
+/// DEI timestamp is already nanoseconds (§4.1.3.3.2).
+pub(crate) fn event_to_device(
+    event: &gentl_u3v::packets::EventPacket,
+) -> vgige_core::DeviceEvent {
+    vgige_core::DeviceEvent {
+        event_id: event.event_id,
+        timestamp_ns: event.timestamp,
+        data: event.data.clone(),
     }
 }
 
@@ -404,6 +489,35 @@ mod tests {
         let decoded = decode_message_events(&datagram).expect("EVENTDATA_CMD decodes");
         assert_eq!(decoded[0].event_id, 8);
         assert_eq!(decoded[0].data, vec![1, 2, 3, 4]);
+    }
+
+    /// Bounded reopen retries: the source must reach its terminal state
+    /// after MAX_REOPEN_FAILURES instead of retrying at relay cadence
+    /// forever (review 2026-11-26).
+    #[test]
+    fn reopen_failures_reach_the_terminal_state() {
+        let mut failures = 0u32;
+        for _ in 1..MAX_REOPEN_FAILURES {
+            assert!(!note_reopen_failure(&mut failures), "still retrying");
+        }
+        assert!(note_reopen_failure(&mut failures), "terminal after the limit");
+        // Saturating: a later failure keeps the terminal verdict.
+        assert!(note_reopen_failure(&mut failures));
+    }
+
+    /// U3V DEI event -> transport-neutral record for the virtual U3V front:
+    /// id/payload pass through, timestamp already nanoseconds.
+    #[test]
+    fn dei_events_convert_to_transport_neutral_records() {
+        let packet = gentl_u3v::packets::EventPacket {
+            event_id: 0x9001,
+            timestamp: 1_234_567,
+            data: vec![9, 8, 7],
+        };
+        let event = event_to_device(&packet);
+        assert_eq!(event.event_id, 0x9001);
+        assert_eq!(event.timestamp_ns, 1_234_567);
+        assert_eq!(event.data, vec![9, 8, 7]);
     }
 
     #[test]

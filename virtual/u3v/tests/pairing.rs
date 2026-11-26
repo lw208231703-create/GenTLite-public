@@ -15,7 +15,9 @@ use support::{
     mono8_frame, ByteQueue, ClientIn, ClientOut, DevCommands, DevTransfers, StubBack, MPS,
     PAYLOAD, VENDOR_WIDTH, W, H,
 };
-use vgige_core::{CameraBack, FrameSession, SharedBack, XmlMerger, CUSTOM_BASE, VGIGE_VERSION};
+use vgige_core::{
+    CameraBack, DeviceEvent, FrameSession, SharedBack, XmlMerger, CUSTOM_BASE, VGIGE_VERSION,
+};
 use vgige_front_u3v::{synthesize_guid, DeviceConfig, U3vDevice};
 
 struct Pair {
@@ -111,6 +113,26 @@ fn register_pass_through_and_custom_window() {
         gentl_u3v::client::U3vError::Status(s) => assert_eq!(s, 0x8003),
         other => panic!("expected Status(0x8003), got {other:?}"),
     }
+}
+
+#[test]
+fn downstream_events_reach_the_host_event_endpoint() {
+    let p = start();
+    // Host enables the EIRM event interface (what GCRegisterEvent does).
+    let events = p.client.start_events().expect("host event channel");
+    // The gateway's camera back pushes the camera event through the device
+    // sink (the same path `U3vBack::start_device_event_relay` uses).
+    p.device.push_event(DeviceEvent {
+        event_id: 0x9001,
+        timestamp_ns: 42,
+        data: vec![1, 2, 3],
+    });
+    let event = events
+        .next(Duration::from_secs(2))
+        .expect("forwarded event reaches the host");
+    assert_eq!(event.event_id, 0x9001);
+    assert_eq!(event.timestamp, 42);
+    assert_eq!(event.data, vec![1, 2, 3]);
 }
 
 #[test]

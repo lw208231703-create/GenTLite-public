@@ -20,16 +20,37 @@ pub enum RegisterEndian {
     Big,
 }
 
-/// Swap one register block between little- and big-endian. Four-byte
-/// registers are reversed word-wise; an eight-byte register (PayloadSize)
-/// is reversed as a whole.
+/// Reverse each 32-bit register word in `data`; the length must be a
+/// multiple of 4. Use this for a block of consecutive 32-bit registers.
+pub fn swap_register_words(data: &mut [u8]) {
+    debug_assert_eq!(data.len() % 4, 0, "register blocks are 32-bit words");
+    for word in data.chunks_exact_mut(4) {
+        word.reverse();
+    }
+}
+
+/// Reverse one 64-bit register value (e.g. U3V `SI Required Payload Size`,
+/// which opens the stream geometry, or a `PayloadSize` feature).
+pub fn swap_register_u64(data: &mut [u8; 8]) {
+    data.reverse();
+}
+
+/// Swap one register block between little- and big-endian.
+///
+/// Eight-byte blocks are interpreted as **one 64-bit value**: that is the
+/// only 8-byte register this seam carries. A block of two adjacent 32-bit
+/// registers must be split into two 4-byte blocks by the caller — the raw
+/// `read_block`/`write_block` seam has no type information to tell the two
+/// apart (review 2026-11-26; see [`swap_register_words`] for the 32-bit
+/// helper).
 pub fn swap_register_endian(data: &mut [u8]) {
     if data.len() == 8 {
-        data.reverse();
-    } else if data.len() % 4 == 0 {
-        for word in data.chunks_exact_mut(4) {
-            word.reverse();
-        }
+        let mut value = [0u8; 8];
+        value.copy_from_slice(data);
+        swap_register_u64(&mut value);
+        data.copy_from_slice(&value);
+    } else {
+        swap_register_words(data);
     }
 }
 
@@ -88,6 +109,21 @@ pub trait CameraBack: Send {
     ) -> Result<(), u16> {
         Err(0x8001)
     }
+
+    /// Start forwarding the camera's asynchronous events as structured
+    /// [`crate::DeviceEvent`]s. This is the seam for fronts that are not
+    /// GigE-shaped (the virtual U3V camera re-emits them on its EIRM event
+    /// endpoint); the default reports NOT_IMPLEMENTED.
+    ///
+    /// A camera has exactly one event channel, so a backend answers
+    /// `GEV_STATUS_BUSY` (0x8007) when the other relay flavour is already
+    /// running.
+    fn start_device_event_relay(
+        &mut self,
+        _sink: Arc<dyn crate::DeviceEventSink>,
+    ) -> Result<(), u16> {
+        Err(0x8001)
+    }
 }
 
 /// Transport-native identity of the downstream camera (see
@@ -127,5 +163,24 @@ mod tests {
         let mut twelve = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         swap_register_endian(&mut twelve);
         assert_eq!(twelve, [4, 3, 2, 1, 8, 7, 6, 5, 12, 11, 10, 9]);
+    }
+
+    /// The 8-byte rule is one 64-bit value, not two 32-bit registers; the
+    /// two helpers make the distinction explicit (review 2026-11-26).
+    #[test]
+    fn word_and_u64_helpers_are_explicit() {
+        let mut words = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        swap_register_words(&mut words);
+        assert_eq!(words, [4, 3, 2, 1, 8, 7, 6, 5]);
+
+        let mut value = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        swap_register_u64(&mut value);
+        assert_eq!(value, [8, 7, 6, 5, 4, 3, 2, 1]);
+
+        // The generic helper keeps the whole-value (u64) semantics for an
+        // 8-byte block; a two-register block must be split by the caller.
+        let mut block = [1u8, 2, 3, 4, 5, 6, 7, 8];
+        swap_register_endian(&mut block);
+        assert_eq!(block, [8, 7, 6, 5, 4, 3, 2, 1]);
     }
 }

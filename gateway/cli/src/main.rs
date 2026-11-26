@@ -583,6 +583,22 @@ fn run_u3v_front(args: &Args, back: SharedBack, xml: Arc<XmlMerger>) {
         }
     });
 
+    // Downstream camera events -> the virtual EIRM event endpoint
+    // (U3V §4.1.3.3). A backend without an event channel (null back, or a
+    // camera without DEI) leaves the endpoint serving only the
+    // host-triggered test event.
+    let events_started = back
+        .lock()
+        .map(|mut backend| backend.start_device_event_relay(device.event_sink()).is_ok())
+        .unwrap_or(false);
+    if events_started {
+        eprintln!("vgige: forwarding downstream camera events to the U3V event endpoint");
+    } else {
+        eprintln!(
+            "vgige: downstream device events unavailable; the virtual EIRM serves only the test event"
+        );
+    }
+
     println!(
         "VGIGE_READY front=u3v gadget={} (vid {:04X}:{:04X}) down={} xml={}B nodes={} stream={}",
         GADGET_NAME,

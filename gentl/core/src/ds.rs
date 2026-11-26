@@ -11,7 +11,7 @@
 //! -> `Filled` (output queue) -> delivered by `EventGetData` back to
 //! `Announced`.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -208,15 +208,19 @@ pub enum FrameError {
     QueueEmpty,
     /// Head-of-queue buffer is smaller than the expected payload.
     TooSmall,
-    /// A frame is already in flight (transport protocol violation).
-    Busy,
 }
 
 /// Exclusive write reservation over one buffer, handed to the transport
 /// between `begin_frame` and `on_frame`/`abort_frame` (the zero-copy path
 /// writes payload data straight into it).
+///
+/// `token` identifies this reservation: one DataStream may have several
+/// frames in flight (a multi-tap camera streams parallel blocks on different
+/// channels), so completions are matched by token instead of by a single
+/// engine-wide in-flight slot.
 #[derive(Debug, PartialEq, Eq)]
 pub struct FrameTarget {
+    pub token: u64,
     pub buffer_id: u64,
     pub base: *mut u8,
     pub capacity: usize,
@@ -235,20 +239,23 @@ unsafe impl Send for FrameTarget {}
 /// copies `data` into the reserved buffer.
 pub trait FrameSink: Send + Sync {
     /// Reserve the head-of-queue buffer for a frame of `payload_size`
-    /// bytes. Moves it from the input pool to `Filling`.
+    /// bytes. Moves it from the input pool to `Filling` and returns the
+    /// reservation token. Several reservations may be live at once (one
+    /// per transport channel); each token is completed or aborted exactly
+    /// once, on the thread that reserved it.
     fn begin_frame(&self, payload_size: usize) -> Result<FrameTarget, FrameError>;
 
-    /// Complete the in-flight frame (trailer received): copy `data` if
-    /// non-empty, mark the buffer filled, move it to the output queue and
-    /// push an `EVENT_NEW_BUFFER` entry. Returns the delivered buffer id,
-    /// or `None` if the frame could not be kept.
-    fn on_frame(&self, block_id: u64, meta: FrameMeta, data: &[u8]) -> Option<u64>;
+    /// Complete the in-flight frame `token` (trailer received): copy `data`
+    /// if non-empty, mark the buffer filled, move it to the output queue
+    /// and push an `EVENT_NEW_BUFFER` entry. Returns the delivered buffer
+    /// id, or `None` if the frame could not be kept.
+    fn on_frame(&self, token: u64, block_id: u64, meta: FrameMeta, data: &[u8]) -> Option<u64>;
 
-    /// Discard the in-flight frame (gaps, unsupported, stop). With
+    /// Discard the in-flight frame `token` (gaps, unsupported, stop). With
     /// `incomplete_to_output` the partially filled buffer still goes to the
     /// output queue flagged `BUFFER_INFO_IS_INCOMPLETE` (ACQ_STOP_FLAGS_KILL
     /// semantics); otherwise it returns to the input pool.
-    fn abort_frame(&self, incomplete_to_output: bool);
+    fn abort_frame(&self, token: u64, incomplete_to_output: bool);
 }
 
 /// What [`DsCore::revoke`] hands back to the GenTL boundary.
@@ -269,8 +276,11 @@ struct Pool {
     input: VecDeque<u64>,
     /// Output queue, FIFO delivery order.
     output: VecDeque<u64>,
-    /// Buffer reserved by `begin_frame`, if any.
-    in_flight: Option<u64>,
+    /// Buffer reservations in flight: token -> buffer id. Several may be
+    /// live at once (one per transport channel of this DataStream).
+    in_flight: HashMap<u64, u64>,
+    /// Next reservation token (never reused).
+    next_token: u64,
     next_id: u64,
 }
 
@@ -329,6 +339,19 @@ impl Pool {
             self.output.clear();
         }
         moved
+    }
+
+    /// Move `ids` into the input pool with the same bookkeeping reset as
+    /// `DSQueueBuffer` (GenTL 1.6 §6.4.4.4: `BUFFER_INFO_SIZE_FILLED` and
+    /// `BUFFER_INFO_DATA_SIZE` reset when a buffer is placed into the Input
+    /// Buffer Pool; NEW_DATA/INCOMPLETE/metadata follow for consistency).
+    fn requeue_into_input(&mut self, ids: Vec<u64>) {
+        for id in ids {
+            if let Some(b) = self.find_mut(id) {
+                b.reset_for_queue();
+            }
+            self.input.push_back(id);
+        }
     }
 }
 
@@ -549,10 +572,9 @@ impl DsCore {
                 }
             }
             AcqQueueOp::AllToInput => {
-                let from_output = p.drain_matching(BufferState::Filled, BufferState::Queued);
-                let from_announced = p.drain_matching(BufferState::Announced, BufferState::Queued);
-                p.input.extend(from_output);
-                p.input.extend(from_announced);
+                let mut moved = p.drain_matching(BufferState::Filled, BufferState::Queued);
+                moved.extend(p.drain_matching(BufferState::Announced, BufferState::Queued));
+                p.requeue_into_input(moved);
                 drop(p);
                 if let Some(q) = &*self.event_queue.lock().unwrap() {
                     q.flush();
@@ -560,7 +582,7 @@ impl DsCore {
             }
             AcqQueueOp::UnqueuedToInput => {
                 let moved = p.drain_matching(BufferState::Announced, BufferState::Queued);
-                p.input.extend(moved);
+                p.requeue_into_input(moved);
             }
             AcqQueueOp::AllDiscard => {
                 p.drain_matching(BufferState::Queued, BufferState::Announced);
@@ -676,15 +698,26 @@ impl DsCore {
     }
 }
 
+/// Run the two halves of `DSStopAcquisition` with the transport cleanup
+/// guaranteed: the engine half may report "already terminated" (auto-stop
+/// after `iNumToAcquire`, or a receiver-fatal `abort_engine`), but the
+/// camera-side channel must still be closed. Returns the engine error after
+/// the transport half ran, so the GenTL error code is preserved.
+pub fn stop_sequence<E>(
+    engine_stop: impl FnOnce() -> Result<(), E>,
+    transport_stop: impl FnOnce(),
+) -> Result<(), E> {
+    let engine = engine_stop();
+    transport_stop();
+    engine
+}
+
 impl FrameSink for DsCore {
     fn begin_frame(&self, payload_size: usize) -> Result<FrameTarget, FrameError> {
         if !self.is_grabbing() {
             return Err(FrameError::NotAcquiring);
         }
         let mut p = self.lock_pool();
-        if p.in_flight.is_some() {
-            return Err(FrameError::Busy);
-        }
         let Some(&id) = p.input.front() else {
             self.acq.lock().unwrap().underruns += 1;
             return Err(FrameError::QueueEmpty);
@@ -702,18 +735,21 @@ impl FrameSink for DsCore {
             b.incomplete = false;
             (b.base_ptr() as *mut u8, b.size())
         };
-        p.in_flight = Some(id);
+        p.next_token += 1;
+        let token = p.next_token;
+        p.in_flight.insert(token, id);
         self.acq.lock().unwrap().started_buffers += 1;
         Ok(FrameTarget {
+            token,
             buffer_id: id,
             base,
             capacity: size,
         })
     }
 
-    fn on_frame(&self, block_id: u64, meta: FrameMeta, data: &[u8]) -> Option<u64> {
+    fn on_frame(&self, token: u64, block_id: u64, meta: FrameMeta, data: &[u8]) -> Option<u64> {
         let mut p = self.lock_pool();
-        let id = p.in_flight.take()?;
+        let id = p.in_flight.remove(&token)?;
         let b = p.find_mut(id)?;
         if !data.is_empty() {
             if data.len() > b.size() {
@@ -746,9 +782,9 @@ impl FrameSink for DsCore {
         Some(id)
     }
 
-    fn abort_frame(&self, incomplete_to_output: bool) {
+    fn abort_frame(&self, token: u64, incomplete_to_output: bool) {
         let mut p = self.lock_pool();
-        let Some(id) = p.in_flight.take() else {
+        let Some(id) = p.in_flight.remove(&token) else {
             return;
         };
         let b = p.find_mut(id).expect("in-flight id");
@@ -884,7 +920,7 @@ mod tests {
         let data = [0x5Au8; 12];
         let t = core.begin_frame(12).expect("begin");
         assert_eq!(t.buffer_id, b0);
-        let id = core.on_frame(7, meta(), &data).expect("delivered");
+        let id = core.on_frame(t.token, 7, meta(), &data).expect("delivered");
         assert_eq!(id, b0);
         assert_eq!(core.num_delivered(), 1);
         assert_eq!(core.await_delivery_count(), 1);
@@ -922,7 +958,7 @@ mod tests {
         unsafe {
             std::ptr::write_bytes(t.base, 0x11, 12);
         }
-        core.on_frame(1, meta(), &[]);
+        core.on_frame(t.token, 1, meta(), &[]);
         core.with_buffer(b0, |b| {
             assert_eq!(b.filled_size, 12, "4x3 Mono8 = 12 bytes");
             assert!(b.new_data);
@@ -953,14 +989,22 @@ mod tests {
         core.flush(AcqQueueOp::AllDiscard).unwrap();
         core.revoke(small).unwrap();
         core.queue_buffer(big).unwrap();
-        assert!(core.begin_frame(8).is_ok());
-        // In-flight block blocks a second begin.
-        assert_eq!(core.begin_frame(8), Err(FrameError::Busy));
-        core.on_frame(1, meta(), &[]);
+        let (second, _) = announce(&core, 8);
+        core.queue_buffer(second).unwrap();
+        let t = core.begin_frame(8).expect("reserve");
+        // A second concurrent reservation succeeds: one DataStream may hold
+        // several frames at once (multi-tap cameras stream parallel blocks on
+        // different channels; review 2026-11-26).
+        let t2 = core.begin_frame(8).expect("second concurrent reservation");
+        assert_ne!(t.token, t2.token);
+        core.on_frame(t2.token, 1, meta(), &[]);
         // num_to_acquire=1 reached -> auto-stop.
         assert!(!core.is_grabbing());
+        // ...but an already reserved token still completes normally.
+        core.on_frame(t.token, 2, meta(), &[]);
+        assert_eq!(core.await_delivery_count(), 2);
         assert_eq!(core.begin_frame(4), Err(FrameError::NotAcquiring));
-        // ...but DSStopAcquisition is still valid and required.
+        // DSStopAcquisition is still valid and required.
         core.stop_acquisition().unwrap();
         assert_eq!(
             core.stop_acquisition(),
@@ -974,18 +1018,18 @@ mod tests {
         let (b0, _) = announce(&core, 64);
         core.queue_buffer(b0).unwrap();
         core.start_acquisition(GENTL_INFINITE).unwrap();
-        let _t = core.begin_frame(64).unwrap();
+        let t = core.begin_frame(64).unwrap();
 
         // Plain abort: back to the input pool.
-        core.abort_frame(false);
+        core.abort_frame(t.token, false);
         assert_eq!(core.queued_count(), 1);
         assert_eq!(core.await_delivery_count(), 0);
 
         // Incomplete abort (kill): to the output queue, flagged, and
         // DATA_SIZE keeps the intended complete size (GenTL 1.6 6.3.4.2).
-        let _t = core.begin_frame(64).unwrap();
+        let t2 = core.begin_frame(64).unwrap();
         core.set_expected_payload_size(64);
-        core.abort_frame(true);
+        core.abort_frame(t2.token, true);
         assert_eq!(core.queued_count(), 0);
         assert_eq!(core.await_delivery_count(), 1);
         core.with_buffer(b0, |b| {
@@ -994,8 +1038,8 @@ mod tests {
             assert_eq!(b.data_size, 64, "DATA_SIZE is the original frame size");
         }).unwrap();
         // Abort with nothing in flight is a no-op.
-        core.abort_frame(false);
-        core.abort_frame(true);
+        core.abort_frame(t.token, false);
+        core.abort_frame(t2.token, true);
         assert_eq!(core.await_delivery_count(), 1);
     }
 
@@ -1006,7 +1050,7 @@ mod tests {
         core.queue_buffer(b0).unwrap();
         core.start_acquisition(GENTL_INFINITE).unwrap();
         let _t = core.begin_frame(3).unwrap();
-        core.on_frame(1, meta(), &[1, 2, 3]);
+        core.on_frame(_t.token, 1, meta(), &[1, 2, 3]);
         assert!(core.with_buffer(b0, |b| b.new_data).unwrap());
         core.mark_delivered(b0).unwrap();
         core.with_buffer(b0, |b| {
@@ -1034,7 +1078,7 @@ mod tests {
         core.queue_buffer(b1).unwrap();
         core.start_acquisition(GENTL_INFINITE).unwrap();
         let _t = core.begin_frame(12).unwrap();
-        core.on_frame(1, meta(), &[]); // b0 -> output
+        core.on_frame(_t.token, 1, meta(), &[]); // b0 -> output
         assert_eq!(core.queued_count(), 1); // b1
         assert_eq!(core.await_delivery_count(), 1); // b0
 
@@ -1076,6 +1120,75 @@ mod tests {
         core.revoke(b2).unwrap();
     }
 
+    /// Regression (2026-11-26 review): `ALL_TO_INPUT` and
+    /// `UNQUEUED_TO_INPUT` place buffers into the Input Buffer Pool, so
+    /// `SIZE_FILLED` and `DATA_SIZE` must reset (GenTL 1.6 §6.4.4.4);
+    /// `NEW_DATA`/INCOMPLETE/metadata follow `DSQueueBuffer` for
+    /// consistency. Before the fix the stale values were still reported
+    /// after the flush.
+    #[test]
+    fn requeue_into_input_resets_buffer_info() {
+        let core = DsCore::new();
+        let (b0, _) = announce(&core, 16);
+        core.queue_buffer(b0).unwrap();
+        core.start_acquisition(GENTL_INFINITE).unwrap();
+        let _t = core.begin_frame(12).unwrap();
+        core.on_frame(_t.token, 1, meta(), &[0x5A; 12]).unwrap();
+        core.with_buffer(b0, |b| {
+            assert_eq!(b.state, BufferState::Filled);
+            assert_eq!(b.filled_size, 12);
+            assert_eq!(b.data_size, 12);
+            assert!(b.new_data);
+            assert!(b.meta.is_some());
+        })
+        .unwrap();
+
+        core.flush(AcqQueueOp::AllToInput).unwrap();
+        core.with_buffer(b0, |b| {
+            assert_eq!(b.state, BufferState::Queued);
+            assert_eq!(b.filled_size, 0, "SIZE_FILLED resets on input-pool entry");
+            assert_eq!(b.data_size, 0, "DATA_SIZE resets on input-pool entry");
+            assert!(!b.new_data);
+            assert!(!b.incomplete);
+            assert!(b.meta.is_none());
+        })
+        .unwrap();
+
+        // Fill, deliver (Filled -> Announced keeps the last fill's sizes),
+        // then UNQUEUED_TO_INPUT must clear them as well.
+        let _t2 = core.begin_frame(12).unwrap();
+        core.on_frame(_t2.token, 1, meta(), &[0x33; 12]).unwrap();
+        core.mark_delivered(b0).unwrap();
+        core.with_buffer(b0, |b| assert!(b.filled_size > 0)).unwrap();
+        core.flush(AcqQueueOp::UnqueuedToInput).unwrap();
+        core.with_buffer(b0, |b| {
+            assert_eq!(b.state, BufferState::Queued);
+            assert_eq!(b.filled_size, 0);
+            assert_eq!(b.data_size, 0);
+            assert!(!b.new_data);
+        })
+        .unwrap();
+    }
+
+    /// `DSStopAcquisition` must always run the transport half: an
+    /// auto-stopped or receiver-fatal-aborted engine reports
+    /// `RESOURCE_IN_USE`, but the camera-side channel still has to close.
+    #[test]
+    fn stop_sequence_always_runs_transport_cleanup() {
+        let mut cleaned = 0u32;
+        let r = stop_sequence(
+            || Err::<(), GentlError>(GentlError::ResourceInUse),
+            || cleaned += 1,
+        );
+        assert_eq!(r, Err(GentlError::ResourceInUse));
+        assert_eq!(cleaned, 1, "transport stop runs on the error path");
+
+        let mut cleaned = 0u32;
+        let r = stop_sequence(|| Ok::<(), GentlError>(()), || cleaned += 1);
+        assert_eq!(r, Ok(()));
+        assert_eq!(cleaned, 1, "transport stop runs on the success path");
+    }
+
     #[test]
     fn discard_output_clears_queue_and_output() {
         let core = DsCore::new();
@@ -1085,7 +1198,7 @@ mod tests {
         core.queue_buffer(b0).unwrap();
         core.start_acquisition(GENTL_INFINITE).unwrap();
         let _t = core.begin_frame(12).unwrap();
-        core.on_frame(1, meta(), &[]);
+        core.on_frame(_t.token, 1, meta(), &[]);
         assert_eq!(q.len(), 1);
         core.discard_output();
         assert_eq!(q.len(), 0);

@@ -1116,12 +1116,23 @@ pub extern "C" fn IFOpenDevice(
             Ok(d) => d,
             Err(e) => return fail(e),
         };
+        // Re-check under the lock: the open above happens outside it, so two
+        // concurrent callers can both pass the first check. The loser must
+        // release the USB interfaces it just acquired.
         match lock(&iface.opened_devices) {
-            Ok(mut o) => {
-                o.insert(id.to_owned());
+            Ok(mut opened) => {
+                if opened.contains(id) {
+                    drop(opened);
+                    device.close();
+                    return fail(GentlError::ResourceInUse);
+                }
+                opened.insert(id.to_owned());
             }
-            Err(e) => return e,
-        };
+            Err(e) => {
+                device.close();
+                return e;
+            }
+        }
         unsafe { *ph_device = to_handle_child(device, h_iface) };
         GC_ERR_SUCCESS
     })
@@ -1391,8 +1402,21 @@ pub extern "C" fn DevOpenDataStream(
             Ok(s) => s,
             Err(e) => return fail(e),
         };
-        if let Ok(mut opened) = device.opened_streams.lock() {
-            opened.insert(id.to_owned());
+        // Re-check under the lock: the open above is outside it, so a lost
+        // race must not leak a second stream handle.
+        match device.opened_streams.lock() {
+            Ok(mut opened) => {
+                if opened.contains(id) {
+                    drop(opened);
+                    drop(stream);
+                    return fail(GentlError::ResourceInUse);
+                }
+                opened.insert(id.to_owned());
+            }
+            Err(e) => {
+                drop(stream);
+                return fail(GentlError::Io(e.to_string()));
+            }
         }
         unsafe { *ph_data_stream = to_handle_child(stream, h_device) };
         GC_ERR_SUCCESS
@@ -1681,11 +1705,14 @@ pub extern "C" fn DSStopAcquisition(h_ds: DSHandle, i_stop_flags: AcqStopFlags) 
             Ok(d) => d,
             Err(e) => return e,
         };
-        if let Err(e) = ds.core.stop_acquisition() {
-            return fail(e);
+        let engine = gentl_core::ds::stop_sequence(
+            || ds.core.stop_acquisition(),
+            || ds.stop(kill),
+        );
+        match engine {
+            Ok(()) => GC_ERR_SUCCESS,
+            Err(e) => fail(e),
         }
-        ds.stop(kill);
-        GC_ERR_SUCCESS
     })
 }
 

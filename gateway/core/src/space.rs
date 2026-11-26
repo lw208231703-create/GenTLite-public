@@ -638,6 +638,8 @@ impl RegisterSpace {
             .map_err(|_| crate::GEV_STATUS_ERROR)?
             .read_block(addr, u32::from(count))?;
         if self.back_endian == RegisterEndian::Little {
+            // 8-byte blocks are 64-bit registers here (SI Required Payload
+            // Size / PayloadSize); see `swap_register_endian`'s contract.
             swap_register_endian(&mut data);
         }
         Ok(data)

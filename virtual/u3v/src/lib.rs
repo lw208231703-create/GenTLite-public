@@ -54,6 +54,10 @@ pub(crate) const EIRM_BASE: u64 = 0x0003_1000;
 /// SIRM transfer limit advertised to the host (SBRM 0x14/0x18): bounds
 /// the GenCP chunk envelopes; 1 KiB is the common U3V minimum.
 pub(crate) const MAX_TRANSFER: u32 = 1024;
+/// EIRM Maximum Event Transfer Length advertised to the host (§4.1.3.3):
+/// one event packet must fit in this buffer, so camera events longer than
+/// `MAX_EVENT_TRANSFER_LEN - 24` (prefix+CCD+SCD header) are dropped.
+pub(crate) const MAX_EVENT_TRANSFER_LEN: u32 = 4096;
 
 /// Deterministic GUID synthesis for the device descriptors (Q39): the
 /// U3V identity is a GUID, not a MAC — the gateway derives a stable GUID

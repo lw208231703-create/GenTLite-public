@@ -22,6 +22,7 @@
 //! (docs/20-design/linux-vgige-design.md, roadmap).
 
 pub mod back;
+pub mod device_event;
 pub mod frame;
 pub mod heartbeat;
 pub mod message;
@@ -32,6 +33,7 @@ pub mod xml;
 pub use back::{
     swap_register_endian, BackIdentity, CameraBack, RegisterEndian, SharedBack,
 };
+pub use device_event::{DeviceEvent, DeviceEventSink};
 pub use frame::{CanonicalFrame, FramePayload, FrameSession, FrameSource};
 pub use message::MessageRelay;
 pub use relay::{packet_delay, virtual_payload_chunk, Relay, SessionFactory, StreamRegs};

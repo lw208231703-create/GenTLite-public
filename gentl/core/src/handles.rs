@@ -178,18 +178,51 @@ pub unsafe fn free_handle(h: *mut c_void) {
 /// `shutdown` runs before its box is dropped, so open data streams stop
 /// their receiver threads, devices stop heartbeat/event pumps, and the
 /// handle-box memory is freed even when the consumer never called Close.
+///
+/// The boxes are shut down children-first, like `close_handle_tree`: the
+/// registry is flat (`GCCloseLib` releases everything), so the parent chain
+/// is used to order the modules deterministically. Without the ordering a
+/// Device could be shut down (CCP released) before its DataStream, whose
+/// `SCPx = 0` close write would then fail.
 pub fn invalidate_handles() {
     HANDLE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    let drained: Vec<HandleBox> = {
+    let drained: Vec<(usize, HandleBox)> = {
         let mut registry = lock_registry();
-        registry.drain().map(|(_, handle)| handle).collect()
+        registry.drain().collect()
     };
-    for handle in &drained {
+    for handle in shutdown_order(drained) {
         // Keep shutdown best-effort: one broken module must not prevent the
         // remaining handles from being released.
         let _ = catch_unwind(AssertUnwindSafe(|| handle.module.shutdown()));
     }
-    drop(drained);
+}
+
+/// Order drained handle boxes so every parent is shut down after its
+/// children (same contract as [`close_handle_tree`]). Handles whose parent
+/// is already gone are roots of their subtree.
+fn shutdown_order(drained: Vec<(usize, HandleBox)>) -> Vec<HandleBox> {
+    // Depth = number of live ancestors inside this drained set.
+    let parents: HashMap<usize, Option<usize>> =
+        drained.iter().map(|(key, h)| (*key, h.parent)).collect();
+    let mut keyed: Vec<(usize, usize, HandleBox)> = drained
+        .into_iter()
+        .map(|(key, handle)| {
+            let mut depth = 0usize;
+            let mut cur = handle.parent;
+            while let Some(p) = cur {
+                depth += 1;
+                cur = parents.get(&p).copied().flatten();
+                debug_assert!(depth < 1024, "handle parent chain too deep");
+                if depth >= 1024 {
+                    break;
+                }
+            }
+            (depth, key, handle)
+        })
+        .collect();
+    // Deepest first; the key makes the order deterministic between siblings.
+    keyed.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    keyed.into_iter().map(|(_, _, handle)| handle).collect()
 }
 
 #[cfg(test)]
@@ -315,5 +348,54 @@ mod tests {
         let a = to_handle(Arc::clone(&module));
         let b = to_handle_child(Arc::clone(&module), a);
         assert_eq!(a, b);
+    }
+
+    /// GCCloseLib must release a subtree children-first: a flat registry
+    /// drain would shut modules down in HashMap order and could release a
+    /// device's control channel before its data stream closes the stream
+    /// channel register.
+    #[test]
+    fn invalidate_handles_shuts_down_children_before_parents() {
+        struct Ordered {
+            name: &'static str,
+            log: Arc<Mutex<Vec<&'static str>>>,
+        }
+        impl Module for Ordered {
+            fn module_type(&self) -> crate::module::ModuleType {
+                crate::module::ModuleType::System
+            }
+            fn as_any(&self) -> &dyn Any {
+                self
+            }
+            fn as_any_arc(self: Arc<Self>) -> Arc<dyn Any + Send + Sync> {
+                self
+            }
+            fn shutdown(&self) {
+                self.log.lock().unwrap().push(self.name);
+            }
+        }
+        let _guard = test_lock();
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let make = |name: &'static str| {
+            Arc::new(Ordered {
+                name,
+                log: Arc::clone(&log),
+            })
+        };
+        let parent = to_handle(make("parent"));
+        let child = to_handle_child(make("child"), parent);
+        let grandchild = to_handle_child(make("grandchild"), child);
+
+        invalidate_handles();
+
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            &["grandchild", "child", "parent"],
+            "deepest module first"
+        );
+        unsafe {
+            assert!(from_handle::<Ordered>(parent).is_err());
+            assert!(from_handle::<Ordered>(grandchild).is_err());
+        }
     }
 }

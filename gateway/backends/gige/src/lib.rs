@@ -50,6 +50,26 @@ const FRAME_POOL_DEPTH: usize = 12;
 struct EventPump {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Which relay flavour owns the camera's single message channel.
+    kind: PumpKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PumpKind {
+    /// Raw §17 datagrams forwarded to a GigE message channel.
+    Gvcp,
+    /// Structured `DeviceEvent`s for a non-GigE front (virtual U3V EIRM).
+    Device,
+}
+
+/// What the receiver thread does with each §17 datagram.
+enum PumpSink {
+    Gvcp(Arc<vgige_core::MessageRelay>),
+    Device {
+        sink: Arc<dyn vgige_core::DeviceEventSink>,
+        /// Device timestamp tick frequency (Hz); 0 = unknown.
+        tick_freq: u64,
+    },
 }
 
 /// The downstream GigE camera: one GVCP control channel plus the stream
@@ -147,6 +167,73 @@ impl GigeBack {
         }
         out.truncate(len as usize);
         Ok(out)
+    }
+
+    /// Set up the camera's message channel and spawn the receiver thread;
+    /// `sink` decides what happens with each §17 datagram.
+    fn start_event_pump(&mut self, kind: PumpKind, sink: PumpSink) -> Result<(), u16> {
+        // 36.22: a camera without a message channel cannot deliver events.
+        let channels = self.client.num_message_channels().map_err(|_| 0x8FFFu16)?;
+        if channels == 0 {
+            return Err(0x8001);
+        }
+        // Resolve the routable host address with a throw-away connected
+        // socket, then receive on an unconnected one: the camera sends events
+        // from its own ephemeral source port (12.2 CO-098cd).
+        let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
+        probe
+            .connect((self.camera_ip, self.camera_port))
+            .map_err(|_| 0x8FFFu16)?;
+        let host_ip = match probe.local_addr().map_err(|_| 0x8FFFu16)?.ip() {
+            std::net::IpAddr::V4(v4) => v4,
+            std::net::IpAddr::V6(_) => return Err(0x8FFF),
+        };
+        drop(probe);
+        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
+        let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
+        let host_port = socket.local_addr().map_err(|_| 0x8FFFu16)?.port();
+        // 12.2: MCDA then MCP; the helper writes MCTT = 0, which disables
+        // ACK generation (CR-103cd) so no EVENT_ACK is required.
+        self.client
+            .open_message_channel(host_ip, host_port)
+            .map_err(|_| 0x8FFFu16)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("vgige-device-events".into())
+            .spawn(move || {
+                let mut buf = [0u8; 65536];
+                while !thread_stop.load(Ordering::Relaxed) {
+                    match socket.recv(&mut buf) {
+                        Ok(n) => match &sink {
+                            PumpSink::Gvcp(relay) => {
+                                relay.forward(&buf[..n]);
+                            }
+                            PumpSink::Device { sink, tick_freq } => {
+                                if let Some(events) = decode_message_events(&buf[..n]) {
+                                    for event in &events {
+                                        sink.forward(gvcp_event_to_device(event, *tick_freq));
+                                    }
+                                }
+                            }
+                        },
+                        Err(e)
+                            if e.kind() == io::ErrorKind::TimedOut
+                                || e.kind() == io::ErrorKind::WouldBlock =>
+                        {
+                            continue
+                        }
+                        Err(_) => std::thread::sleep(Duration::from_millis(100)),
+                    }
+                }
+            })
+            .map_err(|_| 0x8FFFu16)?;
+        self.event_pump = Some(EventPump {
+            stop,
+            thread: Some(thread),
+            kind,
+        });
+        Ok(())
     }
 }
 
@@ -281,61 +368,34 @@ impl CameraBack for GigeBack {
         &mut self,
         relay: Arc<vgige_core::MessageRelay>,
     ) -> Result<(), u16> {
-        if self.event_pump.is_some() {
-            return Ok(());
+        match self.event_pump.as_ref().map(|p| p.kind) {
+            Some(PumpKind::Gvcp) => return Ok(()),
+            // One message channel per camera: the structured relay owns it.
+            Some(PumpKind::Device) => return Err(0x8007),
+            None => {}
         }
-        // 36.22: a camera without a message channel cannot deliver events.
-        let channels = self.client.num_message_channels().map_err(|_| 0x8FFFu16)?;
-        if channels == 0 {
-            return Err(0x8001);
+        self.start_event_pump(PumpKind::Gvcp, PumpSink::Gvcp(relay))
+    }
+
+    fn start_device_event_relay(
+        &mut self,
+        sink: Arc<dyn vgige_core::DeviceEventSink>,
+    ) -> Result<(), u16> {
+        match self.event_pump.as_ref().map(|p| p.kind) {
+            Some(PumpKind::Device) => return Ok(()),
+            Some(PumpKind::Gvcp) => return Err(0x8007),
+            None => {}
         }
-        // Resolve the routable host address with a throw-away connected
-        // socket, then receive on an unconnected one: the camera sends events
-        // from its own ephemeral source port (12.2 CO-098cd).
-        let probe = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
-        probe
-            .connect((self.camera_ip, self.camera_port))
-            .map_err(|_| 0x8FFFu16)?;
-        let host_ip = match probe.local_addr().map_err(|_| 0x8FFFu16)?.ip() {
-            std::net::IpAddr::V4(v4) => v4,
-            std::net::IpAddr::V6(_) => return Err(0x8FFF),
+        // The GVCP event record carries a device-tick timestamp; convert it
+        // when the camera exposes a tick frequency, otherwise report 0.
+        let tick_freq = match (
+            self.client.read_reg(reg::TIMESTAMP_TICK_FREQ_HIGH),
+            self.client.read_reg(reg::TIMESTAMP_TICK_FREQ_LOW),
+        ) {
+            (Ok(hi), Ok(lo)) => (u64::from(hi) << 32) | u64::from(lo),
+            _ => 0,
         };
-        drop(probe);
-        let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).map_err(|_| 0x8FFFu16)?;
-        let _ = socket.set_read_timeout(Some(Duration::from_millis(100)));
-        let host_port = socket.local_addr().map_err(|_| 0x8FFFu16)?.port();
-        // 12.2: MCDA then MCP; the helper writes MCTT = 0, which disables
-        // ACK generation (CR-103cd) so no EVENT_ACK is required.
-        self.client
-            .open_message_channel(host_ip, host_port)
-            .map_err(|_| 0x8FFFu16)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let thread_stop = Arc::clone(&stop);
-        let thread = std::thread::Builder::new()
-            .name("vgige-device-events".into())
-            .spawn(move || {
-                let mut buf = [0u8; 65536];
-                while !thread_stop.load(Ordering::Relaxed) {
-                    match socket.recv(&mut buf) {
-                        Ok(n) => {
-                            relay.forward(&buf[..n]);
-                        }
-                        Err(e)
-                            if e.kind() == io::ErrorKind::TimedOut
-                                || e.kind() == io::ErrorKind::WouldBlock =>
-                        {
-                            continue
-                        }
-                        Err(_) => std::thread::sleep(Duration::from_millis(100)),
-                    }
-                }
-            })
-            .map_err(|_| 0x8FFFu16)?;
-        self.event_pump = Some(EventPump {
-            stop,
-            thread: Some(thread),
-        });
-        Ok(())
+        self.start_event_pump(PumpKind::Device, PumpSink::Device { sink, tick_freq })
     }
 
     fn close_stream(&mut self) -> Result<(), u16> {
@@ -353,6 +413,27 @@ impl Drop for GigeBack {
                 let _ = thread.join();
             }
         }
+    }
+}
+
+/// Convert one GigE Vision §17 event record into the transport-neutral
+/// device event a non-GigE front re-emits. Id and payload pass through; the
+/// GVCP timestamp counts device ticks, so it becomes nanoseconds only when
+/// the camera exposes a tick frequency (0 otherwise: unit unknown).
+pub(crate) fn gvcp_event_to_device(
+    event: &GvcpEvent,
+    tick_freq: u64,
+) -> vgige_core::DeviceEvent {
+    let timestamp_ns = if event.timestamp == 0 || tick_freq == 0 {
+        0
+    } else {
+        (u128::from(event.timestamp) * 1_000_000_000u128 / u128::from(tick_freq))
+            .min(u128::from(u64::MAX)) as u64
+    };
+    vgige_core::DeviceEvent {
+        event_id: event.event_id,
+        timestamp_ns,
+        data: event.data.clone(),
     }
 }
 
@@ -584,5 +665,36 @@ mod tests {
         assert!(parse_local_url("http://x/cam.xml").is_err());
         assert!(parse_local_url("local:cam.xml;zz;10").is_err());
         assert!(parse_local_url("local:cam.zip;0;100").is_ok(), "zip detected at fetch");
+    }
+
+    /// §17 event record -> transport-neutral event: id/data pass through,
+    /// and the tick timestamp converts to nanoseconds only when the camera
+    /// exposes its tick frequency.
+    #[test]
+    fn gvcp_events_convert_to_transport_neutral_records() {
+        let event = GvcpEvent {
+            event_id: 0x9001,
+            stream_channel: 0xFFFF,
+            block_id: 0,
+            timestamp: 5_000,
+            data: vec![9, 8, 7],
+        };
+        let converted = gvcp_event_to_device(&event, 1_000_000);
+        assert_eq!(converted.event_id, 0x9001);
+        assert_eq!(converted.timestamp_ns, 5_000_000, "5 ms at 1 MHz ticks");
+        assert_eq!(converted.data, vec![9, 8, 7]);
+
+        // No tick frequency: the unit is unknown, report 0 rather than a
+        // fabricated nanosecond value.
+        let converted = gvcp_event_to_device(&event, 0);
+        assert_eq!(converted.timestamp_ns, 0);
+
+        // Payload-less event: empty data survives.
+        let empty = GvcpEvent {
+            data: Vec::new(),
+            timestamp: 0,
+            ..event
+        };
+        assert!(gvcp_event_to_device(&empty, 1_000_000).data.is_empty());
     }
 }

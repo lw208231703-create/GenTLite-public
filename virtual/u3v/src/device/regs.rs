@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use gentl_u3v::packets;
 use vgige_core::{
-    slot, swap_register_endian, RegisterEndian, SharedBack, CUSTOM_BASE, CUSTOM_SLOTS,
-    VGIGE_VERSION,
+    slot, swap_register_endian, DeviceEvent, RegisterEndian, SharedBack, CUSTOM_BASE,
+    CUSTOM_SLOTS, VGIGE_VERSION,
 };
 
 use crate::device::sha1;
@@ -124,6 +124,31 @@ impl RegisterFile {
 
     pub fn set_event_in(&self, stream: Arc<dyn super::DeviceTransfers>) {
         *self.event_in.lock().expect("event-in lock") = Some(stream);
+    }
+
+    /// Forward one downstream camera event to the host's EIRM event
+    /// endpoint (§4.1.3.3): only while Event Enable (EI Control bit 0) is
+    /// set, and bounded by the advertised Maximum Event Transfer Length
+    /// (24-byte prefix+CCD+SCD header included). Oversized events are
+    /// dropped, never truncated silently. `Ok(false)` = not sent.
+    pub fn send_device_event(&self, event: &DeviceEvent) -> Result<bool, ()> {
+        if *self.eirm_control.lock().expect("eirm control lock") & 1 == 0 {
+            return Ok(false);
+        }
+        let packet = packets::encode_event(&packets::EventPacket {
+            event_id: event.event_id,
+            timestamp: event.timestamp_ns,
+            data: event.data.clone(),
+        });
+        if packet.len() > crate::MAX_EVENT_TRANSFER_LEN as usize {
+            return Ok(false);
+        }
+        let stream = self.event_in.lock().expect("event-in lock").clone();
+        let Some(stream) = stream else {
+            return Ok(false);
+        };
+        stream.send(&packet).map_err(|_| ())?;
+        Ok(true)
     }
 
     /// Watch Stream Enable transitions (§5.4.1.2): fired from the
@@ -547,6 +572,8 @@ impl RegisterFile {
         let mut back = self.back.lock().map_err(|_| packets::GENCP_ERROR)?;
         let mut data = back.read_block(addr32, len as u32)?;
         if self.back_endian == RegisterEndian::Big {
+            // 8-byte blocks are 64-bit registers here (see
+            // `swap_register_endian`'s contract).
             swap_register_endian(&mut data);
         }
         Ok(data)
@@ -700,7 +727,7 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     sirm[0x14..0x18].copy_from_slice(&(packets::IMAGE_TRAILER_LEN as u32).to_le_bytes());
 
     let mut eirm = vec![0u8; 0x0C];
-    eirm[0x04..0x08].copy_from_slice(&4096u32.to_le_bytes());
+    eirm[0x04..0x08].copy_from_slice(&crate::MAX_EVENT_TRANSFER_LEN.to_le_bytes());
 
     // Demo acquisition block (SFNC level): AcquisitionStart/Stop pokes
     // plus the frame PayloadSize the host sizes its buffers against.
@@ -1279,5 +1306,63 @@ mod tests {
             rf.write(crate::EIRM_BASE + 0x04, &123u32.to_le_bytes()),
             Err(packets::GENCP_WRITE_PROTECT)
         );
+    }
+
+    struct EventPipe {
+        sent: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl crate::device::DeviceTransfers for EventPipe {
+        fn send(&self, bytes: &[u8]) -> Result<(), crate::device::StreamError> {
+            self.sent.lock().unwrap().push(bytes.to_vec());
+            Ok(())
+        }
+        fn max_packet(&self) -> u16 {
+            512
+        }
+    }
+
+    /// Downstream events only reach the host while Event Enable is set, are
+    /// encoded as §4.1.3.3 EVENT_CMD packets with id/timestamp/data intact,
+    /// and oversized events are dropped instead of truncated (review
+    /// 2026-11-26, U3V event forwarding).
+    #[test]
+    fn device_events_follow_eirm_enable_and_length_bound() {
+        let rf = RegisterFile::new(
+            null_cfg(),
+            std::sync::Arc::new(std::sync::Mutex::new(vgige_back_null::NullBack::new())),
+        );
+        let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        rf.set_event_in(std::sync::Arc::new(EventPipe { sent: sent.clone() }));
+
+        let event = DeviceEvent {
+            event_id: 0x9001,
+            timestamp_ns: 1_234,
+            data: vec![1, 2, 3],
+        };
+        // Event Enable off (factory default): nothing goes out.
+        assert_eq!(rf.send_device_event(&event), Ok(false));
+        assert!(sent.lock().unwrap().is_empty());
+
+        // Host enables the EIRM event interface (§4.1.3.3.1: EI Control bit 0).
+        rf.write(crate::EIRM_BASE, &1u32.to_le_bytes()).unwrap();
+        assert_eq!(rf.send_device_event(&event), Ok(true));
+        {
+            let sent = sent.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+            let decoded = packets::decode_event(&sent[0]).expect("EVENT_CMD packet");
+            assert_eq!(decoded.event_id, 0x9001);
+            assert_eq!(decoded.timestamp, 1_234);
+            assert_eq!(decoded.data, vec![1, 2, 3]);
+        }
+
+        // Too large for Maximum Event Transfer Length: drop, do not truncate.
+        let oversized = DeviceEvent {
+            event_id: 7,
+            timestamp_ns: 0,
+            data: vec![0; crate::MAX_EVENT_TRANSFER_LEN as usize],
+        };
+        assert_eq!(rf.send_device_event(&oversized), Ok(false));
+        assert_eq!(sent.lock().unwrap().len(), 1);
     }
 }

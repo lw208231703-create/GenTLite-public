@@ -210,3 +210,135 @@
 - 新增单元测试：写寄存器 handler 睡 300 ms，PENDING_ACK 后 250 ms 内必须收到 DISCOVERY_ACK。
 - 验证：328 tests / 0 failed / 0 warnings；板端重新部署后 U3V 20/20 帧、GigE 56-byte leader、SCP0 打开仍为 PENDING_ACK(0x0089)→WRITEREG_ACK(0x0083)。板端 null 后端开流过快，R-211 的 250 ms DISCOVERY 响应由 300 ms 慢 handler 单测覆盖。
 
+## AB. 2026-11-26 文档对账批次（无代码改动）
+
+以本地规范原文 `notes/markdown/gige-vision-3.0.md` 与当前代码为准，一次性修订 C 类
+文档漂移（wirefacts / README / 状态与设计记录 / 本地 compliance 材料）：
+
+- **线格式契约** `docs/10-protocol/gvcp-wirefacts.md`：flag ACK 值 0x80→**0x01**
+  （§15.1 msb-first：印刷 bit7 即最低位）；DISCOVERY_ACK 载荷 232→**248**
+  （Figure 16-2 字段合计）；WRITEREG_ACK 补 **4B SCD**（reserved+index，非
+  ACCESS_DENIED 时，R-174c）；WRITEMEM_CMD 删去多余 u32 reserved（Figure 16-11）；
+  GVSP 3.0 Image Leader body 36B、padding 各 **u16**（Figure 25-2）；补
+  Pending Timeout(0x0958) 寄存器行；文首加对账修订记录。
+- **producer README** `gentl/README.md`：不再是"stacked 端口未提供、URLInfo 仅 U3V"；
+  改为"64 入口全导出，parts/composite/flows 为 NOT_IMPLEMENTED 桩，
+  stacked 端口与 GCGetPortURLInfo 已实现"。
+- **根 README**（中英）：zero-copy 表述改为"payload 数据报直接拷贝进 consumer
+  预注册缓冲、无中间帧暂存（用户态仅此一次逐包拷贝）"；273 PFNC 说明改为"全部
+  格式可算整块 payload，planar 的多 part 呈现需 Buffer Parts（未实现）"；Buffer Parts/Composite/flows 措辞与
+  实现对齐（stacked buffer-info、buffer segment 已实现；DSGetNumBufferParts 返回
+  NO_DATA）；GigE 1000/1000 与 380,000 帧补"固定 1500B 包长 + 1.2 式 8 字节头"的
+  验收条件与 Q35 固件背景。
+- **状态/设计记录加"2026-11-26 对账说明"**：`PENDING.md`（文末新增"过时条目索引"，
+  覆盖 UQ7/UQ9/chunk/vgige 路径/GW-2 符号冲突等）；`linux-vgige-design.md`
+  （§5 的 4/5/11/13/15/17 条与 §8 矩阵行加更新标注，§6.1 路径与 40B leader 更正）；
+  `u3v-gadget-bringup-pitfalls.md`（"最终可用配置快照"标注为 2026-10-27 历史基线，
+  非当前 vendor 6.1.115 + 512 KiB 部署）；`repository-layout.md`（ABI 归属：64 导出
+  在 gige/u3v 的 lib.rs，core 提供支撑件）。
+- **裁定账本** `OPEN-QUESTIONS.md`：Q10/Q32-1 标 `[RESOLVED]`；UQ7/UQ9/UQ10 追加
+  "后续状态"（DEI 已接线 / 512 KiB 替代 1 MiB / stacked 端口已实现）。
+- **其余**：`u3v-wirefacts.md` 的 UQ7 注记更新；`vgige-board-kernel-interop-2026-11-04.md`
+  §9.6 与 §3.3 的自相矛盾按 2026-11-11 结论作废；本地 `compliance/`（不提交）加
+  时点说明（README）、关闭 gige-audit 的 TL_INFO_PATHNAME 缺口、补 u3v-audit 的
+  39/52 节点数口径。
+- **附带**：代码注释中残留的 "40-byte/40B leader" 表述一并更正为 36B
+  （`gentl/gige/src/gvsp_receiver.rs`、`virtual/gige/src/lib.rs`、
+  `gentl/simulator/src/emitter.rs`，纯注释无行为变化）；`compliance/` 的
+  `gige-audit.md`/`preflight-gige-u3v.md` 同步注明。
+- **本批次未覆盖**：`cargo check --workspace --all-targets` 当前有 **1 个 warning**
+  （`gentl/gige/tests/parent_close.rs:6` unused import c_void）——与本文旧段落的
+  "0 warning" 记录不符，留待下个代码批次清理。
+- 验证：文档与注释改动，`cargo test` 不受影响（328 passed 状态不变）。
+
+## AC. 2026-11-26 代码风险 review 复核与修复
+
+外部 review 复核上一轮"C 类代码风险"清单，逐项裁定为 **7 条确认实现问题 / 2 条已知能力或
+架构限制 / 1 条部分成立**。本批次按 P1→P3 修掉确认项与部分成立项的可行动部分：
+
+- **DSStop 跳过传输清理（确认，两个 producer）**：`DSStopAcquisition` 在
+  `core.stop_acquisition()` 返回 `RESOURCE_IN_USE`（自动停/接收线程致命 abort 后）
+  时曾直接返回，跳过 `ds.stop()` 的 SCPx=0 / SIRM Stream Enable=0。新增
+  `gentl_core::ds::stop_sequence`：引擎半场结果不再短路传输半场，错误码照原样
+  返回；两个 producer 的入口统一改用它。单测覆盖成功/错误两条路径都执行传输清理。
+  （端到端"人为制造接收线程致命"未注入，属测试边界，已记录。）
+- **SI_INFO alignment 未防御（确认）**：`SirmInfo::alignment()` 改为
+  `Option<u64>`：指数 ≥32（SI Size 寄存器是 u32）或 ≥64（移位溢出）均返回
+  `None`，`program_sirm` 以明确错误拒绝（不再 debug panic / release 掩码移位）。
+  新增坏值单测（31 通过、32/63/64/255 拒绝）与 `program_sirm` 拒绝单测。
+- **Flush 入池未复位缓冲元数据（确认）**：`ALL_TO_INPUT` / `UNQUEUED_TO_INPUT`
+  改为经 `Pool::requeue_into_input` 复位——`SIZE_FILLED`/`DATA_SIZE` 按
+  GenTL 1.6 §6.4.4.4 强制清零，`NEW_DATA`/INCOMPLETE/metadata 与
+  `DSQueueBuffer` 保持一致；新增残留回归单测（此前 review 已实际复现）。
+- **GCCloseLib 关闭顺序（确认顺序缺陷）**：`invalidate_handles` 不再按 HashMap
+  drain 顺序 shutdown，改为按 parent 链计算深度、子先父后（与
+  `close_handle_tree` 同契约），同级以 key 排序保证确定性；新增三级父子
+  shutdown 顺序单测。影响上界仍为相机心跳超时（设备侧自清），非线程泄漏。
+- **并发打开 TOCTOU（确认，两个 producer）**：`IFOpenDevice` / `DevOpenDataStream`
+  在锁外完成打开后，回到锁内**复查**；竞态败者回滚已打开的 device（
+  `device.close()` 释放 CCP/心跳）或 stream（drop）并返回 `RESOURCE_IN_USE`。
+  `TLOpenInterface` 原本就是锁内 check+insert，未改。
+- **GigE 写路径（部分成立）**：整寄存器段改用 **WRITEMEM 批处理**
+  （≤512 B/命令，明确避免 IP 分片触发相机控制面失能，Q35 同源；设备回
+  `NOT_IMPLEMENTED` 时按 §19 回退逐寄存器 WRITEREG），部分边缘寄存器仍按
+  §6.3.6.6 RMW；同时修复 **u32 终点算术**：范围结束于 2^32（最后一个
+  32 位寄存器 0xFFFF_FFFC）时，release 曾回绕为 0 而静默丢写，现全程 u64
+  计算。新增 4 个 device 单测（WRITEMEM 批、回退、RMW、地址空间顶端）。
+- **8 字节块端序（确认，条件触发）**：拆出 `swap_register_words`（每 32 位
+  寄存器字反转）与 `swap_register_u64`（单个 64 位值），并在
+  `swap_register_endian` 文档中明确契约：8 字节块按**一个 64 位值**处理
+  （ISP/R payload 语义），两个相邻 32 位寄存器须由调用方拆成两个 4 字节块；
+  调用点（RegisterSpace / U3V 前端 register file）加同源注释；新增显式
+  语义单测。
+- **back-u3v reopen 无终态（确认）**：连续 reopen 失败达到 5 次后置
+  `dead` 终态并只打一条日志（此前无退避、无限重试、每 100 ms 刷日志）；
+  成功 reopen 复位计数；新增重试上限单测。
+- **未修（已知能力/架构，按 review 定性登记，不进缺陷队列）**：
+  虚拟 U3V 前端不转发下游相机事件（需要设备侧 U3V 事件 ID 映射，非协议
+  违规）；DsCore 单 in-flight 导致多 tap 并行块互相排斥（需 per-channel
+  槽位，属路线图）。**2026-11-26 同日已落地，见 AD 节。**
+- **验证**：`cargo test --workspace` = **337 passed / 0 failed**（较上批
+  328 净增 9 个回归/单测）；`cargo check --workspace --all-targets` =
+  **0 warning**（AB 节记录的 `parent_close.rs` 未使用导入已一并清除）。
+  未做真机复验（均为 host 侧状态/边界修复）。
+
+## AD. 2026-11-26 能力/架构两项落地（U3V 事件转发 + per-channel in-flight）
+
+review 中定性为"能力缺口/架构限制"的两项，同日实现并测试：
+
+- **虚拟 U3V 前端转发下游相机事件**（原能力缺口）
+  - 新接缝：`vgige_core::device_event::{DeviceEvent, DeviceEventSink}` +
+    `CameraBack::start_device_event_relay`（默认 NOT_IMPLEMENTED；一台相机只有
+    一条事件通道，另一种事件泵已运行时回 `GEV_STATUS_BUSY` 0x8007）。
+  - 后端：`vgige-back-u3v` 把 DEI `EventPacket` 转为 `DeviceEvent`（时间戳已是
+    ns，直传）；`vgige-back-gige` 解析 §17 原始数据报（`GvcpEvent::decode`）
+    转 `DeviceEvent`，GVCP 的设备 tick 时间戳在读到
+    `TIMESTAMP_TICK_FREQ` 时换算为 ns，未知频率报 0（不伪造单位）。
+  - 前端：`RegisterFile::send_device_event` 仅在 EIRM Event Enable（EI Control
+    bit 0）置位时向事件端点发送 §4.1.3.3 `EVENT_CMD` 包；包长受广告的
+    `MAX_EVENT_TRANSFER_LEN=4096` 约束，超大事件丢弃而非截断。
+    `U3vDevice` 增加有界事件队列（8）+ 专用写线程 + `push_event`/`event_sink`
+    （后端事件线程永不被 USB 写阻塞）；`vgige-cli` 的 `run_u3v_front` 完成接线，
+    启动日志区分"转发已启用/后端无事件通道"。
+  - 测试：back-u3v 转换单测；back-gige 转换单测（1 MHz→ns、未知频率→0、空
+    data）；`regs` 单测（未使能不发、使能后 id/timestamp/data 正确、超大丢弃）；
+    `pairing` e2e（真实 `U3vCamera` 事件端点收到 `DeviceEvent`）。
+  - 边界：host 侧仍按 GenTL `EVENT_REMOTE_DEVICE` 投递；EIRM 事件缓冲长度仍
+    为 4096；MCTT/重传语义未变（Q41）。
+- **per-channel in-flight（多 tap 并行块）**（原架构限制）
+  - `gentl-core`：`FrameTarget` 增加不透明 `token`；
+    `FrameSink::{begin_frame,on_frame,abort_frame}` 以 token 匹配完成/放弃（同一
+    DataStream 可同时持有多帧）；`Pool::in_flight` 由单槽改为
+    `HashMap<token, buffer>`，删除"单槽已占用→Busy"路径；仍按输入池可用性/
+    容量返回 `QueueEmpty`/`TooSmall`/`NotAcquiring`。
+  - 适配：`gentl-gige` GVSP 重组器与 `gentl-u3v` 接收器都随块保存 token；多通道
+    （多 tap）并发块各自落到自己的 buffer，互不排斥；重复完成同一 token 为安全
+    的 no-op。
+  - 测试：`ds` 双并发预留 + 各自完成单测（原 Busy 断言改为并发预留断言）；
+    gige/u3v 全量集成测试（多通道、resend、可变帧、chunk）通过。
+  - 边界：单通道仍只有一个 in-flight 块（由每通道 reassembler 保证）；真机
+    multi-tap 相机未复验。
+- **验证**：`cargo test --workspace` = **341 passed / 0 failed**（AD +4）；
+  `cargo check --workspace --all-targets` = **0 warning**；gateway 特性矩阵
+  `back-null/back-gige/back-u3v × front-u3v/front-gige` 四种组合编译通过。
+

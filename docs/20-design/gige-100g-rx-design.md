@@ -126,8 +126,10 @@ XdpWin ──缺驱动/不支持──▶ Rio ──获取失败──▶ Std（
    ~~遗留：`SO_RCVBUF`/绑核未做~~ **2026-10-16 已做**（M3-2 A 档：
    `GENTLITE_GEV_RCVBUF_KB` 默认 4096 读回存查、`GENTLITE_GEV_RX_CORES`
    接收线程亲和；connect/SIO_UDP_CONNRESET 动机不成立，不做）。
-   遗留：多 tap 并行相机（跨通道块并发）撞 DsCore 单 in-flight 槽，
-   per-channel 槽位属后续 DsCore 工作。
+   遗留：~~多 tap 并行相机（跨通道块并发）撞 DsCore 单 in-flight 槽，
+   per-channel 槽位属后续 DsCore 工作~~ **2026-11-26 更新：已实现**——
+   `FrameSink` 预留改为带 token，多通道可并发持有帧（见
+   docs/00-governance/remaining-work-checklist.md AD 节）；多 tap 真机仍待验收。
 2. **M3-1+M3-2**：重传窗口 + 包协商（模拟器扩展丢包注入后回归）；
    **2026-10-19 进展**：两项均完成——M3-2 §11.7 协商（阶段 1）+ M3-1 §16.7
    重传全套（能力门控 R-197ca、fire-and-forget 请求、乱序窗口 1ms/20ms/100ms

@@ -4,11 +4,13 @@
 //! real host-side client (`gentl_u3v::client::U3vCamera`).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use vgige_core::{CanonicalFrame, FrameSession, SharedBack};
+use vgige_core::{
+    CanonicalFrame, DeviceEvent, DeviceEventSink, FrameSession, SharedBack,
+};
 
 pub mod desc;
 pub mod emit;
@@ -105,8 +107,13 @@ pub(crate) struct DeviceInner {
     session_tx: SyncSender<SessionFrame>,
     session_rx: Mutex<Option<Receiver<SessionFrame>>>,
     session_generation: Arc<AtomicU64>,
+    /// Bounded queue into the EIRM event writer thread: the backend's event
+    /// thread must never block on a USB write.
+    event_tx: SyncSender<DeviceEvent>,
+    event_rx: Mutex<Option<Receiver<DeviceEvent>>>,
     server: Mutex<Option<std::thread::JoinHandle<()>>>,
     emitter: Mutex<Option<std::thread::JoinHandle<()>>>,
+    event_writer: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 impl U3vDevice {
@@ -125,6 +132,9 @@ impl U3vDevice {
         let regs = Arc::new(RegisterFile::new(config, back));
         regs.set_event_in(event_in);
         let (session_tx, session_rx) = sync_channel(4);
+        // Bounded so a host that stops reading the event endpoint cannot
+        // block the downstream camera's event pump; overflow drops events.
+        let (event_tx, event_rx) = sync_channel(8);
         let device = Self {
             inner: Arc::new(DeviceInner {
                 regs: Arc::clone(&regs),
@@ -134,8 +144,11 @@ impl U3vDevice {
                 session_tx,
                 session_rx: Mutex::new(Some(session_rx)),
                 session_generation: Arc::new(AtomicU64::new(0)),
+                event_tx,
+                event_rx: Mutex::new(Some(event_rx)),
                 server: Mutex::new(None),
                 emitter: Mutex::new(None),
+                event_writer: Mutex::new(None),
             }),
         };
         {
@@ -160,6 +173,33 @@ impl U3vDevice {
                     .name("vgige-u3v-emitter".into())
                     .spawn(move || emit::emitter_loop(rx, &inner))
                     .expect("spawn u3v emitter"),
+            );
+            // EIRM writer: forwards downstream camera events to the host
+            // while the host has Event Enable set (§4.1.3.3).
+            let events = device
+                .inner
+                .event_rx
+                .lock()
+                .expect("event rx lock")
+                .take()
+                .expect("event channel once");
+            let inner = Arc::clone(&device.inner);
+            let regs = Arc::clone(&regs);
+            *device.inner.event_writer.lock().expect("event writer lock") = Some(
+                std::thread::Builder::new()
+                    .name("vgige-u3v-eir".into())
+                    .spawn(move || {
+                        while !inner.stop.load(Ordering::Relaxed) {
+                            match events.recv_timeout(POLL) {
+                                Ok(event) => {
+                                    let _ = regs.send_device_event(&event);
+                                }
+                                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                            }
+                        }
+                    })
+                    .expect("spawn u3v event writer"),
             );
         }
         device
@@ -194,6 +234,31 @@ impl U3vDevice {
         self.inner.regs.set_ai_score(v);
     }
 
+    /// Forward one downstream camera event to the host's EIRM event
+    /// endpoint (§4.1.3.3). Non-blocking: the bounded queue drops the event
+    /// (and reports it) when the host is not draining the event endpoint.
+    pub fn push_event(&self, event: DeviceEvent) {
+        match self.inner.event_tx.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                eprintln!("vgige: u3v event queue full; dropping a downstream event");
+            }
+            Err(TrySendError::Disconnected(_)) => {}
+        }
+    }
+
+    /// Sink the gateway's camera backend can push events into (EIRM side of
+    /// the device-event seam).
+    pub fn event_sink(&self) -> Arc<dyn DeviceEventSink> {
+        struct Sink(U3vDevice);
+        impl DeviceEventSink for Sink {
+            fn forward(&self, event: DeviceEvent) {
+                self.0.push_event(event);
+            }
+        }
+        Arc::new(Sink(self.clone()))
+    }
+
     /// The descriptor set for the gadget layer (§3.2 layout).
     pub fn descriptor_bytes(&self, vid: u16, pid: u16) -> desc::DescriptorSet {
         desc::DescriptorSet::build(&self.inner.regs.config(), vid, pid)
@@ -226,6 +291,9 @@ impl Drop for U3vDevice {
                 let _ = t.join();
             }
             if let Some(t) = self.inner.emitter.lock().expect("emitter lock").take() {
+                let _ = t.join();
+            }
+            if let Some(t) = self.inner.event_writer.lock().expect("event writer lock").take() {
                 let _ = t.join();
             }
         }

@@ -99,9 +99,16 @@ pub struct SirmInfo {
 
 impl SirmInfo {
     /// 2^(bits 24-31 of SI Info) — the alignment all "SI Size" register
-    /// values must be a multiple of (§5.4.1.1).
-    pub fn alignment(&self) -> u64 {
-        1u64 << (self.si_info >> 24)
+    /// values must be a multiple of (§5.4.1.1). Returns `None` when the
+    /// device reports an exponent the producer cannot honor: every SI Size
+    /// register is a 32-bit value, so an alignment above `u32::MAX`
+    /// (exponent > 31) is unusable, and shifting by >= 64 would overflow.
+    /// Reject it explicitly instead of truncating (review 2026-11-26).
+    pub fn alignment(&self) -> Option<u64> {
+        let exponent = self.si_info >> 24;
+        1u64
+            .checked_shl(exponent)
+            .filter(|alignment| *alignment <= u64::from(u32::MAX))
     }
 
     #[allow(dead_code)] // used by the GenDC follow-up (UQ8)
@@ -225,7 +232,15 @@ pub(crate) fn program_sirm(client: &GenCpClient, sirm: &SirmInfo) -> GentlResult
             "non-standard U3V payload mode (GenDC)",
         ));
     }
-    let alignment = sirm.alignment();
+    let Some(alignment) = sirm.alignment() else {
+        // Malformed device SI Info. The SI size registers are u32, so only
+        // 2^0..=2^31 make sense; fail DSStartAcquisition cleanly instead of
+        // panicking in debug or wrapping the shift in release.
+        return Err(GentlError::Io(format!(
+            "device SI Info reports an unusable payload-size alignment (exponent {})",
+            sirm.si_info >> 24
+        )));
+    };
     let geometry = plan_geometry(
         sirm.required_payload,
         sirm.required_leader.max(IMAGE_LEADER_LEN as u32),
@@ -584,7 +599,10 @@ enum BlockOutcome {
 
 #[derive(Default)]
 struct ReceiverState {
-    in_flight: bool,
+    /// Reservation token of the block currently being reassembled; the
+    /// engine matches completions by token (several channels of one
+    /// DataStream may have frames in flight).
+    in_flight: Option<u64>,
     /// Highest block id seen; continuity gaps count lost blocks.
     last_block: Option<u64>,
     stats: ReceiverStats,
@@ -592,9 +610,8 @@ struct ReceiverState {
 
 impl ReceiverState {
     fn abandon(&mut self, sink: &Arc<DsCore>, incomplete_to_output: bool) {
-        if self.in_flight {
-            sink.abort_frame(incomplete_to_output);
-            self.in_flight = false;
+        if let Some(token) = self.in_flight.take() {
+            sink.abort_frame(token, incomplete_to_output);
         }
     }
 }
@@ -672,14 +689,14 @@ fn read_block(
             state.stats.blocks_dropped_too_small += 1;
             None
         }
-        Err(FrameError::NotAcquiring) | Err(FrameError::Busy) => {
+        Err(FrameError::NotAcquiring) => {
             // The engine stopped mid-block (auto-stop race): keep the
             // pipe in sync, deliver nothing.
             state.stats.blocks_dropped_error += 1;
             None
         }
     };
-    state.in_flight = target.is_some();
+    state.in_flight = target.as_ref().map(|t| t.token);
 
     // -- Payload sequence (§5.2.1.3) --------------------------------------
     let mut written: u64 = 0;
@@ -853,10 +870,12 @@ fn read_block(
         chunk,
         ..image_meta
     };
-    if sink.on_frame(leader.block_id, meta, &[]).is_some() {
-        state.stats.blocks_delivered += 1;
+    if let Some(t) = target.as_ref() {
+        if sink.on_frame(t.token, leader.block_id, meta, &[]).is_some() {
+            state.stats.blocks_delivered += 1;
+        }
     }
-    state.in_flight = false;
+    state.in_flight = None;
     BlockOutcome::Completed
 }
 
@@ -985,8 +1004,45 @@ mod tests {
             supported_modes: 1,
             payload_mode: 1,
         };
-        assert_eq!(s.alignment(), 4);
+        assert_eq!(s.alignment(), Some(4));
         assert!(!s.additional_modes());
+
+        // Exponents >= 32 cannot be honored: the SI size registers are
+        // u32. Exponent 64 is the historical shift-overflow case (debug
+        // panic / release wrap); 63 is representable but useless.
+        let with_exponent = |exponent: u32| SirmInfo {
+            si_info: exponent << 24,
+            ..s.clone()
+        };
+        assert_eq!(with_exponent(31).alignment(), Some(1 << 31));
+        assert_eq!(with_exponent(32).alignment(), None);
+        assert_eq!(with_exponent(63).alignment(), None);
+        assert_eq!(with_exponent(64).alignment(), None);
+        assert_eq!(with_exponent(255).alignment(), None);
+    }
+
+    /// A device reporting an unusable SI-INFO alignment must be rejected by
+    /// `program_sirm` before any register is written (review 2026-11-26).
+    #[test]
+    fn program_sirm_rejects_unusable_alignment() {
+        let client = GenCpClient::new(
+            crate::usbio::mock::pipe(&[], 1024),
+            crate::usbio::mock::pipe(&[], 1024),
+        );
+        let sirm = SirmInfo {
+            address: 0x30000,
+            si_info: 64 << 24,
+            required_payload: 1,
+            required_leader: 52,
+            required_trailer: 32,
+            supported_modes: 1,
+            payload_mode: 1,
+        };
+        let err = program_sirm(&client, &sirm).expect_err("unusable alignment");
+        assert!(
+            matches!(err, GentlError::Io(ref msg) if msg.contains("alignment")),
+            "unexpected error: {err:?}"
+        );
     }
 
     /// U3V extended chunk (§5.5.5.2): the image is the first chunk, so its

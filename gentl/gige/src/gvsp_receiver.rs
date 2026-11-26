@@ -217,9 +217,10 @@ fn frame_meta(l: &ImageLeader) -> FrameMeta {
 /// Both GVSP header forms are accepted, discriminated per datagram by the
 /// Extended ID bit (3.0 §24.2; see `gentl_gvcp::gvsp::GvspHeader::
 /// decode_auto`): the 3.0 20-byte form and the 1.2 legacy 8-byte form
-/// (1.2 §24 Fig 24-1, Q34/M3-9). The leader body layout follows the
-/// header form (40-byte §25.2.1 vs 36-byte 1.2 Fig 24-3); the trailer body
-/// is identical in both.
+/// (1.2 §24 Fig 24-1, Q34/M3-9). The leader body is 36 bytes in both forms
+/// (3.0 §25.2.1 Figure 25-2 and 1.2 §24 Fig 24-3); only the first u16
+/// differs (field_id/field_count+payload_type vs reserved+payload_type).
+/// The trailer body is identical in both.
 ///
 /// The payload stride is always inferred from each block's first payload
 /// packet (R-263st: full packets of a block are equal; only the last may
@@ -320,8 +321,8 @@ impl GvspReassembler {
     /// End the current block without a trailer.
     pub fn abandon_block(&mut self, sink: &DsCore, incomplete_to_output: bool) {
         if let Some(block) = self.block.take() {
-            if block.target.is_some() {
-                sink.abort_frame(incomplete_to_output);
+            if let Some(target) = block.target {
+                sink.abort_frame(target.token, incomplete_to_output);
             }
         }
     }
@@ -357,9 +358,9 @@ impl GvspReassembler {
             self.stats.frames_dropped_incomplete += 1;
             self.abandon_block(sink, false);
         }
-        // The leader body layout follows the header form: 3.0 §25.2.1
-        // (40 bytes, opens with payload_type_specific) vs 1.2 §24 Fig 24-3
-        // (36 bytes, opens with a reserved u16 and u16 paddings).
+        // Both leader bodies are 36 bytes (3.0 §25.2.1 Figure 25-2 and
+        // 1.2 §24 Fig 24-3); only the first u16 differs: field_id/
+        // field_count+payload_type vs reserved+payload_type.
         let leader = if hdr.extended_id {
             ImageLeader::decode(body)
         } else {
@@ -392,10 +393,6 @@ impl GvspReassembler {
             }
             Err(FrameError::NotAcquiring) => {
                 self.stats.frames_dropped_not_acquiring += 1;
-                None
-            }
-            Err(FrameError::Busy) => {
-                self.stats.malformed += 1; // leader while a block is open
                 None
             }
         };
@@ -626,8 +623,8 @@ impl GvspReassembler {
             // delivered against the wrong id.
             self.stats.malformed += 1;
             self.stats.frames_dropped_incomplete += 1;
-            if block.target.is_some() {
-                sink.abort_frame(false);
+            if let Some(target) = block.target.as_ref() {
+                sink.abort_frame(target.token, false);
             }
             return;
         }
@@ -645,7 +642,9 @@ impl GvspReassembler {
         }
         if block.overflow {
             self.stats.frames_dropped_incomplete += 1;
-            sink.abort_frame(false);
+            if let Some(target) = block.target.as_ref() {
+                sink.abort_frame(target.token, false);
+            }
             return;
         }
         if !block.gaps.is_empty() && self.resend.enabled {
@@ -664,6 +663,11 @@ impl GvspReassembler {
     /// Trailer-time delivery of a taken block: validate and hand the
     /// completed block to the engine.
     fn deliver(&mut self, sink: &DsCore, block: &Block, trailer_body: &[u8]) {
+        // The reservation token routes the completion to this block's buffer
+        // (several channels of one DataStream may have frames in flight).
+        let Some(token) = block.target.as_ref().map(|t| t.token) else {
+            return;
+        };
         // Trailer sanity: the delivered row count must match the leader,
         // and the accumulated payload must reach the expected size (catches
         // blocks whose tail packets never arrived). Unknown formats cannot
@@ -767,14 +771,14 @@ impl GvspReassembler {
             // incomplete buffers; the reserved buffer returns to the
             // input pool.
             self.stats.frames_dropped_incomplete += 1;
-            sink.abort_frame(false);
+            sink.abort_frame(token, false);
             return;
         }
         let mut meta = frame_meta(&block.leader);
         meta.payload_bytes = Some(valid_bytes.min(block.bytes_written));
         meta.delivered_height = delivered_height;
         meta.chunk = chunk;
-        if sink.on_frame(block.block_id, meta, &[]).is_some() {
+        if sink.on_frame(token, block.block_id, meta, &[]).is_some() {
             self.stats.frames_delivered += 1;
             if block.resend_touched {
                 self.stats.resend_recovered += 1;
@@ -1234,7 +1238,7 @@ mod tests {
         let (core, _) = started_sink();
         let mut r = GvspReassembler::new();
         let mut d = leader_dgram(1, 1);
-        d.truncate(GVSP_HEADER_LEN + 20); // image leader body needs 40 bytes
+        d.truncate(GVSP_HEADER_LEN + 20); // image leader body needs 36 bytes
         r.on_datagram(&core, &d);
         r.on_datagram(&core, &trailer_dgram(1));
         assert_eq!(r.stats().frames_dropped_unsupported, 1);

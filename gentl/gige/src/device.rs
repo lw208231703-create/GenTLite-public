@@ -20,6 +20,13 @@ use crate::cti::{DeviceAccess, DeviceEntry, GevDevice, GevInterface, StreamTrans
 /// multiple of 4; 512 bytes per transaction keeps datagrams small.
 const READMEM_CHUNK: usize = 512;
 
+/// Max data bytes per WRITEMEM. Deliberately small (same 512-byte cap as
+/// READMEM): camera control planes are known to wedge on IP-fragmented GVCP
+/// datagrams (their RX path does not reassemble, Q35), and relying on the
+/// u16 length field would allow a ~64 KB datagram. 512 bytes still turns
+/// N register writes into one command.
+const WRITEMEM_CHUNK: usize = 512;
+
 
 /// GVCP device-side port; overridable for tests/software cameras.
 fn gvcp_device_port() -> u16 {
@@ -246,15 +253,20 @@ impl ControlChannel for GevDevice {
         if addr.checked_add(len).is_none() || addr + len > u64::from(u32::MAX) + 1 {
             return Err(GentlError::InvalidAddress);
         }
-        let start = (addr as u32) & !3;
-        let end = ((addr as u32) + buf.len() as u32 + 3) & !3;
-        let window_len = (end - start) as usize;
+        // Address arithmetic stays in u64: a range ending exactly at 2^32 is
+        // legal (the last 32-bit register is 0xFFFF_FFFC) and must not be
+        // computed in u32 (review 2026-11-26).
+        let start = addr & !3;
+        let end = (addr + len + 3) & !3;
+        let window_len = usize::try_from(end - start).map_err(|_| GentlError::InvalidAddress)?;
         let mut window = vec![0u8; window_len];
 
         let client = self.client.lock().map_err(|_| GentlError::Io("client lock poisoned".into()))?;
         let mut off = 0usize;
         while off < window_len {
-            let chunk_addr = start + off as u32;
+            let chunk_addr = start + off as u64;
+            let chunk_addr =
+                u32::try_from(chunk_addr).map_err(|_| GentlError::InvalidAddress)?;
             let n = (window_len - off).min(READMEM_CHUNK);
             let result = client.read_mem(chunk_addr, &mut window[off..off + n]);
             let not_implemented = matches!(result, Err(GentlError::GevStatus(s)) if s == gentl_gvcp::wire::GEV_STATUS_NOT_IMPLEMENTED);
@@ -263,7 +275,9 @@ impl ControlChannel for GevDevice {
                 // serves this range register-by-register instead.
                 let mut p = off;
                 while p < off + n {
-                    let v = client.read_reg(start + p as u32)?;
+                    let reg = start + p as u64;
+                    let reg = u32::try_from(reg).map_err(|_| GentlError::InvalidAddress)?;
+                    let v = client.read_reg(reg)?;
                     window[p..p + 4].copy_from_slice(&v.to_be_bytes());
                     p += 4;
                 }
@@ -274,14 +288,16 @@ impl ControlChannel for GevDevice {
         }
         drop(client);
 
-        let base = (addr as u32 - start) as usize;
+        let base = usize::try_from(addr - start).map_err(|_| GentlError::InvalidAddress)?;
         buf.copy_from_slice(&window[base..base + buf.len()]);
         Ok(())
     }
 
-    /// Arbitrary address/length write via WRITEREG. Fully covered
-    /// registers are written directly; partial edges are read-modify-write
-    /// (GenTL 1.6 §6.3.6.6 sanctions RMW for alignment adaptation).
+    /// Arbitrary address/length write. Runs of whole 4-byte registers go out
+    /// as WRITEMEM batches (§16.6, one command instead of N) and fall back
+    /// to per-register WRITEREG when the device answers NOT_IMPLEMENTED;
+    /// partial edges are read-modify-write (GenTL 1.6 §6.3.6.6 sanctions
+    /// RMW for alignment adaptation).
     fn write_mem(&self, addr: u64, buf: &[u8]) -> GentlResult<()> {
         if buf.is_empty() {
             return Ok(());
@@ -290,10 +306,9 @@ impl ControlChannel for GevDevice {
         if addr.checked_add(len).is_none() || addr + len > u64::from(u32::MAX) + 1 {
             return Err(GentlError::InvalidAddress);
         }
-        let start = addr as u32;
 
         let client = self.client.lock().map_err(|_| GentlError::Io("client lock poisoned".into()))?;
-        write_aligned_registers(&client, start, buf)
+        write_aligned_registers(&client, addr, buf)
     }
 
     fn xml_url(&self) -> GentlResult<String> {
@@ -302,38 +317,82 @@ impl ControlChannel for GevDevice {
     }
 }
 
-fn write_aligned_registers(client: &GvcpClient, start: u32, buf: &[u8]) -> GentlResult<()> {
-    let end = start + buf.len() as u32;
-    let mut reg = start & !3;
-    while reg < end {
-        let reg_end = reg + 4;
-        let from = start.max(reg) - start;
-        let to = end.min(reg_end) - start;
-        if to - from == 4 {
-            let v = u32::from_be_bytes(buf[from as usize..to as usize].try_into().expect("full register"));
-            client.write_reg(reg, v)?;
-        } else {
-            let mut v = client.read_reg(reg)?.to_be_bytes();
-            v[from as usize..to as usize].copy_from_slice(&buf[from as usize..to as usize]);
-            client.write_reg(reg, u32::from_be_bytes(v))?;
+fn write_aligned_registers(client: &GvcpClient, start: u64, buf: &[u8]) -> GentlResult<()> {
+    let end = start + buf.len() as u64;
+    let base = |reg: u64| (reg - start) as usize;
+    let mut pos = start;
+
+    // Head: a partial leading register outside the run.
+    if pos % 4 != 0 {
+        let reg = pos & !3;
+        let n = usize::try_from((4 - (pos % 4)).min(end - pos))
+            .map_err(|_| GentlError::InvalidAddress)?;
+        rmw_register(client, reg, (pos - reg) as usize, &buf[..n])?;
+        pos += n as u64;
+    }
+
+    // Whole registers: one WRITEMEM per batch, per-register WRITEREG when
+    // the device does not implement WRITEMEM.
+    let whole_end = end & !3;
+    while pos < whole_end {
+        let run_end = whole_end.min(pos + WRITEMEM_CHUNK as u64).max(pos + 4);
+        let from = base(pos);
+        let run = &buf[from..base(run_end)];
+        let addr = u32::try_from(pos).map_err(|_| GentlError::InvalidAddress)?;
+        match client.write_mem(addr, run) {
+            Ok(()) => {}
+            Err(GentlError::GevStatus(s))
+                if s == gentl_gvcp::wire::GEV_STATUS_NOT_IMPLEMENTED =>
+            {
+                for (i, word) in run.chunks_exact(4).enumerate() {
+                    let value = u32::from_be_bytes(word.try_into().expect("4-byte word"));
+                    client.write_reg(addr + (i as u32) * 4, value)?;
+                }
+            }
+            Err(e) => return Err(e),
         }
-        reg = reg_end;
+        pos = run_end;
+    }
+
+    // Tail: a partial trailing register.
+    if pos < end {
+        let reg = pos & !3;
+        let n = usize::try_from(end - pos).map_err(|_| GentlError::InvalidAddress)?;
+        rmw_register(client, reg, (pos - reg) as usize, &buf[base(pos)..])?;
+        debug_assert_eq!(n, buf.len() - base(pos));
     }
     Ok(())
+}
+
+/// Read-modify-write `offset..offset+data.len()` of one 32-bit register.
+fn rmw_register(client: &GvcpClient, reg: u64, offset: usize, data: &[u8]) -> GentlResult<()> {
+    let addr = u32::try_from(reg).map_err(|_| GentlError::InvalidAddress)?;
+    let mut value = client.read_reg(addr)?.to_be_bytes();
+    let end = offset + data.len();
+    if end > 4 {
+        return Err(GentlError::InvalidAddress);
+    }
+    value[offset..end].copy_from_slice(data);
+    client.write_reg(addr, u32::from_be_bytes(value))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gentl_gvcp::wire::GEV_STATUS_ACCESS_DENIED;
+    use gentl_gvcp::wire::{GEV_STATUS_ACCESS_DENIED, GEV_STATUS_NOT_IMPLEMENTED};
     use gentl_gvcp::{DeviceHandler, DiscoveryInfo, GvcpServer};
 
+    /// Records register writes, WRITEMEM payloads, and serves one fixed
+    /// register value for RMW tests.
     #[derive(Clone, Default)]
-    struct WriteOnly {
+    struct Recording {
         writes: Arc<Mutex<Vec<(u32, u32)>>>,
+        mem_writes: Arc<Mutex<Vec<(u32, Vec<u8>)>>>,
+        read_value: Option<u32>,
+        reject_mem: bool,
     }
 
-    impl DeviceHandler for WriteOnly {
+    impl DeviceHandler for Recording {
         fn discovery_info(&self) -> DiscoveryInfo {
             DiscoveryInfo {
                 spec_version_major: 2,
@@ -355,7 +414,7 @@ mod tests {
         }
 
         fn read_reg(&self, _addr: u32) -> Result<u32, u16> {
-            Err(GEV_STATUS_ACCESS_DENIED)
+            self.read_value.ok_or(GEV_STATUS_ACCESS_DENIED)
         }
 
         fn write_reg(&self, addr: u32, value: u32) -> Result<(), u16> {
@@ -366,19 +425,94 @@ mod tests {
         fn read_mem(&self, _addr: u32, _count: u16) -> Result<Vec<u8>, u16> {
             Err(GEV_STATUS_ACCESS_DENIED)
         }
+
+        fn write_mem(&self, addr: u32, data: &[u8]) -> Result<(), u16> {
+            if self.reject_mem {
+                return Err(GEV_STATUS_NOT_IMPLEMENTED);
+            }
+            self.mem_writes.lock().unwrap().push((addr, data.to_vec()));
+            Ok(())
+        }
     }
 
-    #[test]
-    fn consecutive_full_registers_are_written_without_readback() {
-        let handler = WriteOnly::default();
-        let server = GvcpServer::start(0, handler.clone()).unwrap();
+    fn with_client(handler: Recording) -> (GvcpServer, GvcpClient) {
+        let server = GvcpServer::start(0, handler).unwrap();
         let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, server.local_port().unwrap()).unwrap();
+        (server, client)
+    }
+
+    /// Full registers are batched into one WRITEMEM instead of N WRITEREGs.
+    #[test]
+    fn full_registers_use_one_writemem() {
+        let handler = Recording::default();
+        let (server, client) = with_client(handler.clone());
+
+        write_aligned_registers(&client, 0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+
+        assert_eq!(
+            handler.mem_writes.lock().unwrap().as_slice(),
+            &[(0x2000, vec![1, 2, 3, 4, 5, 6, 7, 8])]
+        );
+        assert!(
+            handler.writes.lock().unwrap().is_empty(),
+            "no per-register fallback expected"
+        );
+        server.stop();
+    }
+
+    /// A device that answers NOT_IMPLEMENTED to WRITEMEM still gets every
+    /// register written through WRITEREG (§19 status-driven fallback).
+    #[test]
+    fn writemem_not_implemented_falls_back_to_writereg() {
+        let handler = Recording {
+            reject_mem: true,
+            ..Recording::default()
+        };
+        let (server, client) = with_client(handler.clone());
 
         write_aligned_registers(&client, 0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
 
         assert_eq!(
             handler.writes.lock().unwrap().as_slice(),
             &[(0x2000, 0x0102_0304), (0x2004, 0x0506_0708)]
+        );
+        assert!(handler.mem_writes.lock().unwrap().is_empty());
+        server.stop();
+    }
+
+    /// Partial edge registers are read-modify-write (GenTL 1.6 §6.3.6.6).
+    #[test]
+    fn unaligned_edge_is_read_modify_write() {
+        let handler = Recording {
+            read_value: Some(0xAABB_CCDD),
+            ..Recording::default()
+        };
+        let (server, client) = with_client(handler.clone());
+
+        write_aligned_registers(&client, 0x2002, &[0x11, 0x22]).unwrap();
+
+        assert_eq!(
+            handler.writes.lock().unwrap().as_slice(),
+            &[(0x2000, 0xAABB_1122)],
+            "only the addressed bytes change"
+        );
+        assert!(handler.mem_writes.lock().unwrap().is_empty());
+        server.stop();
+    }
+
+    /// A write ending exactly at 2^32 (the last 32-bit register) must not
+    /// overflow the address arithmetic: before the fix the release build
+    /// wrapped `end` to 0 and silently skipped the write.
+    #[test]
+    fn write_at_the_top_of_the_address_space_is_not_lost() {
+        let handler = Recording::default();
+        let (server, client) = with_client(handler.clone());
+
+        write_aligned_registers(&client, u64::from(u32::MAX) - 3, &[9, 8, 7, 6]).unwrap();
+
+        assert_eq!(
+            handler.mem_writes.lock().unwrap().as_slice(),
+            &[(u32::MAX - 3, vec![9, 8, 7, 6])]
         );
         server.stop();
     }
