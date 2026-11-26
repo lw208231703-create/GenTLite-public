@@ -37,12 +37,12 @@ pub fn swap_register_u64(data: &mut [u8; 8]) {
 
 /// Swap one register block between little- and big-endian.
 ///
-/// Eight-byte blocks are interpreted as **one 64-bit value**: that is the
-/// only 8-byte register this seam carries. A block of two adjacent 32-bit
-/// registers must be split into two 4-byte blocks by the caller — the raw
-/// `read_block`/`write_block` seam has no type information to tell the two
-/// apart (review 2026-11-26; see [`swap_register_words`] for the 32-bit
-/// helper).
+/// Raw helper with the historical eight-byte rule (one 64-bit value). The
+/// actual data paths (`RegisterSpace`, the U3V register file) use
+/// [`crate::regwidth::swap_block`] instead, which consults the register
+/// widths declared by the served XML: an eight-byte block there is two 32-bit
+/// registers unless the XML declares a 64-bit register (review 2026-11-26
+/// follow-up). Keep this helper only for whole-value call sites and tests.
 pub fn swap_register_endian(data: &mut [u8]) {
     if data.len() == 8 {
         let mut value = [0u8; 8];

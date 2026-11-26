@@ -284,12 +284,11 @@
   §6.3.6.6 RMW；同时修复 **u32 终点算术**：范围结束于 2^32（最后一个
   32 位寄存器 0xFFFF_FFFC）时，release 曾回绕为 0 而静默丢写，现全程 u64
   计算。新增 4 个 device 单测（WRITEMEM 批、回退、RMW、地址空间顶端）。
-- **8 字节块端序（确认，条件触发）**：拆出 `swap_register_words`（每 32 位
-  寄存器字反转）与 `swap_register_u64`（单个 64 位值），并在
-  `swap_register_endian` 文档中明确契约：8 字节块按**一个 64 位值**处理
-  （ISP/R payload 语义），两个相邻 32 位寄存器须由调用方拆成两个 4 字节块；
-  调用点（RegisterSpace / U3V 前端 register file）加同源注释；新增显式
-  语义单测。
+- **8 字节块端序（确认，条件触发；第一版未修数据路径）**：拆出
+  `swap_register_words`（每 32 位寄存器字反转）与 `swap_register_u64`（单个
+  64 位值），但真实块读写路径仍统一调用 `swap_register_endian`（8 字节整体
+  反转）——后续 review 指出并复现了该缺口，见 AE 节；本批次仅完成 helper
+  与接口语义。
 - **back-u3v reopen 无终态（确认）**：连续 reopen 失败达到 5 次后置
   `dead` 终态并只打一条日志（此前无退避、无限重试、每 100 ms 刷日志）；
   成功 reopen 复位计数；新增重试上限单测。
@@ -342,3 +341,39 @@ review 中定性为"能力缺口/架构限制"的两项，同日实现并测试�
   `cargo check --workspace --all-targets` = **0 warning**；gateway 特性矩阵
   `back-null/back-gige/back-u3v × front-u3v/front-gige` 四种组合编译通过。
 
+
+## AE. 2026-11-26 复核跟进：8 字节块端序按寄存器宽度转换
+
+上一轮（AC）只拆了 `swap_register_words` / `swap_register_u64` 两个 helper，
+**真实数据路径没有改**：`RegisterSpace::back_read_block`/写路径与
+`virtual/u3v` 的 `back_read`/`back_write` 仍对任意 8 字节块整体反转，于是
+"两个相邻 32 位寄存器"被当成"一个 64 位整数"。review 给出实测：
+同一次 READMEM 读取 Width+Height 返回 `Height,Width`；块写有对称风险
+（两个寄存器写到对方地址）。
+
+根因与修复：8 字节块本身没有类型信息，正确字节序取决于**寄存器宽度**，
+而唯一可用来源是网关对外提供的 GenICam XML。新增
+`gateway/core/src/regwidth.rs`：
+
+- `RegisterWidths::from_xml`：从 XML 提取 `IntReg` / `MaskedIntReg` /
+  `Register` 的 `<Length>`，支持直接 `<Address>` 与一级
+  `<pAddress>` → `Integer <Value>`（含 `pValue` 链）的间接地址解析；
+  只记录非 4 字节宽度（2/8 等，4 字节是兜底假设）；无法解析的地址不猜。
+- `swap_block(data, addr, widths)`：从 `addr` 起逐寄存器反转——XML 声明宽度的
+  寄存器按整值反转（64 位寄存器仍整体反转），其余按 32 位寄存器；无法对齐的
+  尾巴保持原样。
+- 数据路径接入：`RegisterSpace` 与 `virtual/u3v` 的 `RegisterFile` 各持有
+  服务端 XML 的宽度表，**读、写两条块路径**都改用 `swap_block`；
+  `swap_register_endian` 降级为"整值 helper"并在文档中注明数据路径不再使用它。
+
+测试：`regwidth` 6 项（直接/间接/2 字节/8 字节/未知/空 XML）；
+`RegisterSpace` 3 项走真实公开 API（review 复现的 Width+Height 8 字节读顺序、
+XML 声明的 64 位整值、8 字节写落址）；`virtual/u3v` 1 项同规则反向
+（Big→Little 的 8 字节两寄存器顺序 + 64 位整值 + 写路径）。
+
+验证：`cargo test --workspace` = **351 passed / 0 failed**；
+`cargo check --workspace --all-targets` = **0 warning**。
+
+边界（仍在，非静默）：深层 `pAddress` 链（指向非常量 SwissKnife/自定义节点）
+或 XML 未声明的 64 位地址仍按 4 字节兜底，可能错值——真机出现此类寄存器时
+以 XML 声明修正；不涉及转换的同端序组合（GigE→GigE、Little→Little）不受影响。

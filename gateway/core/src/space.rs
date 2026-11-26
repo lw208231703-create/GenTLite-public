@@ -32,7 +32,8 @@ use std::time::Instant;
 use gentl_gvcp::registers as reg;
 use gentl_gvcp::wire::*;
 
-use crate::back::{swap_register_endian, RegisterEndian, SharedBack};
+use crate::back::{RegisterEndian, SharedBack};
+use crate::regwidth::{swap_block, RegisterWidths};
 use crate::relay::Relay;
 use crate::xml::XmlMerger;
 use crate::{slot, CUSTOM_BASE, CUSTOM_SLOTS, VGIGE_VERSION, XML_BASE_V};
@@ -196,6 +197,10 @@ pub struct RegisterSpace {
     /// GigE register space is always big-endian; a little-endian backend
     /// (the null demo / U3V) is converted at this boundary.
     back_endian: RegisterEndian,
+    /// Register widths declared by the served XML: block conversion needs
+    /// them to tell an eight-byte 64-bit register from two 32-bit registers
+    /// (see [`crate::regwidth`]).
+    widths: RegisterWidths,
     xml: Arc<XmlMerger>,
     /// Virtual identity: the up-facing NIC's IP/MAC (the camera's stay
     /// hidden from the client).
@@ -226,6 +231,7 @@ impl Clone for RegisterSpace {
         Self {
             back: Arc::clone(&self.back),
             back_endian: self.back_endian,
+            widths: self.widths.clone(),
             xml: Arc::clone(&self.xml),
             up_ip: Arc::clone(&self.up_ip),
             up_mac: self.up_mac,
@@ -259,9 +265,11 @@ impl RegisterSpace {
             .lock()
             .map(|b| b.register_endian())
             .unwrap_or(RegisterEndian::Big);
+        let widths = RegisterWidths::from_xml(xml.blob());
         Self {
             back,
             back_endian,
+            widths,
             xml,
             up_ip: Arc::new(AtomicU32::new(u32::from(up_ip))),
             up_mac,
@@ -638,9 +646,10 @@ impl RegisterSpace {
             .map_err(|_| crate::GEV_STATUS_ERROR)?
             .read_block(addr, u32::from(count))?;
         if self.back_endian == RegisterEndian::Little {
-            // 8-byte blocks are 64-bit registers here (SI Required Payload
-            // Size / PayloadSize); see `swap_register_endian`'s contract.
-            swap_register_endian(&mut data);
+            // Width-aware: an eight-byte block is two 32-bit registers unless
+            // the served XML declares a 64-bit register at that address
+            // (`crate::regwidth`).
+            swap_block(&mut data, addr, &self.widths);
         }
         Ok(data)
     }
@@ -1175,7 +1184,7 @@ impl RegisterSpace {
         let mut owned;
         let payload = if self.back_endian == RegisterEndian::Little {
             owned = data.to_vec();
-            swap_register_endian(&mut owned);
+            swap_block(&mut owned, addr, &self.widths);
             owned.as_slice()
         } else {
             data
@@ -1258,3 +1267,7 @@ mod ccp_tests {
         assert_eq!(c.peer, None);
     }
 }
+
+#[cfg(test)]
+#[path = "space_block_tests.rs"]
+mod space_block_tests;
