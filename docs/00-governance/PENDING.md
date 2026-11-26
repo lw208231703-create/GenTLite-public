@@ -4,6 +4,11 @@
 > GigE 模拟链路 + U3V 海康真机已毕业；以下事项按优先级排列。
 > 每条注明：前置条件、验收标准、关联 docs/00-governance/OPEN-QUESTIONS.md。
 
+> **2026-11-26 对账说明**：本文件保留为 2026-11-04 的时点快照。2026-11 批次
+> （含 11-23~25 的八轮外部 review 修复）已推翻其中多项；当前权威状态见
+> [remaining-work-checklist.md](remaining-work-checklist.md)（截至 2026-11-25）。
+> 已过时条目的索引见文末「九、过时条目索引」。
+
 ## 〇、2026-11-04 vgige 虚拟相机里程碑
 
 已完成：
@@ -109,7 +114,7 @@ M1 ✅ / M2 模拟链路 ✅（100 帧零丢帧）/ M4 ✅（海康真机 200/20
 ### GW-1. v1 ✅ 2026-10-22（单体 linux-vgige，真机毕业）
 - **内容**：Orange Pi 双网口盒子智能相机网关——对外网口 `GvcpServer::start_bound(up_ip, …)` 扮演虚拟 GigE 设备，对内 GVCP 常驻 CCP(EA) 驱动真机（DownGuard 孤儿守卫 + EA 后 1s 稳定窗，Q35 族）
   - 控制面：bootstrap/厂商区透传 + GEV 状态原样映射（错误透传）；虚寄存器（DEVICE_MAC/CURRENT_IP=对外网口真值、FIRST_URL→注入 XML、GVCP_CAPABILITY 掩 packet_resend/R-197ca、CCP 简化模型 §36.46）；定制窗口 0x2000_0000（Version/AI_Result/AI_Score/FrameCountRelayed/UserCommand + 通用 RW 槽）；XML 注入内建 SmartCamera Category + `--ext-nodes` 用户片段
-  - 图像面：虚拟通道 0——SCP≠0 开流（R-586cd/BUSY、R-091ca 级联关流），`GvspReassembler` 重组（1.2/3.0 自适应）后**恒以 3.0 式重发**（EI=1 20B 头 §24.2、40B leader §25.2.1、block_id 自 1 R-259st、按虚拟 SCPS0 切片）
+  - 图像面：虚拟通道 0——SCP≠0 开流（R-586cd/BUSY、R-091ca 级联关流），`GvspReassembler` 重组（1.2/3.0 自适应）后**恒以 3.0 式重发**（EI=1 20B 头 §24.2、36B leader §25.2.1、block_id 自 1 R-259st、按虚拟 SCPS0 切片）
   - 真机整改：zip XML 透明解压（§14.1.1）、READMEM 512B 分片（13KB 分片是 LeadingOE 控制面失能触发器）
 - **验收**：真机 1000/1000 帧（192.168.1.89）+ 烤机 44000/44000 帧 @≈0.94Gbit/s（compliance/relay-burn-15min-report.md）
 
@@ -146,3 +151,26 @@ M1 ✅ / M2 模拟链路 ✅（100 帧零丢帧）/ M4 ✅（海康真机 200/20
 | SmartCamera 挂 Root | 解析真机 Root Category 补 pFeature（需轻量 XML 结构解析） |
 | 业务层 | AI_Result/AI_Score 真实生产者（front-gige 的 RegisterSpace 与 front-u3v 的 RegisterFile 均已留 `set_ai_result/set_ai_score` 钩子） |
 | GenApi 消费验证 | consumer-test C++ 经网关连 sim（复用 sim_server 手册模式） |
+
+## 九、过时条目索引（2026-11-26 文档对账）
+
+以下条目的结论已被后续实现推翻，阅读时以 `remaining-work-checklist.md` 为准：
+
+- `:39-47` U-A/U-B（U3V 异常路径、pylon 第三方 consumer）：U3V 全链路与 gadget
+  前端已在板端验收（500/500 帧、SuperSpeed、NI 矩阵 96/96），仅剩异常注入专项。
+- `:84-85` UQ7「DEI 事件通道投递未接」：已实现（EIRM/DEI 事件泵与
+  EVENT_REMOTE_DEVICE 全链路），见 OPEN-QUESTIONS UQ7 后续状态。
+- `:86` UQ9 与 `:91` RAW_IO「1 MiB TS 已验证可用」：实测 1 MiB 分段触发 EPIPE，
+  现用 512 KiB（见 OPEN-QUESTIONS UQ9 后续状态与 docs/40-performance/u3v-bandwidth-2026-11-04.md §8）。
+- `:99`「GenTL 可选特性 chunk 桩」：chunk 已实现（GigE/U3V 双端 + DSGetBufferChunkData）；
+  仍为桩的只有 Buffer Parts / Composite / flows。
+- `:116-135` GW-1.5~1.8 的 `vgige/` 四 crate 路径：2026-11-10 已重构为
+  `gateway/`（core/backends/cli）+ `virtual/`（gige/u3v/null）。
+- `:137-148` GW-2 中「双 producer 符号去冲突 / back-gige×front-u3v 编译期拒绝」：
+  已由 `cti-exports` feature 隔离解决，该组合可以链接；「对外 PACKETRESEND」
+  已实现（块缓存 + 能力位广播）；「SmartCamera 挂 Root」已实现（XmlMerger）。
+- `:72` M3-4 遗留「多 tap 并行块撞 DsCore 单 in-flight 槽 / per-channel 槽位」：
+  2026-11-26 已实现（`FrameSink` token 化，多通道可并发持有帧；见
+  docs/00-governance/remaining-work-checklist.md AD 节）。
+- `:85` UQ7 与虚拟 U3V 前端事件：2026-11-26 已实现下游相机事件 → EIRM
+  `EVENT_CMD` 转发（见 AD 节），不再只是"能力缺口"。

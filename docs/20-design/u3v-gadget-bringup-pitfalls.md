@@ -4,7 +4,15 @@ Orange Pi 5 Plus 上把 Linux 板子模拟成 USB3 Vision 相机的完整 bring-
 最终状态：**grab_u3v 500/500 帧 × 背靠背两连跑全绿**。本文按层归档全部坑位：
 症状 → 根因 → 修法。对应 Q&A 见 `docs/00-governance/OPEN-QUESTIONS.md` Q39 补充二~五。
 
-## 最终可用配置快照（复现基线）
+> **2026-11-26 对账说明**：本文是 2026-10-26/27 的调试实录。下方「最终可用配置
+> 快照」反映当日的 mainline 6.12 + 256 KiB 分段组合，**不是当前部署**：现网板端为
+> vendor 6.1.115 + `board/orangepi5plus/` 的 overlay（不设 dr_mode）+ 512 KiB
+> 分段，Type-C SuperSpeed 与 NI-IMAQdx 均已验收。当前配置以
+> `board/orangepi5plus/README.md` 与
+> `docs/30-validation/vgige-board-kernel-interop-2026-11-04.md` 为准；本文保留
+> 历史过程与坑位价值。
+
+## 最终可用配置快照（2026-10-27 历史基线，非当前部署）
 
 - 内核：`linux-image-current-rockchip-rk3588`（6.12.0-current，**不要用 vendor 6.1 BSP**）
 - overlay `rockchip-rk3588-custom-peripheral.dtbo`（target-path 用 **别名值** `/usb@fc000000`，

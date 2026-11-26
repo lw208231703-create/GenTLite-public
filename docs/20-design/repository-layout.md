@@ -5,7 +5,7 @@ The workspace is grouped by product role, not by language or build tool.
 ```text
 GenTLite-public/
 ├── gentl/                  # universal GenTL producer (.cti)
-│   ├── core/               # GenTL ABI, DsCore, PFNC, errors
+│   ├── core/               # ABI support (handles/errors/types), DsCore, PFNC, chunk
 │   ├── gvcp/               # GVCP wire/client/server + GigE registers
 │   ├── gige/               # GigE Vision producer
 │   ├── u3v/                # USB3 Vision producer
@@ -63,7 +63,8 @@ without creating a second protocol stack.
 
 | I want to... | Go to |
 |---|---|
-| change GenTL C ABI / buffer engine | `gentl/core/` |
+| change the buffer engine / handle-and-error ABI support | `gentl/core/` |
+| change the 64 exported GenTL C entry points | `gentl/gige/src/lib.rs`, `gentl/u3v/src/lib.rs` |
 | change GVCP or GigE producer | `gentl/gvcp/`, `gentl/gige/` |
 | change U3V producer | `gentl/u3v/` |
 | change the relay or camera backends | `gateway/core/`, `gateway/backends/` |

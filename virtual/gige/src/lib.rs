@@ -3,7 +3,7 @@
 //! `gentl_gvcp`'s [`DeviceHandler`] (discovery identity, register/memory
 //! dispatch) for [`GvcpServer`]; [`GvspSession`] is the [`FrameSession`]
 //! that re-emits relayed frames as GigE Vision 3.0 GVSP blocks (20-byte
-//! extended header, 40-byte leader body, 8-byte trailer), block_id from 1
+//! extended header, 36-byte leader body, 8-byte trailer), block_id from 1
 //! per channel open (R-259st), sliced to the virtual SCPS0 (§36.58
 //! total-size semantics). The virtual device claims GigE Vision 3.0 to
 //! match that wire form.
@@ -44,7 +44,7 @@ pub struct UpIdentity {
 /// up-facing IP/MAC/mask applied, and the network-shaped fields the
 /// virtual device owns synthesized:
 /// - `spec_version`: the virtual device emits the GigE Vision 3.0 extended
-///   GVSP form (20-byte header, 40-byte leader body), so it claims 3.0.
+///   GVSP form (20-byte header, 36-byte leader body), so it claims 3.0.
 /// - `device_mode`: big-endian + UTF-8 + transmitter. In 1.2 printed bit 0
 ///   is the endianess bit (1 = big-endian) and printed bits 24-31 are the
 ///   character-set index (1 = UTF-8); the same MSB stays the 2.x/3.0
@@ -499,7 +499,7 @@ fn send_packet_unavailable(
 }
 
 /// Emit one block: 3.0 20-byte EI=1 headers (§24.2), leader body in the
-/// 40-byte §25.2.1 layout from the canonical metadata, payload bytes
+/// 36-byte §25.2.1 layout from the canonical metadata, payload bytes
 /// verbatim, 8-byte §25.2.3 trailer body.
 fn send_block(
     socket: &UdpSocket,

@@ -173,7 +173,7 @@ NI 数据目录：
 
 - 关键不是“NI 只支持 1.2”，而是 **VERSION 声明必须与实际 GVSP 线格式一致**。
 - 虚拟 GigE 现在统一声明 GigE Vision 3.0，并发送 3.0 EI=1（20 B 头、
-  40 B leader）；NI-IMAQdx 26.8 实测 31 帧、`LostPacketCount=0`，MVS
+  36 B leader；2026-11-26 对账更正，旧稿写 40 B）；NI-IMAQdx 26.8 实测 31 帧、`LostPacketCount=0`，MVS
   同样正常。
 - `VGIGE_GVSP_3_0` 环境变量已移除；3.0 是默认。legacy 发送路径仅作为
   fallback 保留，不能与 3.0 身份混用。
@@ -371,4 +371,7 @@ cat /sys/class/udc/fc000000.usb/current_speed
 3. U3V 当前绑定 NI-IMAQdx；GenTL U3V 需要临时切 WinUSB。
 4. `gentl/u3v/src/discovery.rs` 的 associated-interface 修复和 3 个 Cargo.toml 的 zip/flate2 调整已提交。
 5. LD 如果仍显示三个重复设备，检查它实际加载的 `gentl_u3v.cti` 路径，不要使用旧副本。
-6. 需要 3.0 GVSP 时使用 `VGIGE_GVSP_3_0=1`；NI 必须使用默认 legacy。
+6. ~~需要 3.0 GVSP 时使用 `VGIGE_GVSP_3_0=1`；NI 必须使用默认 legacy。~~
+   （2026-11-26 对账：本段与本文 §3.3 的 2026-11-11 更正矛盾。`VGIGE_GVSP_3_0`
+   环境变量已移除，虚拟 GigE 恒用 GVSP 3.0 EI=1，NI-IMAQdx 26.8 与 MVS 均已复验；
+   旧 legacy 段落作废。）

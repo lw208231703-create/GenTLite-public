@@ -626,7 +626,7 @@ fn stream_channel_capability_and_config_are_virtualized() {
 
 /// Receive one block from the virtual wire and return (block_id,
 /// max_payload_packet_bytes, payload). Asserts the 3.0 wire form on the way:
-/// the relay must always emit EI=1 20-byte headers and the 40-byte §25.2.1
+/// the relay must always emit EI=1 20-byte headers and the 36-byte §25.2.1
 /// leader body, whatever header form the real camera used.
 fn recv_block(rx: &UdpSocket) -> (u64, usize, Vec<u8>) {
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -36,11 +36,14 @@ The producer inspects the XML only to resolve `PayloadSize` before
 devices serve their own First URL XML; U3V devices serve the manifest XML.
 Third-party consumers therefore see the camera's normal node tree.
 
-Optional GenTL calls currently not provided by both producers:
-`GCReadPortStacked` and `GCWritePortStacked`. `GCGetPortURLInfo` is
-implemented by the U3V producer and returns `NOT_IMPLEMENTED` from the
-GigE producer; use `GCGetPortURL` plus `GCReadPort` to fetch the device
-description.
+Both producers export all 64 GenTL 1.6 entry points. Optional features outside
+the implemented image-acquisition surface answer `GC_ERR_NOT_IMPLEMENTED`
+instead of being faked: `DSGetBufferPartInfo`, `DSAnnounceCompositeBuffer`,
+`DSGetNumFlows` and `DSGetFlowInfo` are such stubs, and `DSGetNumBufferParts`
+answers `GC_ERR_NO_DATA` per GenTL 1.6 §6.3.5.15 (single-part buffers). The
+stacked buffer-info queries, `GCReadPortStacked`/`GCWritePortStacked` and
+`GCGetPortURLInfo` are implemented; `GCGetPortURL` plus `GCReadPort` remains
+the portable way to fetch the device description.
 
 The Rust source is shared by Linux and Windows. Only the final artifact
 extension differs:

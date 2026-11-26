@@ -84,7 +84,7 @@ Windows 和 Linux 不是两套协议实现：Rust 源码共用，差异主要在
   频率时按 §36.59 生效，tick 频率为 0 时该寄存器无定义单位。
 - 虚拟 GigE 声称 GigE Vision 3.0（`VERSION=0x00030000`、
   `DEVICE_MODE=0x80000001`：big-endian + UTF-8 + transmitter），前端发送
-  3.0 EI=1 GVSP（20 B 头 / 40 B leader）。`VERSION`、discovery 版本和实际
+  3.0 EI=1 GVSP（20 B 头 / 36 B leader；旧稿写 40 B，Figure 25-2 为 36 B）。`VERSION`、discovery 版本和实际
   线格式一致；NI-IMAQdx 26.8 与 MVS 均已用 3.0 形式取流验证。
   （此前 `VERSION=0x00020002` + 1.2 legacy 包的版本/线格式不一致会让
   NI-IMAQdx 能打开设备但丢弃数据包，表现为 `GetImageData` 超时。）

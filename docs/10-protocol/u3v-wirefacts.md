@@ -392,8 +392,8 @@ Zadig 风格 INF 用自定义 DeviceInterfaceGUID，需 DeviceClasses 注册表�
   ACCESS_STATUS=NOACCESS（serial 字符串不开设备读不到，QoI，Q37）。
 - 打开：`set_auto_detach_kernel_driver(true)`——usbfs 无 WinUSB 式驱动
   独占，内核驱动占着接口时由 libusb 剥离、释放时重挂（尽力而为）。
-- claim：open 路径（IFOpenDevice）一次 claim 全部 EF/05 接口（含 event，
-  UQ7 未接消费）；`LibUsbDevice::drop` 逆序 release。
+- claim：open 路径（IFOpenDevice）一次 claim 全部 EF/05 接口（含 event 接口；
+  DEI 事件泵已于 2026-11-23 接线，UQ7 已关闭）；`LibUsbDevice::drop` 逆序 release。
 - 构建：`libusb1-sys` 链系统 libusb（无 vendored C 源码），构建期需
   libusb-1.0 开发包（pkg-config `libusb-1.0` + 头文件）；运行期
   rusb::devices()/open() 失败按"无设备/打不开"降级，永不致命。

@@ -93,11 +93,12 @@
 - **待确认**：远程设备端口在 GenApi XML 中的标准端口名。暂用 "Device"（多数 GigE producer 的惯例），未对照 SFNC GenTL 章节原文核实。
 - **临时处理**：返回 "Device"。
 
-## Q10. TL_INFO_PATHNAME 未实现
+## Q10. TL_INFO_PATHNAME 未实现 `[RESOLVED：2026-11-04 已实现（fb93f10）]`
 - **涉及**：gentl-gige lib.rs TLGetInfo（TL_INFO_CMD=6）
 - **规范出处**：GenTL 1.6 §6.3.2.2（"Full path including file name and extension of the library"）
 - **待确认**：需要用 GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS) + GetModuleFileNameW 取本 DLL 路径（windows-sys feature Win32_System_LibraryLoader），M1 未加该依赖。
 - **临时处理**：返回 GC_ERR_NOT_AVAILABLE。
+- **后续（2026-11-04 实现，2026-11-26 对账确认）**：Windows 用 `GetModuleFileNameW`、Linux 用 `dladdr` 取本库路径；两个 producer 的 `TL_INFO_PATHNAME` 均返回实际加载路径，不再返回 NOT_AVAILABLE。
 
 ## Q11. 发现机制的测试/广域网钩子与 ACCESS_STATUS 启发式
 - **涉及**：gentl-gige discovery.rs（GENTLITE_DISCOVERY_TARGETS 环境变量）、IFGetDeviceInfo ACCESS_STATUS
@@ -422,6 +423,10 @@ Basler 等其它 consumer 同样受益。
   无事件读取线程、EVENT_FEATURE_INVALIDATE/Event Port 投递未实现。R-28ch 是
   对"控制设备的宿主软件"的强制，与 GenTL 事件对象模型（gentl-core 事件队列
   目前只服务 DS 的 EVENT_NEW_BUFFER）接好后再开。
+- **后续（2026-11-23 实现，2026-11-26 对账确认）**：EIRM/DEI 事件泵已接线，
+  `GCRegisterEvent(EVENT_REMOTE_DEVICE)` 注册后 EventGetData/EventGetDataInfo/
+  EventFlush/EventKill 与注销后失效语义均有集成测试（GigE 与 U3V 双 producer）；
+  UQ7 的"未接投递"描述作废。
 
 ### UQ8. GenDC payload 模式未实现
 - **涉及**：stream.rs `start()`
@@ -436,11 +441,19 @@ Basler 等其它 consumer 同样受益。
   Windows"，非规范性文字，且其算式 4×64K+63K+1K=327680 与所述 326680 不符）
 - **决策**：只遵守规范性规则（SIRM alignment，0xA003 报错）。1 MiB 传输在
   现代 WinUSB 上可用；若真机出现传输失败，再按 1KB/64KB 粒度重编程并回本条。
+- **后续（2026-11-26 对账）**：实测 1 MiB 传输在 WinUSB/xHCI 上第一个分段即
+  halt bulk-IN（EPIPE），已改用 **512 KiB** 稳定值（`PAYLOAD_TRANSFER = 1<<19`；
+  见 docs/40-performance/u3v-bandwidth-2026-11-04.md §8、本文件 Q39 补充五）。
+  "1 MiB 可用"的旧结论作废；规范侧决策（只遵守 SIRM alignment/0xA003）不变。
 
-### UQ10. GenCP Stacked 命令（0x0806-0x0809）未接 GenTL v1.1 端口接口
+### UQ10. GenCP Stacked 命令（0x0806-0x0809）未接 GenTL v1.1 端口接口 `[RESOLVED：GenTL 侧 stacked 已实现]`
 - **涉及**：GCReadPortStacked/GCWritePortStacked 仍为桩
 - **规范出处**：GenCP §4.3.3 Table 7；GenTL.h v1.1
 - **现状**：Device Capability bit13 报告设备能力，producer 侧暂不实现。
+- **后续（2026-11-26 对账）**：两个 producer 的 `GCReadPortStacked`/
+  `GCWritePortStacked` 已实现（逐条调用 GCReadPort/GCWritePort；出错时经
+  `piNumEntries` 返回已完成条数，§6.3.6.8/§6.3.6.9），不再是桩。未使用的只是
+  GenCP 侧的 stacked 命令码（0x0806-0x0809），与本条 GenTL 端口接口无关。
 
 ### UQ11. STREAM_INFO_BUF_ALIGNMENT 的取值依据
 - **涉及**：DSGetInfo
@@ -686,12 +699,15 @@ Basler 等其它 consumer 同样受益。
 > 代码后的剩余发现。Table 36-1 全部地址、§19 状态码表、1.2 §14 命令字典
 > 逐项通过（见会话报告）；本条记录未修的偏差。
 
-### Q32-1. sim 的 NET_IF Capability 未声明 DHCP —— 偏离 Table 36-1 的强制要求 `[待用户裁定]`
+### Q32-1. sim 的 NET_IF Capability 未声明 DHCP —— 偏离 Table 36-1 的强制要求 `[RESOLVED 2026-11-26：已改 0x7]`
 - **规范出处**：3.0 Table 36-1（0x0010）："DHCP and LLA bits must be on"；1.2 §27.5 同
 - **现状**：sim 广告 persistent|LLA（0x5），DHCP 位（0x2）置 0；sim 不运行 DHCP 客户端
 - **两难**：声明未实现的能力会误导 consumer（设 DHCP 位无行为）；不声明违反 MUST
 - **倾向**：保持 0x5（诚实不声明），sim 作为测试台以"不撒谎"优先；真机不受此影响
   （producer 只读该寄存器）。用户可裁定改为 0x7。
+- **后续（2026-11-26 对账）**：已按 3.0 §4.3/§4.4 改为 DHCP 位恒 1：
+  `NET_IF_CAPABILITY` 读 **0x7**（persistent|DHCP|LLA），`NET_IF_CONFIGURATION`
+  中 LLA 恒置位（`gentl/simulator/src/regmap.rs`）。本条"DHCP 位=0"的现状描述作废。
 
 ### Q32-2. 3.0 在 GVCP Capability / Device Mode / SCPSx 增设 deprecated always-1 位 `[已修正/已记录]`
 - **规范出处**：3.0 §36.29 print bits 9/13/26/30 deprecated=1；§36.2 print bit 0 deprecated=1；

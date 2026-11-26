@@ -706,9 +706,9 @@ fn write_header(packet: &mut [u8], legacy: bool, packet_format: u8, block_id: u6
     }
 }
 
-/// Encode the image leader body in the configured form (1.2 §24 Fig 24-3
-/// 36-byte or 3.0 §25.2.1 40-byte), copy it after the header, and return
-/// the total datagram length.
+/// Encode the image leader body in the configured form (36 bytes in both:
+/// 1.2 §24 Fig 24-3 and 3.0 §25.2.1 Figure 25-2), copy it after the header,
+/// and return the total datagram length.
 fn write_leader_body(packet: &mut [u8], legacy: bool, leader: &ImageLeader) -> usize {
     let hlen = gvsp_header_len(legacy);
     if legacy {

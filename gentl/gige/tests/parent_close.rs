@@ -3,7 +3,7 @@
 
 #![allow(non_snake_case)]
 
-use std::ffi::{c_char, c_void, CString};
+use std::ffi::{c_char, CString};
 use std::net::Ipv4Addr;
 use std::ptr;
 use std::time::{Duration, Instant};

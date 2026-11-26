@@ -5,6 +5,12 @@
 > 测试复核见 §6.3）。
 > 纪律同主仓库：纯规范实现、0 警告、双平台编译、注释引规范、不猜。
 > 代码布局：`vgige/`（4 crate）——本文"linux-vgige"指网关整体。
+>
+> **2026-11-26 对账说明**：本文件主体是 2026-10-23 的设计台账。2026-11-10
+> 仓库重构后 crate 位于 `gateway/`（core/backends/cli）+ `virtual/`
+> （gige/u3v/null），`vgige/` 路径只存在于历史段落；§5 限制清单与 §8 矩阵中
+> 标注「2026-11-26 更新」的条目已不再成立。当前权威状态见
+> docs/00-governance/remaining-work-checklist.md。
 
 ## 1. 架构（Step 1 起：一个传输无关核心 + 前后端适配器）
 
@@ -95,7 +101,7 @@ next_block(timeout)}`（SIRM 编程 §5.4.1.2 + 内存汇块读取 `read_block_a
 
 - 对内自适应：逐包 EI 判别（3.0 §24.2 / 1.2 §24 Fig 24-1），重组
   stride 首包推断，gap 即弃块（v1 无 §16.7 重传调度）。
-- 对外恒 3.0：20B EI=1 头 + 40B §25.2.1 leader body（真机 leader 元数据
+- 对外恒 3.0：20B EI=1 头 + 36B §25.2.1 leader body（真机 leader 元数据
   重编码）+ payload 原字节 + 8B §25.2.3 trailer；block_id 自 1 递增
   （R-259st），包 id leader=0/payload 从 1/trailer=末+1（R-264st）。
 - 切片按虚拟 SCPS0（远程所写值，默认 1500 总包长 → 1452 payload；
@@ -109,12 +115,18 @@ next_block(timeout)}`（SIRM 编程 §5.4.1.2 + 内存汇块读取 `read_block_a
 2. **单通道**：仅虚拟通道 0；x>0 寄存器访问 → `INVALID_ADDRESS`。
 3. ~~zip XML 不支持~~ **已解决（2026-10-22 真机整改）**：zip 透明解压
    （§14.1.1 manifest 格式 1，GenCP §5.5.1.2），首 entry 即相机 XML。
-4. **无对外重传调度**：虚拟设备不 advertise packet_resend（已掩
+4. ~~**无对外重传调度**：虚拟设备不 advertise packet_resend（已掩
    GVCP_CAPABILITY 位，R-197ca）；PACKETRESEND_CMD 到虚拟侧被忽略
-   （请求方自行超时）。对内同样无重传（重组 gap 弃块）。
-5. **多根 Category QoI**：注入的 SmartCamera Category 未挂入真机 XML
+   （请求方自行超时）。对内同样无重传（重组 gap 弃块）。~~
+   **2026-11-26 更新：已实现。** 虚拟 GigE 前端实现 §16.7 PACKETRESEND
+   块缓存（8 块/256 MiB 上限）并广播能力位，板端 `/TEST_NETWORK` 由
+   91 Pass/5 FAIL 变为 96/0；对内重组仍无重传（gap 弃块）。
+5. ~~**多根 Category QoI**：注入的 SmartCamera Category 未挂入真机 XML
    的 Root pFeature 链（多数客户端按节点名/类别遍历可见；挂 Root
-   需改真机 XML 字符串结构，留 v2）。
+   需改真机 XML 字符串结构，留 v2）。~~
+   **2026-11-26 更新：已实现。** `XmlMerger::attach_to_root` 把注入的
+   SmartCamera Category 挂进 Root 的 pFeature 链（`gateway/core/src/xml.rs`）；
+   不挂链的节点在 NI/pylon 中不可见。
 6. **重组缓冲固定 16 MiB/帧 ×4**：超限帧丢弃并计数（`frames_dropped_too_small`，
    收流侧 Drop 时日志可见）；无增长路径。
 7. **未知 PFNC 格式转发为空 payload**（payload_bytes 不可算，
@@ -132,34 +144,45 @@ next_block(timeout)}`（SIRM 编程 §5.4.1.2 + 内存汇块读取 `read_block_a
 12. **back-u3v 真机未验收**（Step 2）：矩阵 "GigE 前端 ← U3V 相机" 格
     只有 fake GenCP 设备 e2e（vgige-cli/tests/gateway_u3v_e2e.rs），
     真机全流程待 U3V 相机插板（Q38 回填项）。
-13. **CLI 后端按编译特性二选一**（`--no-default-features --features
+13. ~~**CLI 后端按编译特性二选一**（`--no-default-features --features
     back-u3v`）：双 GenTL producer 同图链接符号冲突所致（Q38-7）；
-    集成测试不受影响（独立链接单元）。
+    集成测试不受影响（独立链接单元）。~~
+    **2026-11-26 更新：已解除。** 两个 producer 的 GenTL 导出由
+    `cti-exports` feature 隔离（vgige 依赖时 `default-features = false`），
+    6 种 back×front 组合均可链接；Q38-7 的"同图符号冲突"只适用于同时
+    开启 cti-exports 的情形。
 14. **U3V 侧仅标准 payload 模式**：GenDC container/flow 由
     `program_sirm` 干净拒绝（与 GenTL producer 同一语义）；未知 PFNC
     格式经 SI Required Payload Size 转发（§5.4.1.3）。
-15. **front-u3v 整机待验**（Step 3）：协议核心全链路可测（配对
+15. ~~**front-u3v 整机待验**（Step 3）：协议核心全链路可测（配对
     测试=真客户端 ↔ 设备状态机），gadget 物理层（configfs +
     FunctionFS）结构化但未在 Orange Pi dwc3 上 bring-up；运行前提：
-    libcomposite 加载、configfs 挂载、Type-C 口 dwc3 UDC（Q39）。
+    libcomposite 加载、configfs 挂载、Type-C 口 dwc3 UDC（Q39）。~~
+    **2026-11-26 更新：已在 Orange Pi 5 Plus 上整机验收**（dwc3/configfs/
+    FunctionFS 打通、Type-C SuperSpeed、`grab_u3v` 500/500 帧 ×2；见
+    docs/20-design/u3v-gadget-bringup-pitfalls.md 与 board/orangepi5plus/README.md）。
 16. **front-u3v 变高帧不转发**：设备按已编程几何出块、尾短补零
     （`--u3v-payload` 是帧大小契约；CR-86st 高度修正属主机侧语义）。
-17. **矩阵一格不可单体链接**："GigE 相机 → U3V 设备"需要
+17. ~~**矩阵一格不可单体链接**："GigE 相机 → U3V 设备"需要
     back-gige + front-u3v 同图——双 GenTL producer 符号冲突
     （Q38-7），编译期报错拒绝；v1 该格由 relay_e2e（真 back-gige +
-    front-gige）与 front-u3v 套件拼合覆盖。
+    front-gige）与 front-u3v 套件拼合覆盖。~~
+    **2026-11-26 更新：已可链接。** `cti-exports` feature 隔离后
+    back-gige×front-u3v 可构建（`gateway/cli/Cargo.toml` 的 features 注释；
+    `main.rs` 的 compile_error 只要求至少一个 back/front）。该组合仍未做
+    真机验收（remaining-work-checklist A7 仅模拟器通过）。
 
 ## 6. 验证记录
 
 ### 6.1 测试
 
-- `vgige/vgige-cli/tests/relay_e2e.rs`（双平台、无硬件，sim 扮演真机）：
+- `gateway/cli/tests/relay_e2e.rs`（双平台、无硬件，sim 扮演真机）：
   ① 读写透传 + 虚拟身份（IP/MAC/Capability 掩码/CCP 本地语义）
   ② 错误透传（0x8003/0x8004/0x8005/0x8006 双边一致）
   ③ 定制窗口（RO/WO/RW 语义 + 业务钩子）+ XML 拉取（含注入节点、
   真机节点保留、尾读零填充）+ §36.57 通道探测
   ④ 流中继：**sim 以 1.2 legacy 头发流** → 断言对外恒 3.0 式
-  （EI=1/20B 头/40B leader）、block_id 自 1 递增、按虚拟 SCPS0=348
+  （EI=1/20B 头/**36B** leader；旧稿写 40B，2026-11-26 按 Figure 25-2 更正）、block_id 自 1 递增、按虚拟 SCPS0=348
   切片（≤300B/packet）、payload 字节与 sim 图案一致、
   FrameCountRelayed 增长、R-586cd BUSY、关流级联（真机 SCP0=0 +
   接收 socket 静默：先冲刷 close 前在途数据包再监听——sim 每 1ms 出块，
@@ -260,7 +283,7 @@ Linux 网关 ←GigE→ 产线相机 192.168.1.96（千兆直连第二网口）�
 |---|---|---|
 | back-gige × front-gige | `default` | `vgige --up … --down <相机IP>` |
 | back-u3v × front-gige | `--no-default-features --features back-u3v,front-gige` | `--back u3v --down <bus:addr>` |
-| **back-gige × front-u3v** | ❌ **编译期拒绝**（双 GenTL producer 符号冲突，Q38-7；v2 候选=导出面移 wrapper crate） | — |
+| **back-gige × front-u3v** | ✅ 可构建（2026-11-26 更新：`cti-exports` feature 隔离；v1 时期的编译期拒绝已解除） | `--down <相机IP> --front u3v`（真机验收待 A7） |
 | back-u3v × front-u3v | `--no-default-features --features back-u3v,front-u3v` | U3V 真机闭环（Q38 回填） |
 | **back-null × front-gige** | `--no-default-features --features back-null,front-gige` | `--back null`（无相机演示） |
 | **back-null × front-u3v** | `--no-default-features --features back-null,front-u3v` | `--back null --front u3v --u3v-payload 1310720`（**gadget 整机演示形态**） |

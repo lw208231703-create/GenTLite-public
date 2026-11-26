@@ -2,12 +2,17 @@
 
 > 来源：`notes/GigE-Vision-Specification-3-0-00a.pdf`（AIA/A3）。所有多字节字段**网络字节序（big-endian）**（§15.3 R-137c）。
 > 本文件是 gentl-gvcp crate 与 simulator 的共同契约。任何不符以规范原文为准并回改此表。
+>
+> 2026-11-26 与规范原文（`notes/markdown/gige-vision-3.0.md`）对账修订：
+> flag ACK 值、DISCOVERY_ACK 载荷长度、WRITEREG_ACK 的 4 字节 SCD、WRITEMEM_CMD 布局、
+> GVSP 3.0 leader body 36B（padding 各 u16），并补 Pending Timeout(0x0958) 行。
+> 其余数值未变。
 
 ## 命令头（8 字节，§15.1）
 | 字节 | 字段 | 说明 |
 |---|---|---|
 | 0 | key | 固定 0x42 |
-| 1 | flag | ACKNOWLEDGE=0x80（lsb 编号 bit7=msb；规范图为 msb 先行编号、§15.1 示例字面写 0x01——两种编码真机均见使用，见 docs/00-governance/OPEN-QUESTIONS.md Q27），bit0-3 命令特定，其余保留 0 |
+| 1 | flag | ACKNOWLEDGE=0x01（§15.1 图例 "bit 0 (msb) on the left ... bit 7 (lsb) on the right"：印刷 bit7 即最低位，值 0x01；Q27 已裁定，实现为 `FLAG_ACK=0x01`），bit0-3（msb 侧）命令特定，其余保留 0 |
 | 2-3 | command | u16 BE，命令码 |
 | 4-5 | length | u16 BE，**载荷字节数（不含头）** |
 | 6-7 | req_id | u16 BE，应用生成，从 1 递增，不得为 0 |
@@ -51,7 +56,7 @@
 仅 8 字节头（flag 的 ACK bit 置位），无载荷。发送到 UDP 3956。
 
 ## DISCOVERY_ACK（§16.1.2，Figure 16-2）
-8 字节应答头 + 232 字节载荷。载荷字段（全部 BE，字符串区定长、可不以 NUL 结尾）：
+8 字节应答头 + **248** 字节载荷（Figure 16-2 字段合计；旧稿 232 是漏计 `user_defined_name` 16 字节的笔误）。载荷字段（全部 BE，字符串区定长、可不以 NUL 结尾）：
 - u16 spec_version_major, u16 spec_version_minor
 - u32 device_mode
 - u16 reserved + u16 device_MAC_high（MAC 前 2 字节）
@@ -69,7 +74,7 @@
 
 ## WRITEREG_CMD / ACK（§16.4）
 - CMD：头 + N×(u32 地址 + u32 值)，length = N×8
-- ACK：头，无载荷（length=0）
+- ACK（Figure 16-8 / R-174c）：status ≠ ACCESS_DENIED 时 = 8B 头 + 4B SCD（reserved u16=0 + index u16：成功 = 已写寄存器数，失败 = 出错寄存器 0 基索引）；ACCESS_DENIED 时仅 8B 头（length=0，R-138cd；旧稿「头，无载荷」只描述了 ACCESS_DENIED 分支）
 
 ## READMEM_CMD / ACK（§16.5）
 - CMD：头 + u32 address（32 位对齐）+ u16 reserved(=0) + u16 count（4 的倍数）
@@ -77,7 +82,7 @@
 - 仅当全部读出才算成功，否则 status≠0 且 length=0
 
 ## WRITEMEM_CMD / ACK（§16.6）
-- CMD：头 + u32 address + u32 reserved(=0) + data（长度 4 的倍数，见 length 字段）
+- CMD（Figure 16-11 / R-192c）：头 + u32 address（32 位对齐）+ data（长度 4 的倍数，见 length 字段）。**没有** reserved 字段——旧稿多写了一个 u32 reserved，已删。
 
 ## Bootstrap 寄存器（Table 36-1，接口#0）
 | 地址 | 名称 | 访问 | 长度 |
@@ -104,6 +109,7 @@
 | 0x0938 | Heartbeat Timeout（ms，默认 3000，最小 500） | R/W | 4 |
 | 0x093C / 0x0940 | Timestamp Tick Freq High/Low | R | 4+4 |
 | 0x0948 / 0x094C | Timestamp Value High/Low | R | 4+4 |
+| 0x0958 | Pending Timeout（ms；Table 36-1 强制实现、只读，R-472cd；PENDING_ACK 阈值见 R-210cd） | R | 4 |
 | 0x0A00 | CCP：bit31=EA 独占, bit30=CA 控制, bit29=CSE 切换, bit0-15=switchover key | R/W | 4 |
 | 0x0D00 | SCP0 流通道端口：**印刷 bit0=方向(RO)、bit12-15=NII、bit16-31=host_port；按 MSB-first 约定 = host_port 在低 16 位（裸端口即规范写法）**（§36.57，Q31） | R/W | 4 |
 | 0x0D04 | SCPS0 包大小：**印刷 bit0=fire_test_packet（=0x80000000）、bit1=do_not_fragment（=0x40000000）、bit16-31=packet_size=含 IP(20)+UDP(8)+GVSP(20) 头的总包长（按 MSB-first 约定 = 低 16 位）**（§36.58，Q31）；规范算例 0xC000219C=F+DF+8604，1.2 出厂默认 0x40000240=DF+576；payload 数据长 = packet_size−48 | R/W | 4 |
@@ -138,7 +144,7 @@
 - 块内 payload 包 packet_id32 从 1 顺序递增（R-264st）；最后包可小于 SCPSx 指定的 payload 数据长（packet_size−48）
 
 ## Image payload 类型（payload_type=0x0001，§25.2）
-- **Leader**（packet_id=0，20B 头 + 36B）：payload_type_specific u16（field_id[15:12] | field_count[11:8] | reserved[7:0]，渐进扫描恒 0）+ payload_type u16(0x0001) + timestamp u64 + pixel_format u32（PFNC 值）+ size_x u32 + size_y u32 + offset_x u32 + offset_y u32 + padding_x u32 + padding_y u32
+- **Leader**（packet_id=0，20B 头 + **36B body**，Figure 25-2 / CR-288s）：field_id(4b)+field_count(4b)+reserved(8b) 合占 u16（渐进扫描恒 0）+ payload_type u16(0x0001) + timestamp u64 + pixel_format u32（PFNC 值）+ size_x u32 + size_y u32 + offset_x u32 + offset_y u32 + **padding_x u16 + padding_y u16**（旧稿把两个 padding 写成 u32，合计会算成 40B，已按规范图更正）
 - **Payload**（packet_format=3）：20B 头 + 纯数据；除最后一包外数据长必须等于 SCPSx 指定的 payload 数据长（= packet_size − 48，R-263st）；包大小不得超过 SCPSx（R-573st）；接收方不得拷贝超出 PayloadSize 的填充（R-568sr）
 - **Trailer**（packet_format=2，20B 头 + 8B）：reserved u16 + payload_type u16(0x0001) + size_y u32（本块实际行数）
 - leader/trailer 单包 ≤576 字节（含 IP/UDP/GVSP 头），除非 SCCFGx 的 large_leader_trailer_enable

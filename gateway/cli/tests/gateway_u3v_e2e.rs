@@ -612,7 +612,7 @@ fn stream_relay_u3v_camera_to_gige_client() {
 }
 
 /// Receive one block from the virtual wire and return (block_id, payload);
-/// asserts the 3.0 wire form (EI=1 headers, 40-byte leader body) and the
+/// asserts the 3.0 wire form (EI=1 headers, 36-byte leader body) and the
 /// 300-byte virtual-SCPS slicing. Same shape as relay_e2e's helper.
 fn recv_block(rx: &UdpSocket) -> (u64, Vec<u8>) {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -628,7 +628,7 @@ fn recv_block(rx: &UdpSocket) -> (u64, Vec<u8>) {
             PACKET_FORMAT_DATA_LEADER => {
                 let body = &buf[hlen..n];
                 let leader = if hdr.extended_id {
-                    assert_eq!(body.len(), IMAGE_LEADER_BODY_LEN, "3.0 40-byte leader body");
+                    assert_eq!(body.len(), IMAGE_LEADER_BODY_LEN, "3.0 36-byte leader body");
                     ImageLeader::decode(body).expect("leader body decodes")
                 } else {
                     assert_eq!(

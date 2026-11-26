@@ -15,12 +15,17 @@ Written in Rust, C ABI, MIT licensed.
 
 - GigE Vision (GVCP/GVSP, spec 3.0 / 1.2) and USB3 Vision (GenCP 1.3.1,
   spec 1.2) transport implementations
-- GenTL 1.6 C ABI — 64 entry points; zero-copy GVSP acquisition and
-  segmented U3V reassembly
-- Recognition of all 273 PFNC pixel formats and payload-size computation for
-  the non-planar subset (planar formats need GenTL Buffer Parts, which are not
-  implemented); camera parameters via the camera's own GenICam XML; Chunk is
-  implemented, Buffer Parts / Composite / Buffer-Stacks report NOT_IMPLEMENTED
+- GenTL 1.6 C ABI — all 64 entry points exported; GVSP payload datagrams are
+  copied straight into the announced consumer buffer (no intermediate frame
+  staging; that per-datagram copy is the only user-space copy) and U3V blocks
+  are reassembled from segmented transfers
+- Recognition of all 273 PFNC pixel formats with payload-size computation
+  (planar formats are sized as one whole-buffer payload; their multi-part
+  GenTL presentation needs Buffer Parts, which are not implemented); camera
+  parameters via the camera's own GenICam XML; Chunk is implemented, while
+  Buffer Parts / Composite buffers / flows report NOT_IMPLEMENTED (stacked
+  buffer-info queries are implemented; `DSGetNumBufferParts` answers NO_DATA
+  per GenTL 1.6 §6.3.5.15)
 
 ## Quick start
 
@@ -64,8 +69,11 @@ and dependency direction.
 
 - USB3 Vision: verified with a Hikrobot U3V camera; on Windows, switch the
   device to WinUSB with Zadig first.
-- GigE Vision: 1000/1000 frames verified with a project camera; Linux/aarch64
-  completed a 380,000-frame, 2-hour-10-minute soak test.
+- GigE Vision: 1000/1000 frames verified with a project camera at a fixed
+  1500-byte packet size and the camera's 1.2 eight-byte GVSP header (its
+  firmware blocks §11.7 fire_test_packet negotiation, see
+  `docs/00-governance/OPEN-QUESTIONS.md` Q35); Linux/aarch64 completed a
+  380,000-frame, 2-hour-10-minute soak test (same fixed-packet-size setup).
 - `vgige` virtual camera: Orange Pi 5 Plus / vendor kernel `6.1.115-rk35xx`,
   U3V and GigE fronts running `1280×1024 Mono16` at 30 fps.
   - NI-IMAQdx: 100/100 frames on both U3V and GigE.

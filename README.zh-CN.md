@@ -14,11 +14,15 @@ Rust 实现，C ABI，MIT 许可。
 
 - GigE Vision（GVCP/GVSP，规范 3.0 / 1.2）与 USB3 Vision（GenCP
   1.3.1，规范 1.2）传输层实现
-- GenTL 1.6 C ABI——64 个导出函数；GVSP 零拷贝采集，U3V 分段重组采集
-- 可识别全部 273 个 PFNC 像素格式并计算非 planar 子集的 payload 尺寸
-  （planar 格式需要 GenTL Buffer Parts，当前未实现）；相机参数经相机自带
-  GenICam XML 调节；Chunk 已实现，Buffer Parts / Composite / Buffer-Stacks
-  返回 NOT_IMPLEMENTED
+- GenTL 1.6 C ABI——全部 64 个入口均已导出；GVSP payload 数据报直接拷贝进
+  consumer 预注册缓冲（无中间帧暂存，用户态只有这一处逐包拷贝），U3V 按分段
+  transfer 重组
+- 可识别全部 273 个 PFNC 像素格式并计算 payload 尺寸（planar 格式按整块
+  payload 计算总长；其多 part 的 GenTL 呈现需要 Buffer Parts，当前未实现）；
+  相机参数经相机自带 GenICam XML 调节；Chunk 已实现，Buffer Parts /
+  Composite buffer / flows 返回 NOT_IMPLEMENTED（stacked buffer-info 查询与
+  buffer segment 查询已实现；`DSGetNumBufferParts` 按 GenTL 1.6 §6.3.5.15
+  返回 NO_DATA）
 
 ## 快速开始
 
@@ -57,8 +61,10 @@ GenTL producer 的源码由 Linux 和 Windows 共用，区别只在最终打包�
 ## 状态
 
 - USB3 Vision：海康 U3V 相机已验证；Windows 使用前需用 Zadig 切换为 WinUSB。
-- GigE Vision：自研相机已完成 1000/1000 帧验证，Linux/aarch64 已完成
-  380,000 帧、2 小时 10 分长稳测试。
+- GigE Vision：自研相机在固定 1500 字节包长 + 相机 1.2 式 8 字节 GVSP 头下
+  完成 1000/1000 帧验证（该相机固件会阻塞 §11.7 fire_test_packet 协商，见
+  `docs/00-governance/OPEN-QUESTIONS.md` Q35）；Linux/aarch64 同样在固定包长下
+  完成 380,000 帧、2 小时 10 分长稳测试。
 - `vgige` 虚拟相机：Orange Pi 5 Plus / vendor 内核 `6.1.115-rk35xx`，
   U3V 与 GigE 均运行 `1280×1024 Mono16`、30 fps。
   - NI-IMAQdx：U3V / GigE 均 100/100 帧。
