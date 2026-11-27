@@ -35,7 +35,7 @@ pub enum GentlError {
     NotAvailable,
     InvalidAddress,
     BufferTooSmall,
-    /// GenTL 1.6 搂6.3.5.13: the transport chunk tags in the buffer do not
+    /// GenTL 1.6 §6.3.5.13: the transport chunk tags in the buffer do not
     /// decode (a tag ran past the block start or a length is unaligned).
     ParsingChunkData(&'static str),
     OutOfMemory,

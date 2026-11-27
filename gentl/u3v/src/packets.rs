@@ -274,7 +274,7 @@ pub fn decode_ack(
     Ok(ccd)
 }
 
-/// PENDING_ACK SCD (GenCP 1.3.1 搂4.4.5 Table 12): a reserved u16 and the
+/// PENDING_ACK SCD (GenCP 1.3.1 §4.4.5 Table 12): a reserved u16 and the
 /// temporary timeout in ms, valid for the command with this request id and
 /// counting from the moment the PendingAck is sent.
 pub fn decode_pending_ack_timeout(transfer: &[u8]) -> Option<u16> {

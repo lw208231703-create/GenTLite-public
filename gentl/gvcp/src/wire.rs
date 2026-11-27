@@ -154,7 +154,7 @@ impl AckHeader {
     }
 }
 
-/// PENDING_ACK payload (spec 搂16.8.1 Figure 16-15): a reserved u16
+/// PENDING_ACK payload (spec §16.8.1 Figure 16-15): a reserved u16
 /// followed by `time_to_completion` in milliseconds.
 pub fn decode_pending_ack_timeout(payload: &[u8]) -> Option<u16> {
     if payload.len() < 4 {

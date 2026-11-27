@@ -1953,7 +1953,7 @@ pub extern "C" fn DSGetBufferChunkData(
             gentl_core::chunk::parse_chunks(block, true)
         };
         let Ok(chunks) = chunks else {
-            // 搂6.3.5.13 Returns: a chunk buffer that does not parse maps to
+            // §6.3.5.13 Returns: a chunk buffer that does not parse maps to
             // GC_ERR_PARSING_CHUNK_DATA (not the generic I/O error).
             return fail(GentlError::ParsingChunkData("malformed GigE chunk tags"));
         };
@@ -1963,7 +1963,7 @@ pub extern "C" fn DSGetBufferChunkData(
         }
         let capacity = unsafe { *pi_num_chunks };
         if capacity < chunks.len() {
-            // 搂6.3.5.13 Returns: too few entries is GC_ERR_BUFFER_TOO_SMALL,
+            // §6.3.5.13 Returns: too few entries is GC_ERR_BUFFER_TOO_SMALL,
             // and *piNumChunks reports the number the consumer must provide.
             unsafe { *pi_num_chunks = chunks.len() };
             return GC_ERR_BUFFER_TOO_SMALL;
@@ -2261,7 +2261,7 @@ pub extern "C" fn EventGetInfo(
 pub extern "C" fn EventFlush(h_event: EventHandle) -> GCError {
     guard(|| {
     // Device events (EVENT_REMOTE_DEVICE) have their own module type; the
-    // handle is still a valid event object for flush/kill (搂6.3.7.4/6.3.7.5).
+    // handle is still a valid event object for flush/kill (§6.3.7.4/6.3.7.5).
     if let Ok(ev) = unsafe { from_handle::<DeviceEventModule>(h_event) } {
         if ev.queue.is_dead() {
             return fail(GentlError::InvalidHandle);
@@ -2560,10 +2560,10 @@ pub extern "C" fn EventGetDataInfo(
                     info_value(pi_type, INFO_DATATYPE_UINT64, p_out_buffer, pi_out_size, &v)
                 }
                 EVENT_DATA_VALUE => {
-                    // GenTL 1.6 搂4.2: the value buffer starts at address 0
+                    // GenTL 1.6 §4.2: the value buffer starts at address 0
                     // of the remote device's event port. For GigE Vision that
                     // is the entire EVENTDATA packet without the 8-byte GVCP
-                    // header (搂17.3 Figure 17-1): the 24-byte standardized
+                    // header (§17.3 Figure 17-1): the 24-byte standardized
                     // header (event_size/event_id/...) followed by the data,
                     // not just the payload.
                     *pi_type = INFO_DATATYPE_BUFFER;

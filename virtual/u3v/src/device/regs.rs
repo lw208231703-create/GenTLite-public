@@ -2,7 +2,7 @@
 //! GenCP reads/writes; the manifest table points at the injected XML
 //! blob; the custom window (vgige-core slot constants) is served
 //! locally; every other address forwards to the downstream camera via
-//! [`vgige_core::CameraBack`] 鈥?the gateway resells the real camera's
+//! [`vgige_core::CameraBack`] —the gateway resells the real camera's
 //! register space, and the served GenICam XML's vendor nodes carry
 //! exactly these addresses, so the host's GenApi traffic lands on the
 //! camera 1:1.
@@ -133,7 +133,7 @@ impl RegisterFile {
     }
 
     /// Forward one downstream camera event to the host's EIRM event
-    /// endpoint (搂4.1.3.3): only while Event Enable (EI Control bit 0) is
+    /// endpoint (§4.1.3.3): only while Event Enable (EI Control bit 0) is
     /// set, and bounded by the advertised Maximum Event Transfer Length
     /// (24-byte prefix+CCD+SCD header included). Oversized events are
     /// dropped, never truncated silently. `Ok(false)` = not sent.
@@ -157,14 +157,14 @@ impl RegisterFile {
         Ok(true)
     }
 
-    /// Watch Stream Enable transitions (搂5.4.1.2): fired from the
+    /// Watch Stream Enable transitions (§5.4.1.2): fired from the
     /// SI_CONTROL write path.
     pub fn set_stream_watcher(&self, watcher: impl Fn(bool) + Send + 'static) {
         *self.watcher.lock().expect("watcher lock") = Some(Box::new(watcher));
     }
 
     /// Emitter-fatal recovery: the stream transport died mid-block (e.g.
-    /// a host-side pipe reset surfaces as EPIPE) 鈥?clear Stream Enable in
+    /// a host-side pipe reset surfaces as EPIPE) —clear Stream Enable in
     /// the SIRM register and internally, and fire the watcher's close, so
     /// the next host enable is a real 0鈫? transition with the relay and
     /// emitter restarted. Without this a crashed consumer leaves the
@@ -203,7 +203,7 @@ impl RegisterFile {
             != 0
     }
 
-    /// The host-programmed transfer geometry (搂5.2.1.3): transfer size,
+    /// The host-programmed transfer geometry (§5.2.1.3): transfer size,
     /// count, final1, final2. All zeros until the host programs.
     pub fn programmed_geometry(&self) -> (u32, u32, u32, u32) {
         let r = self.region(SIRM_BASE).expect("sirm region");
@@ -310,7 +310,7 @@ impl RegisterFile {
         self.regions.iter().rev().find(|r| addr >= r.base)
     }
 
-    /// One register/block read; Err is a GenCP status code (搂4.3.2.1).
+    /// One register/block read; Err is a GenCP status code (§4.3.2.1).
     pub fn read(&self, addr: u64, buf: &mut [u8]) -> Result<(), u16> {
         let len = buf.len() as u64;
         let end = addr
@@ -673,7 +673,7 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
         config.xml.len() <= XML_MAX,
         "XML blob exceeds the device cap"
     );
-    // ABRM (GenCP 搂5.4 / U3V Table 4-6) at the spec offsets, including
+    // ABRM (GenCP §5.4 / U3V Table 4-6) at the spec offsets, including
     // the capability-gated slots as zeros (FAMILY_NAME / MANUFACTURER_INFO
     // / USER_DEFINED_NAME bits are unset in Device Capability). Strings
     // are 64-byte slots; the host reads fixed addresses, so the layout
@@ -699,8 +699,8 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
     abrm.extend_from_slice(&SBRM_BASE.to_le_bytes());
     abrm.resize(0x400, 0);
 
-    // Manifest (GenCP 搂5.5): one entry, raw XML, pointing at the blob.
-    // R-50cd: the entry MUST carry a valid SHA1 of the file 鈥?at
+    // Manifest (GenCP §5.5): one entry, raw XML, pointing at the blob.
+    // R-50cd: the entry MUST carry a valid SHA1 of the file —at
     // offset 24, 20 bytes (field layout matches the host-side parser in
     // gentl-u3v packets::decode_manifest_entry, bytes 24..44 were
     // previously zero = deviation, fixed 2026-10-28).
@@ -738,7 +738,7 @@ fn build_regions(config: &DeviceConfig) -> Vec<Region> {
 
     // Demo acquisition block (SFNC level): AcquisitionStart/Stop pokes
     // plus the frame PayloadSize the host sizes its buffers against.
-    // The U3V stream itself is gated by SIRM Stream Enable (搂5.4.1.2);
+    // The U3V stream itself is gated by SIRM Stream Enable (§5.4.1.2);
     // these are served locally so a camera-less (null-back) device still
     // completes a standard GenApi acquisition sequence. Real backends
     // advertise their own acquisition nodes, forwarded 1:1.
@@ -891,7 +891,7 @@ mod tests {
     }
 
     /// Spec offsets are exact: the serial string sits at ABRM 0x144
-    /// (fixed-address reads 鈥?a padded-build mistake must fail HERE,
+    /// (fixed-address reads —a padded-build mistake must fail HERE,
     /// not get masked by a permissive test back).
     #[test]
     fn abrm_strings_at_spec_offsets() {
@@ -1330,7 +1330,7 @@ mod tests {
     }
 
     /// Downstream events only reach the host while Event Enable is set, are
-    /// encoded as 搂4.1.3.3 EVENT_CMD packets with id/timestamp/data intact,
+    /// encoded as §4.1.3.3 EVENT_CMD packets with id/timestamp/data intact,
     /// and oversized events are dropped instead of truncated (review
     /// 2026-11-26, U3V event forwarding).
     #[test]
@@ -1351,7 +1351,7 @@ mod tests {
         assert_eq!(rf.send_device_event(&event), Ok(false));
         assert!(sent.lock().unwrap().is_empty());
 
-        // Host enables the EIRM event interface (搂4.1.3.3.1: EI Control bit 0).
+        // Host enables the EIRM event interface (§4.1.3.3.1: EI Control bit 0).
         rf.write(crate::EIRM_BASE, &1u32.to_le_bytes()).unwrap();
         assert_eq!(rf.send_device_event(&event), Ok(true));
         {

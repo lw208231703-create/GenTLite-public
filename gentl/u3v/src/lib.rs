@@ -193,7 +193,7 @@ const URL_INFO_SCHEME: UrlInfoCmd = 9;
 const URL_SCHEME_LOCAL: i32 = 0;
 
 // SEGMENT_INFO_CMD_LIST (GenTL.h): one virtual segment per contiguous
-// announced buffer (搂6.3.5.21/搂6.3.5.22).
+// announced buffer (§6.3.5.21/§6.3.5.22).
 const SEGMENT_INFO_BASE: SegmentInfoCmd = 0;
 const SEGMENT_INFO_SIZE: SegmentInfoCmd = 1;
 const SEGMENT_INFO_IS_INCOMPLETE: SegmentInfoCmd = 2;
@@ -2032,7 +2032,7 @@ pub extern "C" fn DSGetBufferChunkData(
             gentl_core::chunk::parse_chunks(block, false)
         };
         let Ok(chunks) = chunks else {
-            // 搂6.3.5.13 Returns: an unparseable chunk buffer maps to
+            // §6.3.5.13 Returns: an unparseable chunk buffer maps to
             // GC_ERR_PARSING_CHUNK_DATA.
             return fail(GentlError::ParsingChunkData("malformed U3V chunk tags"));
         };
@@ -2043,7 +2043,7 @@ pub extern "C" fn DSGetBufferChunkData(
         }
         let capacity = unsafe { *pi_num_chunks };
         if capacity < chunks.len() {
-            // 搂6.3.5.13 Returns: too few entries is GC_ERR_BUFFER_TOO_SMALL.
+            // §6.3.5.13 Returns: too few entries is GC_ERR_BUFFER_TOO_SMALL.
             unsafe { *pi_num_chunks = chunks.len() };
             return GC_ERR_BUFFER_TOO_SMALL;
         }
@@ -2663,7 +2663,7 @@ pub extern "C" fn EventGetDataInfo(
             None => return fail(GentlError::InvalidParameter("event data")),
         };
         match i_info_cmd {
-            // EVENT_DATA_ID: GenTL 1.6 搂6.4.6.1 requires the event id as a
+            // EVENT_DATA_ID: GenTL 1.6 §6.4.6.1 requires the event id as a
             // hexadecimal STRING with an even number of digits (no `0x`).
             0 => {
                 let id = gentl_core::event_id_hex(event.event_id);
@@ -2675,7 +2675,7 @@ pub extern "C" fn EventGetDataInfo(
                 unsafe { info_value(pi_type, INFO_DATATYPE_UINT64, p_out_buffer, pi_out_size, &v) }
             }
             // EVENT_DATA_VALUE: the remote event port mapping. U3V 1.2
-            // 搂4.1.3.3.2: the mapping starts immediately after the CCD, so
+            // §4.1.3.3.2: the mapping starts immediately after the CCD, so
             // the prefix (4 bytes) and CCD (8 bytes) are not part of it.
             1 => {
                 if i_in_size < packets::CMD_OVERHEAD {

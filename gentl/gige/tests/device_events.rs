@@ -177,7 +177,7 @@ fn gige_device_events_flow_over_the_message_channel() {
     assert_eq!(r, GC_ERR_SUCCESS);
     assert_eq!(
         id_text, "07",
-        "EVENT_DATA_ID: hex with an even number of digits (GenTL 1.6 搂6.4.6.1)"
+        "EVENT_DATA_ID: hex with an even number of digits (GenTL 1.6 §6.4.6.1)"
     );
 
     // -- EVENTDATA_CMD with a payload --------------------------------------
@@ -216,7 +216,7 @@ fn gige_device_events_flow_over_the_message_channel() {
     assert_eq!(payload_len, 28, "24-byte header + 4 data bytes");
     assert_eq!(&payload[..payload_len], &raw[..n]);
 
-    // -- Flush / Kill work on a device-event handle (搂6.3.7.4/6.3.7.5) ----
+    // -- Flush / Kill work on a device-event handle (§6.3.7.4/6.3.7.5) ----
     assert_eq!(EventFlush(ev), GC_ERR_SUCCESS);
     assert_eq!(EventKill(ev), GC_ERR_SUCCESS);
     let mut n = raw.len();

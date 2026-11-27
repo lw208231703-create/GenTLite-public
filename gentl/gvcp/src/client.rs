@@ -13,7 +13,7 @@ use crate::wire::*;
 const DEFAULT_ACK_TIMEOUT: Duration = Duration::from_millis(500);
 const DEFAULT_RETRIES: u32 = 2;
 /// Added to a PENDING_ACK `time_to_completion` before re-arming the socket
-/// read timeout (搂16.8.1: "plus some margin to allow for network latencies").
+/// read timeout (§16.8.1: "plus some margin to allow for network latencies").
 const PENDING_ACK_NETWORK_MARGIN: Duration = Duration::from_millis(250);
 
 /// Transaction client bound to one local UDP socket. Not thread-bound:

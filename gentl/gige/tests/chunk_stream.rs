@@ -263,7 +263,7 @@ fn extended_chunk_frames_expose_the_genTL_chunk_layout() {
         CHUNK_DATA_LEN as u32
     );
 
-    // -- Too-small array: GC_ERR_BUFFER_TOO_SMALL (搂6.3.5.13 Returns) -----
+    // -- Too-small array: GC_ERR_BUFFER_TOO_SMALL (§6.3.5.13 Returns) -----
     let mut capacity = 0usize;
     let mut one = [SingleChunkData {
         chunk_id: 0,

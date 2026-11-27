@@ -66,7 +66,7 @@ pub const EVENT_FEATURE_INVALIDATE: EventType = 2;
 pub const EVENT_FEATURE_CHANGE: EventType = 3;
 pub const EVENT_REMOTE_DEVICE: EventType = 4;
 
-/// `EVENT_DATA_ID` string form (GenTL 1.6 搂6.4.6.1, EVENT_REMOTE_DEVICE):
+/// `EVENT_DATA_ID` string form (GenTL 1.6 §6.4.6.1, EVENT_REMOTE_DEVICE):
 /// the event id number in hexadecimal with an even number of digits and
 /// without the leading `0x`, e.g. event id 7 -> `"07"`, 0xCF51 -> `"CF51"`.
 pub fn event_id_hex(event_id: u16) -> String {
