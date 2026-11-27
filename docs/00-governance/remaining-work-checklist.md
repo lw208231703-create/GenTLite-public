@@ -377,3 +377,44 @@ XML 声明的 64 位整值、8 字节写落址）；`virtual/u3v` 1 项同规则
 边界（仍在，非静默）：深层 `pAddress` 链（指向非常量 SwissKnife/自定义节点）
 或 XML 未声明的 64 位地址仍按 4 字节兜底，可能错值——真机出现此类寄存器时
 以 XML 声明修正；不涉及转换的同端序组合（GigE→GigE、Little→Little）不受影响。
+
+## AF. 2026-11-27 真机发现：WRITEMEM 写路径兼容性回归与修复
+
+**触发**：本机接入自研 GV 1.2 相机（LeadingOE LD-V4-SW1280170590S-UC-G，192.168.1.97，序列号 262051），
+用 GenTLite producer 做首次真机采集时，任何 `GCWritePort` 4 字节寄存器写都失败：
+`-1010: I/O error: WRITEMEM_ACK index 0 != written bytes 4`（AcquisitionStart/ROI/曝光全写不进）。
+
+**根因（两侧）**：
+- 相机（GV 1.2）的 `WRITEMEM` 是坏的：ACK `status=0` 成功但数据不落地，SCD 为 `0x8012_0000`
+  （reserved 非 0、index=0，违反 1.2 §14.6.2 Figure 14-12）；`address+data`、`address+reserved+data`、
+  8 字节数据三种布局均复现。同机 WRITEREG/READREG 正常且 ACK 合规。**相机固件问题**，已记入
+  `PENDING.md` P1.5。
+- SDK 侧（本仓库回归）：AC 批次把"整寄存器写"从 WRITEREG 改为 WRITEMEM 批处理，且只在
+  `GEV_STATUS_NOT_IMPLEMENTED` 时回退。该相机回的是"成功"，不触发回退；`client.write_mem` 的
+  index 校验又按规范报错 → 4 字节写全部失败。**这是本仓库需要修的兼容性回归**。
+
+**修复**（`gentl/gige/src/device.rs`）：
+- 单个 4 字节寄存器固定走 **WRITEREG**（WRITEREG 是寄存器命令；WRITEMEM 是可选的内存命令）。
+- 多寄存器连续块仍优先 WRITEMEM 批处理；**任何** WRITEMEM 失败（含上述畸形 ACK 的 Io 错误，
+  不再限定 NOT_IMPLEMENTED）都回退为逐寄存器 WRITEREG（新增 `write_registers` helper）。
+- 同步更新 `docs/10-protocol/gvcp-wirefacts.md` 的 WRITEMEM/ACK 实测兼容性说明。
+
+**测试**：
+- 新增 `single_register_uses_writereg_not_writemem`：4 字节写只发 WRITEREG，不发 WRITEMEM。
+- 新增 `writemem_malformed_ack_falls_back_to_writereg`：测试内置裸 UDP GVCP responder 精确模拟
+  该相机（WRITEREG 正常；WRITEMEM 回 `success + SCD 0x8012_0000` 且不写），验证 8 字节写仍通过
+  回退落地。
+- 更新 `write_at_the_top_of_the_address_space_is_not_lost`（单寄存器现为 WRITEREG）。
+- `gentl-gige` 53 项通过；`cargo test --workspace` = **353 passed / 0 failed**；
+  `cargo check --workspace --all-targets` = **0 warning**。
+
+**真机复验（修复后重建 release DLL）**：
+- 4 字节写 ExposureTime 10000→11000：`ret=0`、读回 11000，再还原 10000；
+- 8 字节写 Width+Height：`ret=0`（WRITEMEM 畸形 ACK → WRITEREG 回退生效），读回 (1280,1024) 不变；
+- 端到端采集 1280×1024：3/3 帧完整、0 incomplete；
+- 交叉验证（NI-IMAQdx 26.8 / MVS / 自写 raw GVCP/GVSP）三方一致；详见
+  `target/tmp/camtest/ANALYSIS.md`（本机临时产物，未入库）。
+
+**相机侧遗留（非本仓库，已记录）**：WRITEMEM 假成功；小包（SCPS≤2000）高帧率发送丢包
+（Mono8 90fps、SCPS=1400 时每帧仅交付约 24% payload 包；SCPS=8000 全交付）。使用方应将
+`GevSCPSPacketSize` 设为 4000–8000。

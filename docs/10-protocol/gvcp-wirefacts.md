@@ -83,6 +83,9 @@
 
 ## WRITEMEM_CMD / ACK（§16.6）
 - CMD（Figure 16-11 / R-192c）：头 + u32 address（32 位对齐）+ data（长度 4 的倍数，见 length 字段）。**没有** reserved 字段——旧稿多写了一个 u32 reserved，已删。
+- ACK（Figure 16-12 / R-193c/R-194cd）：头 + reserved u16（恒 0）+ index u16（成功 = 已写字节数；失败 = 出错数据下标 0..535）。
+- **实测兼容性（2026-11-27，LeadingOE LD-V4-SW1280170590S-UC-G，GV 1.2）**：该相机对 WRITEMEM 一律回 `status=0` 成功 + SCD `0x8012_0000`（reserved 非 0、index=0），且**数据不落地**（写 ExposureTime=34000 后读回仍 33000；`address+data`、`address+reserved+data`、8 字节数据三种布局均无效）。同机 WRITEREG/READREG 正常且 ACK 合规（`00000001`）。属相机固件缺陷（WRITEMEM 支持是可选的，正确做法是回 `NOT_IMPLEMENTED`），已记录到 `PENDING.md` P1.5。
+- **producer 策略（2026-11-27 修正）**：单个 4 字节寄存器固定走 **WRITEREG**（寄存器命令；WRITEMEM 是可选的内存命令）；多寄存器连续块仍优先 WRITEMEM，但**任何** WRITEMEM 失败（含上述"成功但 index 不符"的畸形 ACK）都回退逐寄存器 WRITEREG。这样坏 WRITEMEM 的 1.2 设备仍可完整写入，见 `docs/00-governance/remaining-work-checklist.md` AF 节。
 
 ## Bootstrap 寄存器（Table 36-1，接口#0）
 | 地址 | 名称 | 访问 | 长度 |

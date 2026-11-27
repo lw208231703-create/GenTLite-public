@@ -84,3 +84,17 @@
 2. 第三方宿主加载 `target/release/gentl_u3v.cti`；Aravis 原生 GigE 验证则运行 `null → front-gige`。
 3. 记录：能否列出设备 → 打开时报错原文 → GenApi 树能否展开 → 采 50 帧结果。
 4. 失败一律附**原文报错**，区分"枚举层没看到"（驱动/发现）与"看到但拒绝"（描述符/XML）。
+
+## 2026-11-27 自研 GV 1.2 相机（LeadingOE LD-V4-SW1280170590S-UC-G，192.168.1.97）
+
+| 项 | 结果 |
+|---|---|
+| 相机标识 | GV 1.2（Version 0x00010002），序列号 262051，MAC 00:30:53:9B:DB:74，XML 153,449 B（local zip） |
+| GenTLite producer | 枚举/打开/XML/收流正常；Mono12 1280×1024 与 Mono8 1280×1024 均 3/3 帧完整（SCPS=8000，0 incomplete） |
+| NI-IMAQdx 26.8（CameraValidator） | 枚举/属性（223 项，2 项写测试失败）/网络（max packet 8000）通过；采集矩阵 Mono12 32/32 通过，Mono8 23/32 通过（失败均为小包丢包） |
+| MVS SDK | 枚举同一设备并抓取 3 帧 1280×1024 Mono8 |
+| raw GVCP/GVSP（自写裸 UDP） | 8000 包长下 leader+165 payload+trailer 完整；像素图样与 SDK/MVS 一致（亮像素 IoU 0.94） |
+| 已知问题（相机侧） | WRITEMEM 假成功（ACK `0x8012_0000` 且不写）；小包（SCPS≤2000）高帧率发送丢包，建议 4000–8000 |
+| 已知问题（本仓库） | 4 字节 GCWritePort 曾因 WRITEMEM 批处理失败（已修复：单寄存器 WRITEREG + 任意 WRITEMEM 失败回退；见 checklist AF） |
+
+详细证据与临时脚本：`target/tmp/camtest/ANALYSIS.md`（本机产物，未入库）。

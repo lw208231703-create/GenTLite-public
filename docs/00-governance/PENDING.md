@@ -62,6 +62,9 @@
 ### P1.5. 自研相机固件整改跟踪（非本仓库）
 - 未整改：~~SCPx 位布局（#1）、SCPSx 位布局（#2）~~（Q31 更正：非违规，已撤销）；广播发现应答（#4，仍成立）
 - 已整改：GVSP 帧结构（1.2 式，合规）、PayloadSize 端序（#5）
+- **2026-11-27 新增未整改（LeadingOE LD-V4-SW1280170590S-UC-G，192.168.1.97，GV 1.2）**：
+  - **WRITEMEM 假成功**：ACK status=0、SCD `0x8012_0000`（reserved 非 0、index=0），数据不落地；三种 SCD 布局均复现。WRITEREG/READREG 正常。建议固件实现真正写入 + 正确 ACK，或回 `NOT_IMPLEMENTED`。producer 已按"4 字节走 WRITEREG + 任意 WRITEMEM 失败回退"规避。
+  - **小包高帧率丢失**：Mono8 90fps 时 `SCPS=1400` 每帧只交付约 230/961 个 payload 包，`SCPS=8000` 为 165/165；NI-IMAQdx 在 2000 字节包同样大量丢包。UDP 栈计数无接收错误，丢包发生在到主机协议栈之前。建议使用方将 `GevSCPSPacketSize` 设为 4000–8000（NI 测试上限 8000）。
 - 整改路径选型：保持 1.2（我方补 Q28-3a）或升 3.0（receiver 零改动）
 
 ### P2. 三品牌兼容性矩阵（README M3 条目）

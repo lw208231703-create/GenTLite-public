@@ -293,11 +293,11 @@ impl ControlChannel for GevDevice {
         Ok(())
     }
 
-    /// Arbitrary address/length write. Runs of whole 4-byte registers go out
-    /// as WRITEMEM batches (§16.6, one command instead of N) and fall back
-    /// to per-register WRITEREG when the device answers NOT_IMPLEMENTED;
-    /// partial edges are read-modify-write (GenTL 1.6 §6.3.6.6 sanctions
-    /// RMW for alignment adaptation).
+    /// Arbitrary address/length write. A lone 4-byte register goes out as
+    /// WRITEREG; runs of several whole registers go out as WRITEMEM batches
+    /// (§16.6, one command instead of N) and fall back to per-register
+    /// WRITEREG on *any* WRITEMEM failure. Partial edges are read-modify-write
+    /// (GenTL 1.6 §6.3.6.6 sanctions RMW for alignment adaptation).
     fn write_mem(&self, addr: u64, buf: &[u8]) -> GentlResult<()> {
         if buf.is_empty() {
             return Ok(());
@@ -331,25 +331,26 @@ fn write_aligned_registers(client: &GvcpClient, start: u64, buf: &[u8]) -> Gentl
         pos += n as u64;
     }
 
-    // Whole registers: one WRITEMEM per batch, per-register WRITEREG when
-    // the device does not implement WRITEMEM.
+    // Whole registers. A single register uses WRITEREG: it is the register
+    // command, while WRITEMEM is optional and a device may acknowledge it
+    // with a malformed/zero index and silently drop the data (observed on a
+    // real GVCP 1.2 LeadingOE camera: status 0, SCD 0x8012_0000, readback
+    // unchanged). Multi-register runs keep the WRITEMEM batch and fall back
+    // to WRITEREG on any failure, including that malformed-ACK case.
     let whole_end = end & !3;
     while pos < whole_end {
         let run_end = whole_end.min(pos + WRITEMEM_CHUNK as u64).max(pos + 4);
         let from = base(pos);
         let run = &buf[from..base(run_end)];
         let addr = u32::try_from(pos).map_err(|_| GentlError::InvalidAddress)?;
-        match client.write_mem(addr, run) {
-            Ok(()) => {}
-            Err(GentlError::GevStatus(s))
-                if s == gentl_gvcp::wire::GEV_STATUS_NOT_IMPLEMENTED =>
-            {
-                for (i, word) in run.chunks_exact(4).enumerate() {
-                    let value = u32::from_be_bytes(word.try_into().expect("4-byte word"));
-                    client.write_reg(addr + (i as u32) * 4, value)?;
-                }
+        if run.len() == 4 {
+            let value = u32::from_be_bytes(run.try_into().expect("4-byte word"));
+            client.write_reg(addr, value)?;
+        } else {
+            match client.write_mem(addr, run) {
+                Ok(()) => {}
+                Err(_) => write_registers(client, addr, run)?,
             }
-            Err(e) => return Err(e),
         }
         pos = run_end;
     }
@@ -360,6 +361,15 @@ fn write_aligned_registers(client: &GvcpClient, start: u64, buf: &[u8]) -> Gentl
         let n = usize::try_from(end - pos).map_err(|_| GentlError::InvalidAddress)?;
         rmw_register(client, reg, (pos - reg) as usize, &buf[base(pos)..])?;
         debug_assert_eq!(n, buf.len() - base(pos));
+    }
+    Ok(())
+}
+
+/// Per-register WRITEREG fallback for a run of whole 32-bit registers.
+fn write_registers(client: &GvcpClient, addr: u32, run: &[u8]) -> GentlResult<()> {
+    for (i, word) in run.chunks_exact(4).enumerate() {
+        let value = u32::from_be_bytes(word.try_into().expect("4-byte word"));
+        client.write_reg(addr + (i as u32) * 4, value)?;
     }
     Ok(())
 }
@@ -460,6 +470,26 @@ mod tests {
         server.stop();
     }
 
+    /// A lone 4-byte register is WRITEREG, never WRITEMEM: the latter is an
+    /// optional memory command and some GVCP 1.2 devices mishandle it.
+    #[test]
+    fn single_register_uses_writereg_not_writemem() {
+        let handler = Recording::default();
+        let (server, client) = with_client(handler.clone());
+
+        write_aligned_registers(&client, 0x2000, &[0xDE, 0xAD, 0xBE, 0xEF]).unwrap();
+
+        assert_eq!(
+            handler.writes.lock().unwrap().as_slice(),
+            &[(0x2000, 0xDEAD_BEEF)]
+        );
+        assert!(
+            handler.mem_writes.lock().unwrap().is_empty(),
+            "single register must not use WRITEMEM"
+        );
+        server.stop();
+    }
+
     /// A device that answers NOT_IMPLEMENTED to WRITEMEM still gets every
     /// register written through WRITEREG (§19 status-driven fallback).
     #[test]
@@ -478,6 +508,102 @@ mod tests {
         );
         assert!(handler.mem_writes.lock().unwrap().is_empty());
         server.stop();
+    }
+
+    /// Real-machine regression (2026-11-27, LeadingOE LD-V4 GVCP 1.2):
+    /// WRITEMEM is acknowledged with status 0 but index 0 and the data is
+    /// dropped (ACK SCD 0x8012_0000), so `client.write_mem` errors with an Io
+    /// (not a GEV status). Any multi-register write must still fall back to
+    /// per-register WRITEREG instead of propagating that error.
+    #[test]
+    fn writemem_malformed_ack_falls_back_to_writereg() {
+        let mut responder = MalformedWritememResponder::start();
+        let client = GvcpClient::connect(Ipv4Addr::LOCALHOST, responder.port).unwrap();
+
+        write_aligned_registers(&client, 0x2000, &[1, 2, 3, 4, 5, 6, 7, 8]).unwrap();
+        responder.stop();
+
+        assert_eq!(
+            responder.writes.lock().unwrap().as_slice(),
+            &[(0x2000, 0x0102_0304), (0x2004, 0x0506_0708)],
+            "both registers must be written through WRITEREG"
+        );
+    }
+
+    /// Minimal GVCP responder emulating the real camera's broken WRITEMEM:
+    /// WRITEREG works; WRITEMEM answers success with SCD 0x8012_0000 and
+    /// performs no write.
+    struct MalformedWritememResponder {
+        port: u16,
+        writes: Arc<Mutex<Vec<(u32, u32)>>>,
+        stop: Arc<AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl MalformedWritememResponder {
+        fn start() -> Self {
+            use std::sync::atomic::Ordering;
+            use std::time::Duration;
+
+            let sock = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+            sock.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+            let port = sock.local_addr().unwrap().port();
+            let writes = Arc::new(Mutex::new(Vec::new()));
+            let stop = Arc::new(AtomicBool::new(false));
+            let thread_writes = Arc::clone(&writes);
+            let thread_stop = Arc::clone(&stop);
+            let thread = std::thread::spawn(move || {
+                let mut buf = [0u8; 2048];
+                while !thread_stop.load(Ordering::Relaxed) {
+                    let Ok((n, peer)) = sock.recv_from(&mut buf) else {
+                        continue;
+                    };
+                    if n < 8 {
+                        continue;
+                    }
+                    let cmd = u16::from_be_bytes([buf[2], buf[3]]);
+                    let req_id = u16::from_be_bytes([buf[6], buf[7]]);
+                    let (status, ack, payload): (u16, u16, Vec<u8>) = match cmd {
+                        // WRITEREG: the real device answers correctly.
+                        0x0082 if n >= 16 => {
+                            let addr = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let value = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
+                            thread_writes.lock().unwrap().push((addr, value));
+                            (0, 0x0083, vec![0, 0, 0, 1])
+                        }
+                        // WRITEMEM: success ACK with the real device's SCD.
+                        0x0086 => (0, 0x0087, vec![0x80, 0x12, 0x00, 0x00]),
+                        _ => (0x8001, cmd | 0x0001, Vec::new()),
+                    };
+                    let mut reply = Vec::with_capacity(8 + payload.len());
+                    reply.extend_from_slice(&status.to_be_bytes());
+                    reply.extend_from_slice(&ack.to_be_bytes());
+                    reply.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+                    reply.extend_from_slice(&req_id.to_be_bytes());
+                    reply.extend_from_slice(&payload);
+                    let _ = sock.send_to(&reply, peer);
+                }
+            });
+            Self {
+                port,
+                writes,
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        fn stop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
+    }
+
+    impl Drop for MalformedWritememResponder {
+        fn drop(&mut self) {
+            self.stop();
+        }
     }
 
     /// Partial edge registers are read-modify-write (GenTL 1.6 §6.3.6.6).
@@ -502,7 +628,8 @@ mod tests {
 
     /// A write ending exactly at 2^32 (the last 32-bit register) must not
     /// overflow the address arithmetic: before the fix the release build
-    /// wrapped `end` to 0 and silently skipped the write.
+    /// wrapped `end` to 0 and silently skipped the write. A lone register is
+    /// now WRITEREG rather than WRITEMEM, same as for every single-word write.
     #[test]
     fn write_at_the_top_of_the_address_space_is_not_lost() {
         let handler = Recording::default();
@@ -511,9 +638,10 @@ mod tests {
         write_aligned_registers(&client, u64::from(u32::MAX) - 3, &[9, 8, 7, 6]).unwrap();
 
         assert_eq!(
-            handler.mem_writes.lock().unwrap().as_slice(),
-            &[(u32::MAX - 3, vec![9, 8, 7, 6])]
+            handler.writes.lock().unwrap().as_slice(),
+            &[(u32::MAX - 3, 0x0908_0706)]
         );
+        assert!(handler.mem_writes.lock().unwrap().is_empty());
         server.stop();
     }
 }
